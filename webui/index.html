@@ -60,7 +60,23 @@
 				height: 14px;
 				pointer-events: none;
 			}
+			/* Hide the tone/preset chip injected by server.cpp (block5).
+			   The chip's fetch-interceptor (block4) still applies the
+			   server's default preset because window.__easyaiTone is
+			   forced to 'default' just below. The tools chip
+			   (__easyaiToolsHost) and the model pill stay visible. */
+			#__easyaiToneHost {
+				display: none !important;
+			}
 		</style>
+		<script>
+			/* Pin the tone to 'default' so the fetch-interceptor in
+			   server.cpp (block4) applies the server's launched preset.
+			   Overrides any stale localStorage value left by a prior
+			   selection. Must run BEFORE block4 reads window.__easyaiTone. */
+			try { localStorage.removeItem('easyai-tone'); } catch (e) {}
+			window.__easyaiTone = 'default';
+		</script>
 		<script>
 			(function () {
 				const SVG_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>';
