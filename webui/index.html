@@ -26,7 +26,119 @@
 				overflow: visible !important;
 				max-height: none !important;
 			}
+			/* easyai sidebar one-click delete X button */
+			button[data-easyai-conv-id] {
+				position: relative !important;
+				padding-right: 32px !important;
+			}
+			.easyai-del-btn {
+				position: absolute;
+				right: 4px;
+				top: 50%;
+				transform: translateY(-50%);
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				width: 22px;
+				height: 22px;
+				border-radius: 6px;
+				background: transparent;
+				border: none;
+				color: rgb(156, 163, 175);
+				cursor: pointer;
+				transition: color 120ms ease, background-color 120ms ease;
+				padding: 0;
+				z-index: 2;
+				opacity: 1;
+			}
+			.easyai-del-btn:hover {
+				color: rgb(239, 68, 68);
+				background-color: rgba(239, 68, 68, 0.14);
+			}
+			.easyai-del-btn svg {
+				width: 14px;
+				height: 14px;
+				pointer-events: none;
+			}
 		</style>
+		<script>
+			(function () {
+				const SVG_X = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>';
+
+				function makeDel(convId) {
+					const el = document.createElement('span');
+					el.setAttribute('role', 'button');
+					el.setAttribute('tabindex', '0');
+					el.className = 'easyai-del-btn';
+					el.title = 'Delete conversation';
+					el.setAttribute('aria-label', 'Delete conversation');
+					el.innerHTML = SVG_X;
+					const handler = function (ev) {
+						ev.preventDefault();
+						ev.stopPropagation();
+						const store = globalThis.__easyaiConvStore;
+						if (!store || typeof store.deleteConversation !== 'function') {
+							console.warn('[easyai] conversation store not ready');
+							return;
+						}
+						try {
+							store.deleteConversation(convId, { deleteWithForks: false });
+						} catch (e) {
+							console.error('[easyai] delete failed', e);
+						}
+					};
+					el.addEventListener('click', handler);
+					el.addEventListener('pointerdown', function (ev) { ev.stopPropagation(); });
+					el.addEventListener('mousedown', function (ev) { ev.stopPropagation(); });
+					el.addEventListener('keydown', function (ev) {
+						if (ev.key === 'Enter' || ev.key === ' ') handler(ev);
+					});
+					return el;
+				}
+
+				function decorate(btn) {
+					if (!(btn instanceof HTMLElement)) return;
+					if (btn.dataset.easyaiDecorated === '1') return;
+					const id = btn.dataset.easyaiConvId;
+					if (!id) return;
+					btn.dataset.easyaiDecorated = '1';
+					btn.appendChild(makeDel(id));
+				}
+
+				function scan(root) {
+					if (!root || root.nodeType !== 1) return;
+					if (root.matches && root.matches('button[data-easyai-conv-id]')) decorate(root);
+					if (root.querySelectorAll) {
+						root.querySelectorAll('button[data-easyai-conv-id]').forEach(decorate);
+					}
+				}
+
+				function init() {
+					scan(document.body);
+					const obs = new MutationObserver(function (muts) {
+						for (const m of muts) {
+							if (m.type === 'childList') {
+								for (const n of m.addedNodes) scan(n);
+							} else if (m.type === 'attributes' && m.attributeName === 'data-easyai-conv-id') {
+								decorate(m.target);
+							}
+						}
+					});
+					obs.observe(document.body, {
+						childList: true,
+						subtree: true,
+						attributes: true,
+						attributeFilter: ['data-easyai-conv-id']
+					});
+				}
+
+				if (document.readyState === 'loading') {
+					document.addEventListener('DOMContentLoaded', init);
+				} else {
+					init();
+				}
+			})();
+		</script>
 	</head>
 	<body data-sveltekit-preload-data="hover">
 		<div style="display: contents">
