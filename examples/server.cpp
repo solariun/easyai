@@ -3305,6 +3305,9 @@ static bool require_auth(const ServerCtx & ctx, const httplib::Request & req,
         "                                 MTP: 6. Default 16 when --spec-type is set,\n"
         "                                 unused when --spec-type=none. INI key:\n"
         "                                 [ENGINE] spec_draft_n_max.\n"
+        "      --draft-model <path>     GGUF path for the draft model (draft-simple /\n"
+        "                                 draft-eagle3). Must share vocabulary with the\n"
+        "                                 target. INI key: [ENGINE] spec_draft_model.\n"
         "\nChat template / reasoning (llama-server compat):\n"
         "      --chat-template-file <p> Override the GGUF's embedded chat template\n"
         "                                 with a Jinja file on disk (e.g. qwen3-\n"
@@ -3488,6 +3491,7 @@ struct ServerArgs {
     // refuse to load or run autoregressive anyway.
     std::string spec_type;             // empty → leave Engine default ("none")
     int         spec_draft_n_max = 0;  // 0 → leave Engine default (16)
+    std::string spec_draft_model;      // GGUF path for draft-simple / eagle3
 
     // Chat-template override (--chat-template-file). Empty = use the
     // template embedded in the GGUF. Mirrors llama-server's flag of the
@@ -3748,6 +3752,7 @@ static const std::vector<FlagDef> & kFlags() {
         { {"--override-kv"},       "ENGINE", "override_kv",    "override_kv",    true,  SET_LIST_APPEND(&ServerArgs::kv_overrides) },
         { {"--spec-type"},         "ENGINE", "spec_type",      "spec_type",      true,  SET_STR(&ServerArgs::spec_type) },
         { {"--spec-draft-n-max"},  "ENGINE", "spec_draft_n_max","spec_draft_n_max",true, SET_INT(&ServerArgs::spec_draft_n_max) },
+        { {"--draft-model"},       "ENGINE", "spec_draft_model","spec_draft_model",true, SET_STR(&ServerArgs::spec_draft_model) },
         // --chat-template-file / --reasoning-format: mirror llama-server's
         // flags. Both take effect at Engine::load() time. INI keys are the
         // snake_case forms under [ENGINE].
@@ -4124,8 +4129,9 @@ static std::string build_builtin_system_prompt(const ServerArgs & args) {
         if (rag_on) {
             s += "  - memory: search first for STABLE facts (vocab "
                  "appended below); save only DURABLE info, one "
-                 "comprehensive entry per topic — see the tool's own "
-                 "description for the trust/verify policy.\n";
+                 "comprehensive entry per topic. REPLY MUST END WITH "
+                 "`Sources:` block citing memory titles when you use "
+                 "retrieved content (see Cite sources rule below).\n";
         }
         if (fs_on) {
             s += "  - fs: sandbox + check_path before any file work. "
@@ -6316,8 +6322,9 @@ int main(int argc, char ** argv) {
     if (!args.cache_type_v.empty()) ctx->engine.cache_type_v(args.cache_type_v);
     if (args.no_kv_offload)  ctx->engine.no_kv_offload(true);
     if (args.kv_unified)     ctx->engine.kv_unified(true);
-    if (!args.spec_type.empty())   ctx->engine.spec_type(args.spec_type);
-    if (args.spec_draft_n_max > 0) ctx->engine.spec_draft_n_max(args.spec_draft_n_max);
+    if (!args.spec_type.empty())         ctx->engine.spec_type(args.spec_type);
+    if (args.spec_draft_n_max > 0)     ctx->engine.spec_draft_n_max(args.spec_draft_n_max);
+    if (!args.spec_draft_model.empty()) ctx->engine.spec_draft_model(args.spec_draft_model);
     if (!args.chat_template_file.empty()) ctx->engine.chat_template_file(args.chat_template_file);
     if (!args.reasoning_format.empty()) {
         ctx->engine.reasoning_format(args.reasoning_format);

@@ -1309,7 +1309,10 @@ ToolHandler make_search_handler(std::shared_ptr<RagStore> store) {
               << " (page " << (page + 1) << " of " << total_pages << ").\n";
         }
         o << "Use rag_load with up to " << kMaxLoadAtOnce
-          << " of these titles for full content.\n";
+          << " of these titles for full content.\n"
+          << "\n[CITE: if you use any of these results in your reply, "
+             "end with a Sources: block citing memory: \"<title>\" "
+             "per entry used.]\n";
         return ToolResult::ok(o.str());
     };
 }
@@ -1381,6 +1384,9 @@ ToolHandler make_load_handler(std::shared_ptr<RagStore> store) {
             o << body;
             if (!body.empty() && body.back() != '\n') o << '\n';
         }
+        o << "\n[CITE: if you use loaded content in your reply, end "
+             "with a Sources: block citing memory: \"<title>\" per "
+             "entry used.]\n";
         return ToolResult::ok(o.str());
     };
 }
@@ -1723,7 +1729,14 @@ Tool make_rag_tool(std::string root_dir) {
             "\n"
             "  5. Reusable procedures → save with keyword \"skill\". "
             "Search keywords=[\"skill\", ...] before working a "
-            "procedure out from scratch."
+            "procedure out from scratch.\n"
+            "\n"
+            "CITATION (INVIOLABLE): after ANY memory search or load "
+            "this turn that returns content you use in your reply, "
+            "your reply MUST end with a `Sources:` block citing the "
+            "memory title(s) as `memory: \"<title>\"`. This applies "
+            "even when no web tools were used — memory retrieval is "
+            "an external lookup."
         )
         .param("action",      "string",
                "\"save\", \"append\", \"search\", \"load\", \"list\", "
@@ -1874,7 +1887,11 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
     out.push_back(Tool::builder("memory_search")
         .describe(
             "Find memories by keyword. Returns ranked matches "
-            "tagged `[matched N/M]`.")
+            "tagged `[matched N/M]`.\n"
+            "\n"
+            "CITATION: if you use retrieved content in your reply, "
+            "it MUST end with a `Sources:` block citing "
+            "`memory: \"<title>\"` per entry.")
         .param("keywords",    "array",
                "1..24 strings. keywords[0] is required (every hit "
                "carries it); the rest rank.", true)
@@ -1887,7 +1904,11 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
 
     out.push_back(Tool::builder("memory_load")
         .describe(
-            "Read the full content of 1..4 memories by exact title.")
+            "Read the full content of 1..4 memories by exact title.\n"
+            "\n"
+            "CITATION: if you use loaded content in your reply, "
+            "it MUST end with a `Sources:` block citing "
+            "`memory: \"<title>\"` per entry.")
         .param("titles", "array",
                "1..4 exact titles.", true)
         .handle(h_load)

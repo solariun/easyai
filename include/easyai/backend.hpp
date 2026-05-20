@@ -100,6 +100,10 @@ public:
         bool        no_kv_offload  = false;
         bool        kv_unified     = false;
         std::vector<std::string> kv_overrides;
+        // Speculative decoding
+        std::string spec_type;
+        std::string spec_draft_model;
+        int         spec_draft_n_max = 0;
     };
 
     explicit LocalBackend(Config c);

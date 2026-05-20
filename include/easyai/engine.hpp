@@ -225,6 +225,10 @@ class Engine {
     // Max draft tokens per speculation step. 0 = disabled, ≥1 enables (with a
     // sensible per-type ceiling enforced by llama.cpp). Typical for MTP: 6.
     Engine & spec_draft_n_max(int n);
+    // Path to a standalone GGUF draft model for draft-simple / draft-eagle3.
+    // The draft model must share the same vocabulary as the target.
+    // Ignored when spec_type is none, draft-mtp, or ngram-*.
+    Engine & spec_draft_model(const std::string & path);
 
     // ---------------- compute / memory knobs --------------------------------
     // Flash attention — auto, on, off.  Default 'auto' lets llama.cpp decide

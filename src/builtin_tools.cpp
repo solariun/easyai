@@ -1539,16 +1539,20 @@ ToolResult web_handle_fetch(const ToolCall & c) {
     }
     std::string slice = processed.substr(start, (size_t) limit);
     const size_t remaining = processed.size() - start - slice.size();
+    static const char * const kFetchCiteHint =
+        "\n\n[CITE: your reply MUST end with a Sources: block "
+        "listing this URL.]";
     if (remaining > 0) {
         std::ostringstream oss;
         oss << slice
             << "\n\n[truncated: " << remaining
             << " more bytes; pass start="
             << (start + slice.size())
-            << " to continue]";
+            << " to continue]"
+            << kFetchCiteHint;
         return ToolResult::ok(oss.str());
     }
-    return ToolResult::ok(slice);
+    return ToolResult::ok(slice + kFetchCiteHint);
 #endif
 }
 

@@ -261,6 +261,11 @@
 ; Default 16. Ignored when spec_type = none.
 ;spec_draft_n_max = 6
 
+; Path to a separate GGUF draft model for draft-simple / draft-eagle3.
+; The draft model must share the same vocabulary as the main model.
+; Ignored when spec_type is none, draft-mtp, or ngram-*.
+;spec_draft_model =
+
 ; ---------- chat template / reasoning (llama-server compat) ----------
 
 ; Override the GGUF's embedded chat template with a Jinja file

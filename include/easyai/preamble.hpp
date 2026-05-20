@@ -89,10 +89,11 @@ std::string build(const Options & opt);
 //   * inline emitters (build_builtin_system_prompt, cli's prefix) just
 //     append it where their other sections live.
 //
-// Models — especially Qwen3.x reasoning fine-tunes — were ignoring the
-// previous, milder phrasing. The text below restates the rule, gives a
-// pre-send checklist, and frames omission as a turn failure rather
-// than a style preference.
+// Third revision — Qwen3-coder-next and Gemma4 comply with the second
+// revision, but Qwen3.6-class reasoning fine-tunes still drop the
+// Sources block after a long <think> trace. This revision enumerates
+// every triggering tool by exact call name, adds a POST-REASONING
+// CHECKPOINT, and shows the memory citation format in the example.
 std::string cite_sources_block();
 
 }  // namespace easyai::preamble

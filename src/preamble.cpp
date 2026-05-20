@@ -83,44 +83,61 @@ std::string build(const Options & opt) {
 }
 
 std::string cite_sources_block() {
-    // Strengthened text. The previous wording ("INVIOLABLE", brief
-    // checklist) was being ignored by Qwen3.6-class fine-tunes that
-    // produced long reasoning traces and then dropped the Sources
-    // block at the bottom. Key changes:
-    //   * names the failure mode explicitly ("the turn is INVALID")
-    //   * adds a numbered pre-send checklist the model can recite
-    //   * lists the tool families that count, not just web_*, so
-    //     RAG / memory retrieval / fetch_url / browse all trip it
-    //   * tells the model what to do when it catches itself mid-
-    //     reply ("STOP and append" — no apology, no justification)
+    // Strengthened text — third revision. The second revision fixed
+    // Qwen3-coder-next and Gemma4 but Qwen3.6-class reasoning
+    // fine-tunes still drop the Sources block after a long <think>
+    // trace. Changes in this revision:
+    //   * enumerates EVERY triggering tool by exact call name — no
+    //     ambiguity about whether memory retrieval counts
+    //   * adds a POST-REASONING CHECKPOINT that explicitly tells
+    //     models with a thinking phase to re-verify after </think>
+    //   * repeats the rule in imperative-negative form ("a reply
+    //     that used X without Sources is INCOMPLETE") which lands
+    //     better on instruction-tuned reasoning models
     return
         "# CITE SOURCES — MANDATORY, NON-NEGOTIABLE\n"
-        "If you used ANY external lookup this turn (web_search, "
-        "web_fetch, browse, fetch_url, RAG / memory retrieval, "
-        "document search, ANY tool that returned content from "
-        "outside your weights), your reply is INVALID without a "
-        "`Sources:` block at the very end. Skipping it is a failure "
-        "mode, NOT a stylistic choice. This rule applies regardless "
-        "of model family, regardless of the user's tone, regardless "
-        "of whether the user explicitly asked for sources — it is a "
-        "HARD POSTCONDITION of your turn, on par with closing every "
-        "open code fence.\n"
+        "If you used ANY external lookup this turn, your reply is "
+        "INVALID without a `Sources:` block at the very end.\n"
+        "\n"
+        "TRIGGERING TOOLS (if you called ANY of these, Sources is "
+        "required):\n"
+        "  - web_search, web_fetch, web(action=\"search\"), "
+        "web(action=\"fetch\")\n"
+        "  - browse, fetch_url\n"
+        "  - memory(action=\"search\"), memory(action=\"load\"), "
+        "memory_search, memory_load\n"
+        "  - ANY other tool that returned content from outside your "
+        "weights (document search, RAG retrieval, file reads of "
+        "fetched content)\n"
+        "\n"
+        "Skipping Sources is a FAILURE MODE, not a stylistic choice. "
+        "This rule applies regardless of model family, regardless of "
+        "the user's tone, regardless of whether the user explicitly "
+        "asked for sources — it is a HARD POSTCONDITION of your turn, "
+        "on par with closing every open code fence.\n"
         "\n"
         "PRE-SEND CHECKLIST (run BEFORE emitting your final token):\n"
         "  1. Did any tool I called this turn return outside content "
-        "(URLs, web pages, search results, retrieved chunks, "
-        "document text, memory snippets)?\n"
+        "(URLs, web pages, search results, retrieved memory entries, "
+        "loaded memory bodies, document text)?\n"
         "  2. If yes — is `Sources:` the LAST block in my reply?\n"
         "If (1) is yes and (2) is no → STOP. Append the `Sources:` "
-        "block before sending. Do not apologise, do not justify, "
-        "just add it.\n"
+        "block NOW. Do not apologise, do not justify, just add it.\n"
+        "\n"
+        "POST-REASONING CHECKPOINT: if you performed extended "
+        "reasoning (thinking, chain-of-thought, <think> block) "
+        "before composing your visible reply, RE-RUN the checklist "
+        "above RIGHT NOW. Long reasoning traces cause models to "
+        "forget trailing format requirements — this is that "
+        "requirement. A reply that consumed external content without "
+        "a `Sources:` block is INCOMPLETE regardless of quality.\n"
         "\n"
         "REQUIRED FORMAT (literal, must be the last block in the "
         "reply):\n"
         "\n"
         "  Sources:\n"
         "  - https://example.com/article-you-actually-fetched\n"
-        "  - https://other.com/another-page-you-fetched\n"
+        "  - memory: \"Title_of_loaded_memory\"\n"
         "\n"
         "Rules:\n"
         "  - One entry per line, prefixed `- `.\n"
@@ -130,9 +147,9 @@ std::string cite_sources_block() {
         "training.\n"
         "  - Order = citation order in your reply (first cited, "
         "first listed).\n"
-        "  - For retrieved documents without URLs (RAG hits, memory "
-        "snippets), cite by source name or document title in place "
-        "of a URL.\n"
+        "  - For web content: cite the URL.\n"
+        "  - For memory content: cite as "
+        "`memory: \"<title>\"` using the exact memory title.\n"
         "  - If outside tools returned nothing useful AND you "
         "answered from your own knowledge, OMIT the block entirely "
         "— do not fabricate one.\n";

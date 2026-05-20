@@ -146,8 +146,9 @@ Model loading and inference tunables.
 | `cache_type_v` | enum | `-ctv`, `--cache-type-v` | `f16` | Same options as K. Quantising V saves a lot of VRAM. |
 | `numa` | string | `--numa` | (none) | Llama-server compat. |
 | `override_kv` | list | `--override-kv` (repeat) | (empty) | GGUF metadata overrides. Comma-separated list of `key=type:value` triples (e.g. `tokenizer.ggml.eos_token_id=int:151645`). On the CLI, repeat `--override-kv` per entry; in INI, comma-separate. |
-| `spec_type` | enum | `--spec-type` | `none` | Speculative decoding backend. `none` (off), `draft-mtp` (Multi-Token Prediction heads embedded in the main model — requires an MTP-trained model like DeepSeek V3 / MimoVL; NO separate draft model needed), `draft-simple` (classic draft model — needs `--draft-model PATH`, not yet wired up in easyai), `draft-eagle3` (Eagle3 draft model), `ngram-simple` / `ngram-map-k` / `ngram-map-k4v` / `ngram-mod` / `ngram-cache` (self-speculative via n-grams). Unknown strings are recorded in `Engine::last_error()` and leave speculation off. |
+| `spec_type` | enum | `--spec-type` | `none` | Speculative decoding backend. `none` (off), `draft-mtp` (MTP heads embedded in the main model — requires MTP-trained model), `draft-simple` (classic standalone draft model — requires `--draft-model PATH`), `draft-eagle3` (Eagle3 draft model), `ngram-simple` / `ngram-map-k` / `ngram-map-k4v` / `ngram-mod` / `ngram-cache` (self-speculative via n-grams). Unknown strings are recorded in `Engine::last_error()` and leave speculation off. |
 | `spec_draft_n_max` | int | `--spec-draft-n-max` | (llama.cpp default: 16) | Max draft tokens per speculation step. Typical for MTP: `6`. Set to `0` to defer to llama.cpp's default; ignored when `spec_type=none`. |
+| `spec_draft_model` | path | `--draft-model` | (empty) | GGUF path for the standalone draft model (`draft-simple` / `draft-eagle3`). Must share vocabulary with the target model. Ignored when `spec_type` is `none`, `draft-mtp`, or `ngram-*`. |
 | `chat_template_file` | path | `--chat-template-file` | (empty → embedded) | Override the chat template embedded in the GGUF with a Jinja file on disk. Mirrors `llama-server --chat-template-file`. The file is read once at load. Useful for shipping a tuned Qwen3 thinking template (e.g. `qwen3-think.jinja`) without rebuilding the GGUF. Read errors abort startup. |
 | `reasoning_format` | enum | `--reasoning-format` | `auto` | How to extract reasoning content: `none` (leave `<think>` inline), `auto` (default; currently behaves like `deepseek`), `deepseek` (extract `<think>…</think>` into `message.reasoning_content`, including during streaming — the Qwen3 / R1 default), `deepseek-legacy` (extract into `reasoning_content` for sync, leave inline for streaming — old behaviour). Unknown names fall back to `none`. |
 | `temperature` | float | `--temperature`, `--temp` | (preset) | Sampling override. |
@@ -699,14 +700,15 @@ Pass `--spec-type draft-mtp` against a model without them and llama.cpp
 will refuse to load (or fall back to autoregressive silently — check
 the startup banner).
 
-**Classic standalone-draft mode (`--spec-type draft-simple`) is not
-yet wired up** in easyai. llama.cpp supports it, but easyai-server
-doesn't expose a `--draft-model PATH` flag yet. If you need it, file
-an issue or use llama-server directly until the surface lands here.
+**Classic standalone-draft mode** is now supported: pass
+`--spec-type draft-simple --draft-model /path/to/small.gguf`. The
+draft model must share the same vocabulary as the target. Typical
+speedups are 1.3-1.8x depending on the draft/target model pair.
 
-INI keys: `[ENGINE] spec_type` and `[ENGINE] spec_draft_n_max`. The
-systemd installer's `--mtp` flag bakes `--spec-type draft-mtp
---spec-draft-n-max 6` into the unit's `ExecStart` (see `LINUX_SERVER.md`).
+INI keys: `[ENGINE] spec_type`, `[ENGINE] spec_draft_n_max`, and
+`[ENGINE] spec_draft_model`. The systemd installer's `--mtp` flag
+bakes `--spec-type draft-mtp --spec-draft-n-max 6` into the unit's
+`ExecStart` (see `LINUX_SERVER.md`).
 
 ---
 

@@ -704,14 +704,14 @@ struct Engine::Impl {
     common_chat_templates_ptr   templates;
     common_sampler            * sampler = nullptr;
 
-    // ------ speculative decoding (MTP path; see Engine::spec_type) -------
-    // For DRAFT_MTP, the "draft model" is the SAME as the target — we just
-    // open a second llama_context against `model_tgt` with
-    // LLAMA_CONTEXT_TYPE_MTP so the model's MTP heads run there. For
-    // non-MTP types (ngram-*, draft-simple, draft-eagle3) these stay
-    // null and the engine runs autoregressive.
+    // ------ speculative decoding (see Engine::spec_type) ------------------
+    // MTP: the draft model is the SAME as the target — we open a second
+    //   llama_context against model_tgt with LLAMA_CONTEXT_TYPE_MTP.
+    // Draft-simple / eagle3: a SEPARATE model is loaded from
+    //   params.speculative.draft.mparams.path; model_dft owns it.
     common_speculative_ptr      spec;                  // null = no speculation
-    llama_context             * ctx_dft       = nullptr; // owned
+    llama_context             * ctx_dft       = nullptr; // owned (MTP + draft-simple)
+    llama_model               * model_dft     = nullptr; // owned (draft-simple / eagle3 only)
     bool                        spec_mtp      = false;   // true iff spec is DRAFT_MTP
     bool                        spec_active   = false;   // true iff spec successfully initialised
     // Per-generation stats (reset in chat_continue's outer loop).
@@ -779,13 +779,21 @@ struct Engine::Impl {
             common_sampler_free(sampler);
             sampler = nullptr;
         }
-        // spec is unique_ptr; frees itself.
-        // ctx_dft is a raw llama_context owned by us — free explicitly
-        // BEFORE init (which owns the model) goes out of scope, so the
-        // model is still alive when the draft context unbinds from it.
+        // spec is unique_ptr; frees itself (releases internal ctx_dft
+        // for draft-simple, but NOT for MTP where we own ctx_dft).
+        spec.reset();
+        // ctx_dft is a raw llama_context owned by us (MTP creates it
+        // directly; draft-simple also stores it here after loading).
+        // Free BEFORE the model it was created from goes out of scope.
         if (ctx_dft) {
             llama_free(ctx_dft);
             ctx_dft = nullptr;
+        }
+        // model_dft is the standalone draft model (draft-simple / eagle3).
+        // Free AFTER ctx_dft since the context references the model.
+        if (model_dft) {
+            llama_model_free(model_dft);
+            model_dft = nullptr;
         }
         // common_init_result_ptr + common_chat_templates_ptr free themselves.
     }
@@ -876,23 +884,22 @@ struct Engine::Impl {
         return true;
     }
 
-    // Generate tokens until EOG, tool-call grammar trigger, or max_new_tokens.
-    // Returns the raw assistant text (may contain tool-call syntax).
-    // MTP-accelerated generation. The prompt has already been decoded into
-    // ctx() (target) and fed to the spec pipeline via feed_prompt's
-    // common_speculative_process / _begin calls. Each loop iteration:
-    //   1. Set draft params (n_past, id_last, ...) and ask MTP for drafts.
-    //   2. Build a batch with [last_id, draft0, ..., draftN-1], all with
-    //      logits=true so we can verify every position.
+    // Speculative-decoding generation loop. Works for ALL spec types
+    // (MTP, draft-simple, eagle3, ngram-*) via the generic
+    // common_speculative_* API — each type's impl dispatches internally.
+    //
+    // The prompt has already been decoded into ctx() (target) and fed
+    // to the spec pipeline via feed_prompt's common_speculative_process
+    // / _begin calls. Each loop iteration:
+    //   1. Set draft params (n_past, id_last, ...) and ask for drafts.
+    //   2. Build a batch with [last_id, draft0, ..., draftN-1], all
+    //      with logits=true so we can verify every position.
     //   3. Decode on target; feed the same batch to the spec pipeline.
-    //   4. common_sampler_sample_and_accept_n verifies each draft against
-    //      the target's logits, returning the accepted-prefix tokens.
+    //   4. common_sampler_sample_and_accept_n verifies each draft
+    //      against the target's logits, returning accepted-prefix.
     //   5. Tell spec how many drafts were accepted; the last accepted
     //      token becomes the next last_id.
-    // Acceptance rate ~50-80% on MTP-trained models gives the 1.5-2x
-    // decode speedup; for non-MTP models drafts are usually rejected and
-    // this degrades to ~autoregressive (with a small overhead per turn).
-    std::string generate_until_done_mtp(int & n_past_inout) {
+    std::string generate_until_done_spec(int & n_past_inout) {
         const llama_vocab * vocab = llama_model_get_vocab(model());
 
         std::string raw;
@@ -942,11 +949,12 @@ struct Engine::Impl {
             // --- 0. Align ctx_dft to target's CURRENT position ----------
             // Previous iter's process() decoded the full verify batch
             // (last_id + K drafts) into ctx_dft. After sample_and_accept_n
-            // accepted A tokens, target trimmed [n_past+A..n_past+K+1) but
-            // ctx_dft still has those rejected positions. Trim them here
+            // accepted A tokens, target trimmed [n_past+A..n_past+K+1)
+            // but ctx_dft still has those rejected positions. Trim here
             // so ctx_dft is back in lockstep with target before draft()
-            // runs. For the very first iter (no leftover state from
-            // feed_prompt) this is a no-op.
+            // runs. Applies to all spec types that use a draft context
+            // (MTP, draft-simple, eagle3). For the very first iter (no
+            // leftover state from feed_prompt) this is a no-op.
             llama_memory_seq_rm(
                 llama_get_memory(ctx_dft), /*seq=*/0,
                 n_past_inout, /*p1=*/-1);
@@ -960,10 +968,9 @@ struct Engine::Impl {
             dp.n_past   = n_past_inout;
             dp.id_last  = last_id;
             dp.result   = &draft;
-            // The MTP impl doesn't actually read .prompt (it reuses the
-            // model's KV state via the draft context). Setting it to
-            // null is fine in the typical MTP path. Other speculative
-            // impls (ngram-*) WOULD read it — they aren't wired here.
+            // MTP and draft-simple don't read .prompt (they reuse KV
+            // state via ctx_dft). ngram-* impls DO read it — set to
+            // null for now since ngram isn't wired through this loop.
             dp.prompt   = nullptr;
 
             common_speculative_draft(spec.get());
@@ -1004,7 +1011,7 @@ struct Engine::Impl {
             // --- 3. Decode on target + feed spec pipeline ----------------
             if (llama_decode(ctx(), b) != 0) {
                 llama_batch_free(b);
-                last_error = "llama_decode failed during MTP generation";
+                last_error = "llama_decode failed during speculative generation";
                 break;
             }
             common_speculative_process(spec.get(), b);
@@ -1072,12 +1079,12 @@ struct Engine::Impl {
         return raw;
     }
 
-    // Autoregressive generation — the path used when MTP isn't active.
+    // Autoregressive generation — the path used when speculation isn't active.
     // Generate tokens until EOG, tool-call grammar trigger, or max_new_tokens.
     // Returns the raw assistant text (may contain tool-call syntax).
     std::string generate_until_done(int & n_past_inout) {
         if (spec_active) {
-            return generate_until_done_mtp(n_past_inout);
+            return generate_until_done_spec(n_past_inout);
         }
         const llama_vocab * vocab = llama_model_get_vocab(model());
 
@@ -1428,6 +1435,11 @@ Engine & Engine::spec_draft_n_max(int n) {
     return *this;
 }
 
+Engine & Engine::spec_draft_model(const std::string & path) {
+    p_->params.speculative.draft.mparams.path = path;
+    return *this;
+}
+
 Engine & Engine::no_kv_offload(bool on) { p_->params.no_kv_offload = on; return *this; }
 Engine & Engine::kv_unified  (bool on) { p_->params.kv_unified    = on; return *this; }
 
@@ -1682,13 +1694,67 @@ bool Engine::load() {
                 "[easyai] speculative MTP enabled (n_max=%d)\n",
                 (int) p_->params.speculative.draft.n_max);
         }
-        // else: type is set but we don't actively drive it — keep the
-        // log line so the operator knows their non-MTP request didn't
-        // wire a real decode path.
+        else if (t0 == COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE) {
+            if (!p_->params.speculative.has_dft()) {
+                p_->last_error =
+                    "spec_type=draft-simple requires --draft-model PATH "
+                    "(a GGUF file with the same vocabulary as the target "
+                    "model)";
+                easyai::log::error("[easyai] Engine::load: %s",
+                                   p_->last_error.c_str());
+                return false;
+            }
+            auto params_dft          = p_->params;
+            params_dft.model         = p_->params.speculative.draft.mparams;
+            params_dft.n_gpu_layers  =
+                p_->params.speculative.draft.n_gpu_layers >= 0
+                    ? p_->params.speculative.draft.n_gpu_layers
+                    : p_->params.n_gpu_layers;
+
+            auto mparams = common_model_params_to_llama(params_dft);
+            p_->model_dft = llama_model_load_from_file(
+                params_dft.model.path.c_str(), mparams);
+            if (!p_->model_dft) {
+                p_->last_error = "failed to load draft model: "
+                    + params_dft.model.path;
+                easyai::log::error("[easyai] Engine::load: %s",
+                                   p_->last_error.c_str());
+                return false;
+            }
+            auto cparams_dft = common_context_params_to_llama(params_dft);
+            p_->ctx_dft = llama_init_from_model(p_->model_dft, cparams_dft);
+            if (!p_->ctx_dft) {
+                p_->last_error = "failed to create draft model context";
+                easyai::log::error("[easyai] Engine::load: %s",
+                                   p_->last_error.c_str());
+                return false;
+            }
+            p_->params.speculative.draft.ctx_tgt = p_->init->context();
+            p_->params.speculative.draft.ctx_dft = p_->ctx_dft;
+
+            p_->spec.reset(common_speculative_init(
+                p_->params.speculative, /*n_seq=*/1));
+            if (!p_->spec) {
+                p_->last_error =
+                    "spec_type=draft-simple: common_speculative_init "
+                    "failed — the draft model's vocabulary may be "
+                    "incompatible with the target";
+                easyai::log::error("[easyai] Engine::load: %s",
+                                   p_->last_error.c_str());
+                return false;
+            }
+            p_->spec_mtp    = false;
+            p_->spec_active = true;
+            easyai::log::error(
+                "[easyai] speculative draft-simple enabled "
+                "(draft=%s, n_max=%d)\n",
+                params_dft.model.path.c_str(),
+                (int) p_->params.speculative.draft.n_max);
+        }
         else if (t0 != COMMON_SPECULATIVE_TYPE_NONE) {
             easyai::log::error(
-                "[easyai] spec_type=%s requested but only draft-mtp is "
-                "wired through the easyai decode loop today — running "
+                "[easyai] spec_type=%s requested but not yet wired "
+                "through the easyai decode loop — running "
                 "autoregressive\n",
                 common_speculative_type_to_str(t0).c_str());
         }

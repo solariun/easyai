@@ -133,6 +133,11 @@ struct CliArgs {
     bool no_kv_offload = false;
     bool kv_unified    = false;
     std::vector<std::string> kv_overrides;  // each: "key=type:value"
+
+    // speculative decoding
+    std::string spec_type;
+    std::string spec_draft_model;
+    int         spec_draft_n_max = 0;
 };
 
 [[noreturn]] static void die_usage(const char * argv0) {
@@ -221,6 +226,15 @@ struct CliArgs {
         "      --override-kv <k=t:v>     Override a GGUF metadata entry (repeatable).\n"
         "                                 Types: int|float|bool|str.\n"
         "                                 Example: --override-kv tokenizer.ggml.add_bos_token=bool:false\n"
+        "\nSpeculative decoding (all optional):\n"
+        "      --spec-type <type>        none (default), draft-mtp, draft-simple,\n"
+        "                                 draft-eagle3, ngram-simple|map-k|map-k4v|\n"
+        "                                 mod|cache.\n"
+        "      --draft-model <path>      GGUF path for the draft model (draft-simple /\n"
+        "                                 draft-eagle3). Must share vocabulary with the\n"
+        "                                 target.\n"
+        "      --spec-draft-n-max <n>    Max draft tokens per speculation step.\n"
+        "                                 Typical MTP: 6. Default 16.\n"
         "\n  -h, --help                    Show this help and exit\n",
         argv0);
     std::exit(1);
@@ -268,6 +282,10 @@ static CliArgs parse(int argc, char ** argv) {
         else if (s == "-nkvo" || s == "--no-kv-offload") a.no_kv_offload = true;
         else if (s == "--kv-unified")                 a.kv_unified    = true;
         else if (s == "--override-kv")                a.kv_overrides.push_back(need(i, "--override-kv"));
+        // speculative decoding
+        else if (s == "--spec-type")                 a.spec_type         = need(i, "--spec-type");
+        else if (s == "--draft-model")               a.spec_draft_model  = need(i, "--draft-model");
+        else if (s == "--spec-draft-n-max")          a.spec_draft_n_max  = std::atoi(need(i, "--spec-draft-n-max"));
         else if (s == "-h" || s == "--help")          die_usage(argv[0]);
         else { std::fprintf(stderr, "unknown arg: %s\n", s.c_str()); die_usage(argv[0]); }
     }
@@ -355,8 +373,9 @@ static std::string build_builtin_system_prompt(const CliArgs & args) {
         if (rag_on) {
             s += "  - memory: search first for STABLE facts (vocab "
                  "appended below); save only DURABLE info, one "
-                 "comprehensive entry per topic — see the tool's own "
-                 "description for the trust/verify policy.\n";
+                 "comprehensive entry per topic. REPLY MUST END WITH "
+                 "`Sources:` block citing memory titles when you use "
+                 "retrieved content (see Cite sources rule below).\n";
         }
         if (fs_on) {
             s += "  - fs: sandbox + check_path before any file work. "
@@ -565,9 +584,12 @@ int main(int argc, char ** argv) {
     lc.seed           = args.seed;
     lc.cache_type_k   = args.cache_type_k;
     lc.cache_type_v   = args.cache_type_v;
-    lc.no_kv_offload  = args.no_kv_offload;
-    lc.kv_unified     = args.kv_unified;
-    lc.kv_overrides   = args.kv_overrides;
+    lc.no_kv_offload     = args.no_kv_offload;
+    lc.kv_unified        = args.kv_unified;
+    lc.kv_overrides      = args.kv_overrides;
+    lc.spec_type         = args.spec_type;
+    lc.spec_draft_model  = args.spec_draft_model;
+    lc.spec_draft_n_max  = args.spec_draft_n_max;
     auto backend = std::make_unique<easyai::LocalBackend>(std::move(lc));
 
     std::string err;

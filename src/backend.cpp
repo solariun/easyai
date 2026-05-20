@@ -45,6 +45,9 @@ bool LocalBackend::init(std::string & err) {
     if (cfg.no_kv_offload) engine.no_kv_offload(true);
     if (cfg.kv_unified)    engine.kv_unified(true);
     for (const auto & ov : cfg.kv_overrides) engine.add_kv_override(ov);
+    if (!cfg.spec_type.empty())          engine.spec_type(cfg.spec_type);
+    if (cfg.spec_draft_n_max > 0)        engine.spec_draft_n_max(cfg.spec_draft_n_max);
+    if (!cfg.spec_draft_model.empty())   engine.spec_draft_model(cfg.spec_draft_model);
 
     if (cfg.preset.name.empty()) {
         // Default to "precise" — tuned for code, math, factual Q&A, the
