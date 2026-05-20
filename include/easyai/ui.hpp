@@ -105,20 +105,10 @@ public:
     // forces an immediate refresh, the heartbeat handles that.
     void set_context_pct(int pct);
 
-    // Toggle the "thinking" state — replaces the regular `<glyph><pct>%`
-    // rendering with a coloured "thinking <pct>%" word, lit by a
-    // bright spotlight that sweeps left-to-right across the letters
-    // (mirrors Claude Code's prompt-processing animation).  The base
-    // colour stays at mid-gray 244 so the letters remain readable
-    // BETWEEN sweep passes; the spotlight just adds motion on top.
-    // Use this between the moment a request is sent and the first SSE
-    // delta arrives, so the operator sees that the server is actively
-    // ingesting the prompt rather than hung.  set_thinking(false) is
-    // idempotent — safe to call after each chat() returns regardless
-    // of whether the spinner ever entered the thinking state.  The
-    // heartbeat speeds up to ~10 Hz while thinking_ is on so the
-    // sweep looks smooth, and reverts to the idle 250 ms cadence
-    // afterwards.
+    // Notify the spinner that one content/reasoning token was received.
+    // Drives the instantaneous t/s gauge shown next to the glyph.
+    void notify_token();
+
     void set_thinking(bool on);
 
     // Set the percentage shown next to the "thinking" word during
@@ -151,6 +141,11 @@ private:
     int  thinking_pct_ = -1;  // real prompt-eval %, fed by Client::on_prompt_progress
     std::atomic<bool> thinking_{false};
     std::chrono::steady_clock::time_point last_advance_{};
+
+    std::atomic<int> tok_count_{0};
+    int              last_tok_count_ = 0;
+    double           token_speed_    = 0.0;
+    std::chrono::steady_clock::time_point last_speed_time_{};
 
     std::mutex              mu_;               // stdout + state
     std::atomic<bool>       hb_running_{false};

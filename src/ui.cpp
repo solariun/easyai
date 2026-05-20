@@ -74,7 +74,14 @@ void Spinner::finish() {
     std::lock_guard<std::mutex> lg(mu_);
     erase_active_locked_();
     std::fflush(stdout);
-    frame_ = 0;
+    frame_          = 0;
+    token_speed_    = 0.0;
+    last_tok_count_ = tok_count_.load(std::memory_order_relaxed);
+    last_speed_time_ = std::chrono::steady_clock::now();
+}
+
+void Spinner::notify_token() {
+    tok_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void Spinner::set_context_pct(int pct) {
@@ -183,19 +190,25 @@ void Spinner::draw_locked_() {
         return;
     }
     static const char frames[] = { '|', '/', '-', '\\' };
-    char buf[16];
+    char buf[32];
     int  n;
-    if (context_pct_ < 0) {
+    const bool has_pct   = context_pct_ >= 0;
+    const bool has_speed = token_speed_ > 0.1;
+    if (has_pct && has_speed) {
+        n = std::snprintf(buf, sizeof(buf), "%c(%d%%, %.1ft/s)",
+                          frames[frame_ % 4], context_pct_, token_speed_);
+    } else if (has_pct) {
+        n = std::snprintf(buf, sizeof(buf), "%c(%d%%)",
+                          frames[frame_ % 4], context_pct_);
+    } else if (has_speed) {
+        n = std::snprintf(buf, sizeof(buf), "%c(%.1ft/s)",
+                          frames[frame_ % 4], token_speed_);
+    } else {
         buf[0] = frames[frame_ % 4];
         n = 1;
-    } else {
-        // `<glyph><pct>%` — no separator, so the suffix sits flush
-        // with the glyph and tracks the cursor as it moves.
-        n = std::snprintf(buf, sizeof(buf), "%c%d%%",
-                          frames[frame_ % 4], context_pct_);
-        if (n < 0)                  n = 1;          // snprintf failure
-        if (n >= (int) sizeof(buf)) n = (int) sizeof(buf) - 1;
     }
+    if (n < 0)                  n = 1;
+    if (n >= (int) sizeof(buf)) n = (int) sizeof(buf) - 1;
     std::fwrite(buf, 1, (size_t) n, stdout);
     std::fflush(stdout);
     active_       = true;
@@ -291,6 +304,22 @@ void Spinner::heartbeat_loop_() {
         std::lock_guard<std::mutex> lg(mu_);
         if (!active_) continue;            // nothing drawn yet
         erase_active_locked_();
+        {
+            auto now_t = std::chrono::steady_clock::now();
+            int cur = tok_count_.load(std::memory_order_relaxed);
+            int delta = cur - last_tok_count_;
+            double elapsed_s = std::chrono::duration<double>(
+                now_t - last_speed_time_).count();
+            if (elapsed_s > 0.05) {
+                if (delta > 0) {
+                    token_speed_    = delta / elapsed_s;
+                    last_tok_count_ = cur;
+                    last_speed_time_ = now_t;
+                } else if (elapsed_s > 2.0) {
+                    token_speed_ = 0.0;
+                }
+            }
+        }
         if (thinking_.load(std::memory_order_relaxed)) {
             ++shimmer_phase_;              // sweep one cell to the right
         } else {
@@ -405,11 +434,8 @@ bool tail_is_partial_think_marker(const std::string & tail) {
 }  // namespace
 
 void Streaming::on_token_(const std::string & piece_in) {
-    // First output of this turn — exit the spinner's "thinking" sweep.
-    // Idempotent on the spinner side so the per-piece check stays cheap
-    // (cli.cpp also calls set_thinking(false) defensively after chat()
-    // returns; either path wins).
     spinner_.set_thinking(false);
+    spinner_.notify_token();
     ++stats_.content_pieces;
     if (stats_.ms_to_first_tok < 0) stats_.ms_to_first_tok = stats_.elapsed_ms();
 
@@ -476,11 +502,8 @@ void Streaming::on_token_(const std::string & piece_in) {
 }
 
 void Streaming::on_reason_(const std::string & piece_in) {
-    // First output of this turn — see on_token_ above.  Reasoning often
-    // arrives BEFORE content (the easyai-server "📝 prompt eval" line
-    // ships as reasoning_content), so the spinner needs to drop out of
-    // the shimmer here too.
     spinner_.set_thinking(false);
+    spinner_.notify_token();
     ++stats_.reason_pieces;
     emit_reason_(strip_think_markers(piece_in));
 }

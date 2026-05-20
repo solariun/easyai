@@ -2505,11 +2505,52 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
 
         // ANSI diff display for the terminal (ToolResult::display).
         // Dark red background for deleted lines, dark green for added,
-        // no background for context.
+        // dim background for context.  All lines padded to the same
+        // width so the backgrounds form a solid rectangular block.
         static const char * kBgRed   = "\033[48;5;52m";
         static const char * kBgGreen = "\033[48;5;22m";
-        static const char * kDim     = "\033[2m";
+        static const char * kBgCtx   = "\033[48;5;236m\033[2m";
         static const char * kRst     = "\033[0m";
+        static constexpr long long kBlockPad = 10;
+
+        // First pass: find the widest content across all displayed lines.
+        long long max_content = 0;
+        auto measure = [&](std::string_view sv) {
+            long long w = (long long) sv.size();
+            if (w > kPerLineCap) w = kPerLineCap;
+            if (w > max_content) max_content = w;
+        };
+        for (long long ln = win_start; ln < start_line && ln <= new_line_count; ++ln) {
+            std::string_view sv = new_lines[(size_t)(ln - 1)];
+            while (!sv.empty() && (sv.back() == '\n' || sv.back() == '\r'))
+                sv.remove_suffix(1);
+            measure(sv);
+        }
+        for (size_t i = 0; i < old_lines_text.size(); ++i)
+            measure(old_lines_text[i]);
+        if (inserted > 0) {
+            for (long long ln = start_line;
+                    ln < start_line + inserted && ln <= new_line_count; ++ln) {
+                std::string_view sv = new_lines[(size_t)(ln - 1)];
+                while (!sv.empty() && (sv.back() == '\n' || sv.back() == '\r'))
+                    sv.remove_suffix(1);
+                measure(sv);
+            }
+        }
+        {
+            long long ctx_after = start_line + inserted;
+            for (long long ln = ctx_after; ln <= win_end && ln <= new_line_count; ++ln) {
+                std::string_view sv = new_lines[(size_t)(ln - 1)];
+                while (!sv.empty() && (sv.back() == '\n' || sv.back() == '\r'))
+                    sv.remove_suffix(1);
+                measure(sv);
+            }
+        }
+        const long long block_content_w = max_content + kBlockPad;
+        auto pad = [&](std::ostringstream & s, long long content_len) {
+            long long n = block_content_w - content_len;
+            for (long long p = 0; p < n; ++p) s << ' ';
+        };
 
         std::ostringstream d;
         // Context before the edit point.
@@ -2519,12 +2560,11 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
                     && (sv.back() == '\n' || sv.back() == '\r'))
                 sv.remove_suffix(1);
             char nb[16];
+            long long clen = (long long) sv.size() > kPerLineCap ? kPerLineCap : (long long) sv.size();
             std::snprintf(nb, sizeof(nb), "%5lld", ln);
-            d << kDim << "  " << nb << ": ";
-            if ((long long) sv.size() > kPerLineCap)
-                d.write(sv.data(), kPerLineCap);
-            else
-                d.write(sv.data(), (std::streamsize) sv.size());
+            d << kBgCtx << "  " << nb << ": ";
+            d.write(sv.data(), (std::streamsize) clen);
+            pad(d, clen);
             d << kRst << "\n";
         }
         // Deleted lines (old, with original line numbers).
@@ -2532,12 +2572,11 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
             long long orig_ln = start_line + i;
             char nb[16];
             std::snprintf(nb, sizeof(nb), "%5lld", orig_ln);
-            d << kBgRed << "- " << nb << ": ";
             auto & sv = old_lines_text[(size_t) i];
-            if ((long long) sv.size() > kPerLineCap)
-                d.write(sv.data(), kPerLineCap);
-            else
-                d.write(sv.data(), (std::streamsize) sv.size());
+            long long clen = (long long) sv.size() > kPerLineCap ? kPerLineCap : (long long) sv.size();
+            d << kBgRed << "- " << nb << ": ";
+            d.write(sv.data(), (std::streamsize) clen);
+            pad(d, clen);
             d << kRst << "\n";
         }
         // Inserted lines (new content, with new line numbers).
@@ -2549,12 +2588,11 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
                         && (sv.back() == '\n' || sv.back() == '\r'))
                     sv.remove_suffix(1);
                 char nb[16];
+                long long clen = (long long) sv.size() > kPerLineCap ? kPerLineCap : (long long) sv.size();
                 std::snprintf(nb, sizeof(nb), "%5lld", ln);
                 d << kBgGreen << "+ " << nb << ": ";
-                if ((long long) sv.size() > kPerLineCap)
-                    d.write(sv.data(), kPerLineCap);
-                else
-                    d.write(sv.data(), (std::streamsize) sv.size());
+                d.write(sv.data(), (std::streamsize) clen);
+                pad(d, clen);
                 d << kRst << "\n";
             }
         }
@@ -2567,12 +2605,11 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
                     && (sv.back() == '\n' || sv.back() == '\r'))
                 sv.remove_suffix(1);
             char nb[16];
+            long long clen = (long long) sv.size() > kPerLineCap ? kPerLineCap : (long long) sv.size();
             std::snprintf(nb, sizeof(nb), "%5lld", ln);
-            d << kDim << "  " << nb << ": ";
-            if ((long long) sv.size() > kPerLineCap)
-                d.write(sv.data(), kPerLineCap);
-            else
-                d.write(sv.data(), (std::streamsize) sv.size());
+            d << kBgCtx << "  " << nb << ": ";
+            d.write(sv.data(), (std::streamsize) clen);
+            pad(d, clen);
             d << kRst << "\n";
         }
 
