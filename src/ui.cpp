@@ -69,38 +69,56 @@ void Spinner::initial_draw() {
     if (!active_) draw_locked_();
 }
 
+void Spinner::emit_speed_report_locked_() {
+    const double speed = (token_speed_ > 0.1)
+                             ? token_speed_ : last_nonzero_speed_;
+    if (speed <= 0.1) return;
+    erase_active_locked_();
+    char buf[128];
+    int n;
+    if (context_pct_ >= 0 && ctx_used_ >= 0) {
+        n = std::snprintf(buf, sizeof(buf),
+            "\n● %d%% / %d tokens  avg: %.1ftk/s\n",
+            context_pct_, ctx_used_, speed);
+    } else if (ctx_used_ >= 0) {
+        n = std::snprintf(buf, sizeof(buf),
+            "\n● %d tokens  avg: %.1ftk/s\n",
+            ctx_used_, speed);
+    } else if (context_pct_ >= 0) {
+        n = std::snprintf(buf, sizeof(buf),
+            "\n● %d%%  avg: %.1ftk/s\n",
+            context_pct_, speed);
+    } else {
+        n = std::snprintf(buf, sizeof(buf),
+            "\n● avg: %.1ftk/s\n", speed);
+    }
+    if (n > 0) {
+        if (color_) std::fputs("\033[34m", stdout);
+        std::fwrite(buf, 1, (size_t) n, stdout);
+        if (color_) std::fputs("\033[0m",  stdout);
+    }
+    std::fflush(stdout);
+    token_speed_        = 0.0;
+    last_nonzero_speed_ = 0.0;
+    active_       = false;
+    active_width_ = 0;
+}
+
+void Spinner::emit_speed_report() {
+    if (!enabled_) return;
+    std::lock_guard<std::mutex> lg(mu_);
+    emit_speed_report_locked_();
+}
+
 void Spinner::finish() {
     if (!enabled_) return;
     std::lock_guard<std::mutex> lg(mu_);
-    // If tokens were streaming, emit a final summary line before wiping.
-    if (token_speed_ > 0.1) {
-        erase_active_locked_();
-        char buf[128];
-        int n;
-        if (context_pct_ >= 0 && ctx_used_ >= 0) {
-            n = std::snprintf(buf, sizeof(buf),
-                "\n● %d%% / %d tokens  last: %.1ftk/s\n",
-                context_pct_, ctx_used_, token_speed_);
-        } else if (context_pct_ >= 0) {
-            n = std::snprintf(buf, sizeof(buf),
-                "\n● %d%%  last: %.1ftk/s\n",
-                context_pct_, token_speed_);
-        } else {
-            n = std::snprintf(buf, sizeof(buf),
-                "\n● last: %.1ftk/s\n",
-                token_speed_);
-        }
-        if (n > 0) {
-            if (color_) std::fputs("\033[34m", stdout);
-            std::fwrite(buf, 1, (size_t) n, stdout);
-            if (color_) std::fputs("\033[0m",  stdout);
-        }
-    } else {
-        erase_active_locked_();
-    }
+    emit_speed_report_locked_();
+    if (active_) erase_active_locked_();
     std::fflush(stdout);
-    frame_          = 0;
-    token_speed_    = 0.0;
+    frame_               = 0;
+    token_speed_         = 0.0;
+    last_nonzero_speed_  = 0.0;
     last_tok_count_ = tok_count_.load(std::memory_order_relaxed);
     last_speed_time_ = std::chrono::steady_clock::now();
 }
@@ -138,42 +156,14 @@ void Spinner::set_thinking(bool on) {
     {
         std::lock_guard<std::mutex> lg(mu_);
 
-        // Transition: token-streaming → thinking.  If we had visible
-        // token speed, emit a summary line before the shimmer starts:
-        //   ● XX% / NNNN tokens  last: 00.0tk/s
-        if (on && token_speed_ > 0.1) {
-            erase_active_locked_();
-            char buf[128];
-            int n;
-            if (context_pct_ >= 0 && ctx_used_ >= 0) {
-                n = std::snprintf(buf, sizeof(buf),
-                    "\n● %d%% / %d tokens  last: %.1ftk/s\n",
-                    context_pct_, ctx_used_, token_speed_);
-            } else if (context_pct_ >= 0) {
-                n = std::snprintf(buf, sizeof(buf),
-                    "\n● %d%%  last: %.1ftk/s\n",
-                    context_pct_, token_speed_);
-            } else {
-                n = std::snprintf(buf, sizeof(buf),
-                    "\n● last: %.1ftk/s\n",
-                    token_speed_);
-            }
-            if (n > 0) {
-                if (color_) std::fputs("\033[34m", stdout);   // dark blue
-                std::fwrite(buf, 1, (size_t) n, stdout);
-                if (color_) std::fputs("\033[0m",  stdout);
-            }
-            std::fflush(stdout);
-            active_ = false;
-            active_width_ = 0;
-        }
+        if (on) emit_speed_report_locked_();
 
         thinking_.store(on, std::memory_order_relaxed);
         if (on) {
             shimmer_phase_ = 0;
             thinking_pct_  = -1;
-            // Reset speed tracking so the next segment starts fresh.
-            token_speed_    = 0.0;
+            token_speed_         = 0.0;
+            last_nonzero_speed_  = 0.0;
             last_tok_count_ = tok_count_.load(std::memory_order_relaxed);
             last_speed_time_ = std::chrono::steady_clock::now();
         }
@@ -370,10 +360,11 @@ void Spinner::heartbeat_loop_() {
             if (elapsed_s > 0.05) {
                 if (delta > 0) {
                     token_speed_    = delta / elapsed_s;
+                    last_nonzero_speed_ = token_speed_;
                     last_tok_count_ = cur;
                     last_speed_time_ = now_t;
-                } else if (elapsed_s > 2.0) {
-                    token_speed_ = 0.0;
+                } else if (elapsed_s > 2.0 && token_speed_ > 0.1) {
+                    emit_speed_report_locked_();
                 }
             }
         }
@@ -566,11 +557,7 @@ void Streaming::on_reason_(const std::string & piece_in) {
 }
 
 void Streaming::on_tool_(const ToolCall & call, const ToolResult & result) {
-    // A tool dispatch is also a "model finished prompt eval" signal —
-    // some agentic turns emit a tool_call as their entire visible
-    // output, in which case neither on_token_ nor on_reason_ ever
-    // fires.  Without this hook the shimmer would stay on through the
-    // whole tool round-trip.
+    spinner_.emit_speed_report();
     spinner_.set_thinking(false);
     ++stats_.tool_calls;
     if (result.is_error) ++stats_.tool_errors;

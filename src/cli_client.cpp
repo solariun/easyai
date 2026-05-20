@@ -143,8 +143,17 @@ Streaming & Streaming::attach(Client & client) {
         refresh_pct();
     });
     client.on_prompt_eval(
-        [this](int n_tokens, int /*n_cached*/, double prompt_ms, double tps) {
+        [this, pcli](int n_tokens, int /*n_cached*/, double prompt_ms, double tps) {
             if (n_tokens <= 0) return;
+            int used  = pcli->last_ctx_used();
+            int total = pcli->last_n_ctx();
+            if (used < 0) used = n_tokens;
+            if (used >= 0 && total > 0) {
+                spinner_.set_context_pct((int)(100LL * used / total));
+                spinner_.set_context_tokens(used, total);
+            } else if (used >= 0) {
+                spinner_.set_context_tokens(used, -1);
+            }
             char buf[160];
             std::snprintf(buf, sizeof(buf),
                 "\n%s● prompt eval: %d tok · %.0f ms · %.1f t/s%s\n",

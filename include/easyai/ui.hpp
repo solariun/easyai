@@ -126,7 +126,12 @@ public:
     // from the streaming wiring.
     void set_context_tokens(int used, int total);
 
+    // Emit the dark-blue speed report if tokens were recently streaming.
+    // Resets speed state so it fires at most once per generation segment.
+    void emit_speed_report();
+
 private:
+    void emit_speed_report_locked_();
     void maybe_advance_locked_();
     void erase_active_locked_();
     void draw_locked_();
@@ -153,6 +158,7 @@ private:
     std::atomic<int> tok_count_{0};
     int              last_tok_count_ = 0;
     double           token_speed_    = 0.0;
+    double           last_nonzero_speed_ = 0.0;
     std::chrono::steady_clock::time_point last_speed_time_{};
 
     std::mutex              mu_;               // stdout + state
