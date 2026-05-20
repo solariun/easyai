@@ -1889,7 +1889,7 @@ visible-text matching.  Never rely on `[class*=…]`.
 | Unknown tool called by model             | `ToolResult::error("unknown tool: …")` injected; agent continues                                  |
 | Context overflow during decode           | Engine sets `last_error`, returns partial output; subsequent calls require `clear_history`        |
 | Request body > `--max-body`              | httplib aborts the request before we see it                                                       |
-| `SIGINT` mid-generation                  | CLI flips a flag; second SIGINT exits hard. Server: stop() then orderly exit                      |
+| `SIGINT` mid-generation                  | CLI: single Ctrl-C stops generation and returns to prompt; triple rapid force-exits. Server: stop() then orderly exit |
 
 ---
 

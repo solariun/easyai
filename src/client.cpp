@@ -328,6 +328,7 @@ struct Client::Impl {
     Client::TokenCallback          on_reason;
     Client::ToolCallback           on_tool;
     Client::PromptProgressCallback on_prompt_progress;
+    Client::PromptEvalCallback     on_prompt_eval;
 
     // Conversation state.  Each entry is one OpenAI message (raw JSON
     // object) so we don't leak nlohmann::json into the public ABI.
@@ -497,6 +498,7 @@ struct Client::Impl {
         std::map<int, PendingToolCall> tc_by_index;
         bool received_anything = false;
         bool reasoning_aborted = false;
+        bool skip_next_reason  = false;
 
         auto on_chunk = [&](const char * data, size_t len) -> bool {
             // Cooperative cancel — checked first thing on every SSE
@@ -525,10 +527,22 @@ struct Client::Impl {
             SseEvent ev;
             while (sse.next(ev)) {
                 if (ev.data.empty() || ev.data == "[DONE]") continue;
-                // Skip our server's UI-only custom events.
                 if (ev.event == "easyai.tool_call" ||
-                    ev.event == "easyai.tool_result" ||
-                    ev.event == "easyai.prompt_eval") continue;
+                    ev.event == "easyai.tool_result") continue;
+                if (ev.event == "easyai.prompt_eval") {
+                    if (on_prompt_eval) {
+                        try {
+                            auto j = ordered_json::parse(ev.data);
+                            int    n  = j.value("n_tokens",          0);
+                            int    nc = j.value("n_cached",          0);
+                            double ms = j.value("prompt_ms",         0.0);
+                            double tp = j.value("tokens_per_second", 0.0);
+                            on_prompt_eval(n, nc, ms, tp);
+                        } catch (...) {}
+                    }
+                    skip_next_reason = true;
+                    continue;
+                }
                 // Per-batch prompt-eval progress — fire the typed
                 // callback so cli's shimmer can paint a real "thinking
                 // N%" gauge. The event payload mirrors llama-server's
@@ -562,15 +576,17 @@ struct Client::Impl {
 
                 if (delta.contains("reasoning_content")
                         && delta["reasoning_content"].is_string()) {
-                    const auto & s = delta["reasoning_content"].get_ref<const std::string &>();
-                    out.reasoning += s;
-                    if (on_reason) on_reason(s);
-                    if (max_reasoning_chars > 0
-                            && (int) out.reasoning.size() > max_reasoning_chars) {
-                        // Hard cap on runaway thinking — return false from
-                        // the content_receiver to abort the SSE read.
-                        reasoning_aborted = true;
-                        return false;
+                    if (skip_next_reason) {
+                        skip_next_reason = false;
+                    } else {
+                        const auto & s = delta["reasoning_content"].get_ref<const std::string &>();
+                        out.reasoning += s;
+                        if (on_reason) on_reason(s);
+                        if (max_reasoning_chars > 0
+                                && (int) out.reasoning.size() > max_reasoning_chars) {
+                            reasoning_aborted = true;
+                            return false;
+                        }
                     }
                 }
                 if (delta.contains("content") && delta["content"].is_string()) {
@@ -1196,6 +1212,9 @@ Client & Client::on_reason (TokenCallback cb) { p_->on_reason = std::move(cb); r
 Client & Client::on_tool   (ToolCallback  cb) { p_->on_tool   = std::move(cb); return *this; }
 Client & Client::on_prompt_progress(PromptProgressCallback cb) {
     p_->on_prompt_progress = std::move(cb); return *this;
+}
+Client & Client::on_prompt_eval(PromptEvalCallback cb) {
+    p_->on_prompt_eval = std::move(cb); return *this;
 }
 
 // Cooperative cancel — see client.hpp for design notes.

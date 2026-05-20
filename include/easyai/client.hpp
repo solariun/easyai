@@ -195,10 +195,14 @@ public:
     using PromptProgressCallback = std::function<void(
         int processed, int total, int cached, double ms)>;
 
+    using PromptEvalCallback = std::function<void(
+        int n_tokens, int n_cached, double prompt_ms, double tps)>;
+
     Client & on_token           (TokenCallback);   // delta.content (visible reply)
     Client & on_reason          (TokenCallback);   // delta.reasoning_content (thinking)
     Client & on_tool            (ToolCallback);    // every dispatched tool round-trip
     Client & on_prompt_progress (PromptProgressCallback);  // per-batch prompt-eval %
+    Client & on_prompt_eval     (PromptEvalCallback);      // prompt-eval summary
 
     // ----- chat ------------------------------------------------------------
     // chat() pushes the user message, runs the agentic multi-hop loop

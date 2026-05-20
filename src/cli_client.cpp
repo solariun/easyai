@@ -126,6 +126,9 @@ Streaming & Streaming::attach(Client & client) {
     auto refresh_pct = [this, pcli]() {
         int pct = pcli->last_ctx_pct();
         if (pct >= 0) spinner_.set_context_pct(pct);
+        int used = pcli->last_ctx_used();
+        int total = pcli->last_n_ctx();
+        if (used >= 0 && total > 0) spinner_.set_context_tokens(used, total);
     };
     client.on_token ([this, refresh_pct](const std::string & p){
         this->on_token_(p);
@@ -139,6 +142,15 @@ Streaming & Streaming::attach(Client & client) {
         this->on_tool_(c, r);
         refresh_pct();
     });
+    client.on_prompt_eval(
+        [this](int n_tokens, int /*n_cached*/, double prompt_ms, double tps) {
+            if (n_tokens <= 0) return;
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                "\n%s● prompt eval: %d tok · %.0f ms · %.1f t/s%s\n",
+                style_.green(), n_tokens, prompt_ms, tps, style_.reset());
+            spinner_.write(std::string(buf));
+        });
     return *this;
 }
 

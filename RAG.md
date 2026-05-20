@@ -398,14 +398,17 @@ memory(action="append", title: string, content: string,
        keywords?: string[]) -> ok
 ```
 
-Read-modify-write on an EXISTING memory: reads the current body off
-disk, appends `content` after a Markdown horizontal rule (`---`),
-and writes the merged file back via the same atomic tempfile +
-rename(2) `memory(action="save")` uses. Use this when you've **learned
-more about something you already wrote down** — refining a user's
-preferences, accumulating a project's running log, growing a
-debugging trail across sessions — without losing the previous
-content.
+Append to an existing memory, or **create a new one** if the title
+doesn't exist yet (keywords required in that case). When the title
+exists, reads the current body off disk, appends `content` after a
+Markdown horizontal rule (`---`), and writes the merged file back via
+the same atomic tempfile + rename(2) `memory(action="save")` uses.
+When the title is new, behaves like `memory(action="save")` —
+keywords are mandatory so the new entry is searchable. Use this when
+you've **learned more about something you already wrote down** —
+refining a user's preferences, accumulating a project's running log,
+growing a debugging trail across sessions — without losing the
+previous content.
 
 Why a separator? So the operator opening the `.md` file sees
 exactly where each appendix begins. Multiple appends stack: old →
@@ -418,8 +421,13 @@ this when the appendix broadens the memory's topic: a memory
 tagged `["user-prefs"]` gaining a section about hardware should
 add `"hardware"` so future `memory(action="search")` reaches it.
 
+Return messages:
+- **New memory**: `new memory saved as "title.md" (N bytes, K keywords)`
+- **Appended**: `updated "title.md" (+N B → M B total, K keywords)`
+
 Refused on:
-- titles that don't exist (use `memory(action="save")` to create);
+- titles that don't exist **without keywords** (keywords are required
+  to create a new memory so it remains searchable);
 - titles starting with `fix-easyai-` (immutable);
 - merged content that would exceed 256 KiB (split into a new
   memory with `memory(action="save")` instead).

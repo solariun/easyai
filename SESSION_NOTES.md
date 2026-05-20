@@ -2078,6 +2078,29 @@ sudo journalctl -u easyai-server -f
 - Use task tracking via TaskCreate/TaskUpdate when work spans multiple
   steps.
 
+## 10. Recent changes (2026-05-20)
+
+### easyai-cli
+
+| Change | Detail |
+|--------|--------|
+| `--shell` mode | Hybrid AI shell: normal commands execute in user's `$SHELL`, lines prefixed with `>` go to the AI model. Builtins (`cd`, `export`, `unset`) run in-process. Subprocess execution via `fork`/`exec`/`waitpid`. Requires TTY. |
+| Single Ctrl+C | One press stops generation and returns to prompt (no multi-press escalation). Triple rapid press force-exits. Shell subprocesses receive SIGINT from kernel directly (shared pgrp). |
+| Green `●` prompt | REPL prompt changed from cyan `>` to green `●` matching tool-call success markers. |
+| Spinner transition report | When spinner leaves token-streaming mode (tk/s visible), emits a dark blue summary line: `● XX% / NNNN tokens  last: 00.0tk/s` before starting the next shimmer/wheel. Also emitted at `finish()`. |
+
+### memory_append tool
+
+| Condition | Behavior |
+|-----------|----------|
+| Title exists | Appends content, returns "updated …" |
+| Title does not exist + keywords provided | Creates new memory (like `memory_save`), returns "new memory saved as …" |
+| Title does not exist + no keywords | Returns error asking for `keywords[]` |
+
+### Files touched
+
+`examples/cli.cpp`, `src/rag_tools.cpp`, `include/easyai/ui.hpp`, `src/ui.cpp`, `src/cli_client.cpp`, `spec.md`, `easyai-cli.md`, `RAG.md`, `manual.md`, `design.md`, `README.md`.
+
 ---
 
 *End of session notes.  Update this file as work progresses so future

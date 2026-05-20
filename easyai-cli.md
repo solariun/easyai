@@ -107,27 +107,56 @@ on the command line and stdin.
 
 | Mode | Trigger | Behaviour |
 | --- | --- | --- |
-| **REPL** | No `-p`, no positional prompt, stdin is a TTY | Interactive prompt loop. `Ctrl-D` to exit. History persists during the session. `Ctrl-C` during a turn → graceful exit (see below). |
+| **REPL** | No `-p`, no positional prompt, stdin is a TTY | Interactive prompt loop. Green `●` prompt. Ctrl-C stops generation and returns to prompt. `/exit` or `Ctrl-D` to quit. |
+| **Shell** | `--shell` | Hybrid AI shell. Normal commands via `$SHELL`, lines prefixed with `>` go to the AI. `cd`/`export`/`unset` persist. See [§3a](#3a-shell-mode). |
 | **One-shot** | `-p <text>` OR a positional argument | Send the single prompt, stream the reply, exit. |
 | **Piped** | stdin is a pipe (anything redirected in) | Reads stdin into the prompt and runs once. Same as one-shot. |
 | **Management** | `--list-models`, `--list-tools`, `--list-remote-tools`, `--health`, `--props`, `--metrics`, `--set-preset`, `--show-system-prompt` | Hits the named endpoint (or, for `--show-system-prompt`, just resolves locally), prints the result, exits. No chat. See [§14](#14-management-subcommands). |
 
-The four are mutually exclusive: passing `-p` AND a management flag is
+The modes are mutually exclusive: passing `-p` AND a management flag is
 an error.
+
+### 3a. Shell mode
+
+`--shell` starts a hybrid AI shell. The user's `$SHELL` executes
+normal commands; lines prefixed with `>` are sent to the AI model.
+
+```bash
+easyai-cli --url http://ai.local:8080 --shell
+~/project $ ls -la               # executed via zsh/bash
+~/project $ cd src               # persists (handled in-process)
+~/project/src $ > explain main.cpp   # AI takes over
+~/project/src $ /exit            # quit
+```
+
+The prompt shows the current directory (abbreviated with `~`).
+`--shell` implies `--allow-bash`.
+
+**Builtins** — run in-process so state persists across commands:
+
+| Builtin | Behaviour |
+| --- | --- |
+| `cd [dir]` | Supports `~`, `-` (OLDPWD), relative and absolute paths. |
+| `export KEY=VALUE` | Sets env var (quotes stripped). |
+| `unset VAR` | Removes env var. |
+
+**Slash commands** — same as the REPL: `/exit`, `/quit`, `/clear`,
+`/reset`, `/compress`, `/plan`, `/tools`, `/help`.
 
 ### Ctrl-C and SIGTERM
 
-Two signal-handling modes — `--quiet` switches between them.
+Shell-like single-Ctrl-C — no escalation, no multi-step dance.
 
-| Mode | First Ctrl-C / SIGTERM | Second Ctrl-C |
+| Context | First Ctrl-C | Triple rapid Ctrl-C |
 | --- | --- | --- |
-| **interactive** (default) | Mid-turn: prints `<exiting: waiting for the ai session to be finished. Ctrl-C again to force.>` and lets the in-flight chat finish naturally. The conversation isn't truncated mid-stream; the program exits cleanly (rc=0) once the turn ends. At a REPL prompt (no chat in flight): exits immediately, same as `Ctrl-D`. | Hard cancel (rc=130) — the server's decode loop is told to stop, the SSE stream aborts. Use this when the model is genuinely stuck. |
-| **`--quiet`** | Hard cancel immediately (rc=130). This is the expected behavior for `kill <pid>` in a script — no graceful waiting, no extra stderr noise. | Same — already cancelled. |
+| **Mid-generation** (REPL or shell) | Stops generation, prints `<stopped.>`, returns to prompt. | Force-exit (`_exit(130)`). |
+| **At the prompt** (REPL or shell) | Clears the line and shows a new prompt (like bash). Does **not** exit. | Force-exit. |
+| **Shell command running** (`--shell`) | Kills the child process (SIGINT delivered to its process group). Returns to prompt. | Force-exit. |
+| **`--quiet`** (batch) | Hard cancel + exit immediately (`rc=130`). | Force-exit. |
 
-The first-Ctrl-C-is-graceful behavior in interactive mode is there
-because for a long thinking turn the user usually wants to *finish
-this answer and stop*, not to truncate it. The second-Ctrl-C escape
-hatch covers the "model got stuck" case.
+Exit via `/exit`, `/quit`, or `Ctrl-D` (EOF). The triple-rapid
+force-exit is the escape hatch for stuck streams or deadlocked tool
+handlers.
 
 ---
 
@@ -192,13 +221,14 @@ prepended (see [§7](#7-system-prompt--injected-blocks)).
 
 | Flag | Notes |
 | --- | --- |
+| `--shell` | Hybrid AI shell — starts `$SHELL`, `>` prefix for AI prompts. `cd`/`export`/`unset` persist. Implies `--allow-bash`. INI: `[cli] shell = true`. See [§3a](#3a-shell-mode). |
 | `-p TEXT`, `--prompt TEXT` | One-shot prompt. (You can also pass it as a positional arg or pipe via stdin.) |
 | `--no-reasoning`, `--hide-reasoning` | Hide `delta.reasoning_content` (default: shown inline in dim grey). |
 | `--max-reasoning N` | Abort the SSE stream when this turn's reasoning exceeds N chars. 0 = unlimited (default). Useful for thinking models that fall into long deliberation loops. |
 | `--no-retry-on-incomplete` | Disable the auto-retry-with-nudge for incomplete turns (default: ON). |
 | `--retry-on-incomplete` | Legacy alias for the now-default behaviour. No-op. |
 | `--verbose`, `-v` | Log HTTP+SSE diagnostics to stderr (timestamps + per-piece traces). Stderr-only — does NOT create a /tmp log file (use `--log-file` for that). |
-| `-q`, `--quiet` | Disable the spinner glyph + context-fill gauge. Use for batch / scripted runs. **Also changes `Ctrl-C` / `SIGTERM` semantics** — see [§3 → Ctrl-C and SIGTERM](#ctrl-c-and-sigterm). |
+| `-q`, `--quiet` | Disable the spinner glyph + context-fill gauge. Use for batch / scripted runs. **Also changes `Ctrl-C` / `SIGTERM` semantics**: first signal hard-cancels and exits (`rc=130`). See [Ctrl-C and SIGTERM](#ctrl-c-and-sigterm). |
 | `--log-file PATH` | Opt in to a raw transaction log at PATH (request body + every SSE chunk + every tool dispatch input/output, mode 0600). Default OFF — no log file is written without this flag. Implies `--verbose`. |
 | `--tools-mode MODE` | How `fs` / `web` / `memory` are exposed to the model. **MODE** is one of `split` (default since 2026-05-15 — one focused tool per action: `fs_read`, `fs_edit`, …, `memory_save`, …, `web_search`, `web_fetch`), `unified` (legacy single dispatcher per family with `action=`), or `both` (register both surfaces side-by-side). Same handlers under the hood; only the registration shape differs. INI: `[cli] tools_mode = unified\|split\|both`. |
 | `--continue` | Load `.easyai_session` from cwd before the first prompt. **Default OFF** (since 2026-05-13) — any existing session file is ignored and overwritten on the first turn unless this flag is set. INI: `[cli] auto_continue = true\|false`. See [§11](#11-session-persistence). |

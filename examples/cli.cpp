@@ -7,6 +7,7 @@
 // Modes:
 //   easyai-cli-remote --url URL [-p PROMPT]        one-shot (exits after)
 //   easyai-cli-remote --url URL                    interactive REPL
+//   easyai-cli-remote --url URL --shell             hybrid AI shell
 //   easyai-cli-remote --url URL --list-models      management subcommand
 //   easyai-cli-remote --url URL --list-tools       management subcommand
 //   easyai-cli-remote --url URL --health           management subcommand
@@ -74,6 +75,7 @@
 #include <sstream>
 #include <string>
 #include <sys/types.h>
+#include <sys/wait.h>    // waitpid
 #include <fcntl.h>       // open / O_* flags for atomic session write
 #include <unistd.h>      // getpid, write, close
 #include <vector>
@@ -624,6 +626,12 @@ struct Options {
     // and stdin pipe); --unattended forces it on regardless.
     bool        unattended       = false;
 
+    // --shell: hybrid AI shell. Normal commands execute via the user's
+    // $SHELL. Lines prefixed with > are sent to the AI model. CWD and
+    // env vars persist across commands via builtin cd/export handling.
+    bool        shell_mode       = false;
+    bool        shell_mode_cli_set = false;
+
     // INI overlay (CLI > INI > hardcoded). Default is resolved at load
     // time via a layered lookup: $HOME/.easyai/easyai-cli.ini first
     // (per-user, the common case — easyai-cli runs as your user, not a
@@ -927,6 +935,13 @@ void usage(const char * argv0) {
 "                                easyai-cli.md §5 for the full table and\n"
 "                                resources/easyai-cli.ini.example for a\n"
 "                                pristine reference file to copy.\n"
+"    --shell                    hybrid AI shell: starts the user's $SHELL.\n"
+"                                Normal commands execute via the shell.\n"
+"                                Lines prefixed with > are sent to the AI.\n"
+"                                cd and export persist across commands.\n"
+"                                Ctrl+C stops AI generation or the running\n"
+"                                command and returns to the prompt.\n"
+"                                /exit to quit. Implies --allow-bash.\n"
 "    --unattended               inject an [unattended] block into the system\n"
 "                                prompt: tells the model there is no human at\n"
 "                                the terminal, so it cannot ask clarifying\n"
@@ -1032,6 +1047,7 @@ bool parse_args(int argc, char ** argv, Options & o) {
             o.config_path         = need(i, "--config");
             o.config_path_cli_set = true;
         }
+        else if (a == "--shell")           { o.shell_mode = true; o.shell_mode_cli_set = true; }
         else if (a == "--unattended")     { o.unattended = true; o.unattended_cli_set = true; }
         else if (a == "--use-google")     { o.use_google = true; o.use_google_cli_set = true; }
         else if (a == "--external-tools") { o.external_tools_dir = need(i, "--external-tools"); o.external_tools_cli_set = true; }
@@ -1400,6 +1416,7 @@ bool parse_args(int argc, char ** argv, Options & o) {
         load_bool_flag ("auto_compress",     o.auto_compress,     o.auto_compress_cli_set);
         load_str_flag  ("session_file",      o.session_file,      o.session_file_cli_set);
         load_bool_flag ("no_local_session",  o.no_local_session,  o.no_local_session_cli_set);
+        load_bool_flag ("shell",             o.shell_mode,        o.shell_mode_cli_set);
 
         // ----- Tools-mode (closed enum, validated separately) ---------
         if (!o.tools_mode_cli_set) {
@@ -1690,30 +1707,32 @@ using easyai::cli::client_has_tool;
 //   First signal hard-cancels the in-flight request and exits.
 //   Second signal force-exits via _exit(130).
 //
-// INTERACTIVE (default) MODE
-//   First signal during a chat turn → STOP GENERATION: cooperative
-//   cancel flips, the SSE stream aborts, the model stops. The REPL
-//   returns to the prompt so the user can continue the conversation.
-//   Second signal (same turn or at prompt) → QUIT: set graceful_exit
-//   and cancel. The REPL breaks.
-//   Third signal → force _exit(130) — operator's escape hatch for
-//   stalled sockets / deadlocked tool handlers.
-//   First signal at the REPL prompt → getline returns EINTR, REPL
-//   exits cleanly.
+// INTERACTIVE (default) MODE — shell-like single-Ctrl+C:
+//   During AI generation → STOP: cooperative cancel aborts the SSE
+//   stream, the model stops, REPL returns to the prompt.
+//   During a shell subprocess (--shell mode) → ignored in our
+//   handler; the child in our process group receives SIGINT directly
+//   from the kernel and dies.
+//   At the REPL / shell prompt → getline returns EINTR, the loop
+//   clears cin and re-prompts (like bash). Does NOT exit.
+//   Triple rapid signal → force _exit(130) — escape hatch.
+//   Exit via /exit, /quit, or Ctrl+D (EOF).
 //
 // std::atomic<T>::store on a lock-free atomic_bool is async-signal-safe in
 // practice on every platform we care about (x86, ARM64, RISC-V) — that
 // plus a single ::write() to STDERR_FILENO is all we do from inside the
 // handler. printf / fprintf would NOT be safe.
-static std::atomic<int>    g_signal_count{0};     // 0=none, 1=stop, 2=quit, 3+=force
+static std::atomic<int>    g_signal_count{0};     // 0=none, 1=stop, 2+=force
 static std::atomic<bool>   g_quiet_mode{false};   // mirror of o.quiet
 static std::atomic<bool>   g_in_chat{false};      // true between cli.chat() entry/exit
-static std::atomic<bool>   g_graceful_exit{false}; // "exit the REPL when the turn ends"
+static std::atomic<bool>   g_in_shell_cmd{false};  // true during --shell subprocess wait
+static std::atomic<bool>   g_graceful_exit{false}; // quiet-mode only: exit after cancel
 static easyai::Client *    g_active_client = nullptr;
 
 static void on_terminating_signal(int /*sig*/) {
     const int count = g_signal_count.fetch_add(1, std::memory_order_relaxed) + 1;
 
+    // Triple signal: force-exit (escape hatch for stuck streams/subprocesses).
     if (count >= 3) {
         static const char kMsg[] = "\n<force-exiting now.>\n";
         ssize_t _ = ::write(STDERR_FILENO, kMsg, sizeof(kMsg) - 1);
@@ -1721,34 +1740,35 @@ static void on_terminating_signal(int /*sig*/) {
         ::_exit(130);
     }
 
-    // Quiet mode: first signal is always a hard cancel.
+    // Quiet mode: first signal hard-cancels and marks exit.
     if (g_quiet_mode.load(std::memory_order_relaxed)) {
-        if (g_active_client != nullptr) g_active_client->request_cancel();
-        return;
-    }
-
-    // Second signal: quit.
-    if (count >= 2) {
         g_graceful_exit.store(true, std::memory_order_relaxed);
         if (g_active_client != nullptr) g_active_client->request_cancel();
-        static const char kMsg[] =
-            "\n<exiting… Ctrl-C once more to force-exit.>\n";
-        ssize_t _ = ::write(STDERR_FILENO, kMsg, sizeof(kMsg) - 1);
-        (void) _;
         return;
     }
 
-    // First signal mid-chat: stop generation, return to REPL.
+    // Shell subprocess running: the child shares our process group and
+    // receives SIGINT directly from the kernel — nothing for us to do.
+    // Reset the counter so the next Ctrl+C after the child exits starts
+    // fresh.
+    if (g_in_shell_cmd.load(std::memory_order_relaxed)) {
+        g_signal_count.store(0, std::memory_order_relaxed);
+        return;
+    }
+
+    // Mid-chat (AI generation): cancel the stream, return to prompt.
     if (g_in_chat.load(std::memory_order_relaxed)) {
         if (g_active_client != nullptr) g_active_client->request_cancel();
-        static const char kMsg[] =
-            "\n<stopping generation… Ctrl-C again to quit.>\n";
-        ssize_t _ = ::write(STDERR_FILENO, kMsg, sizeof(kMsg) - 1);
-        (void) _;
+        if (count == 1) {
+            static const char kMsg[] = "\n<stopped.>\n";
+            ssize_t _ = ::write(STDERR_FILENO, kMsg, sizeof(kMsg) - 1);
+            (void) _;
+        }
         return;
     }
 
-    // At REPL prompt: getline returns EINTR, the prompt loop exits.
+    // At REPL / shell prompt: getline returns EINTR. The loop clears
+    // cin and re-prompts — does NOT exit (like bash).
 }
 
 static void install_cancel_handlers() {
@@ -1956,6 +1976,239 @@ int run_one(easyai::Client & cli, easyai::Plan & plan,
     return 0;
 }
 
+// ---- --shell mode --------------------------------------------------------
+//
+// Hybrid AI shell: the user's $SHELL executes normal commands; lines
+// prefixed with > are forwarded to the AI model.  CWD and env vars
+// persist across commands via builtin cd/export handling.  Ctrl+C
+// cancels the running command or AI generation and returns to the
+// prompt.  /exit or Ctrl+D to quit.
+
+static std::string abbreviate_home(const std::string & path) {
+    const char * home = std::getenv("HOME");
+    if (!home) return path;
+    std::string h = home;
+    if (path.compare(0, h.size(), h) == 0
+        && (path.size() == h.size() || path[h.size()] == '/'))
+        return "~" + path.substr(h.size());
+    return path;
+}
+
+static bool handle_shell_builtin(const std::string & cmd) {
+    // cd [dir]
+    if (cmd == "cd" || cmd.compare(0, 3, "cd ") == 0
+                    || cmd.compare(0, 3, "cd\t") == 0) {
+        std::string target;
+        if (cmd.size() <= 3) {
+            const char * home = std::getenv("HOME");
+            target = home ? home : "/";
+        } else {
+            target = cmd.substr(3);
+            // trim leading whitespace
+            auto pos = target.find_first_not_of(" \t");
+            if (pos != std::string::npos) target = target.substr(pos);
+            // trim trailing whitespace
+            pos = target.find_last_not_of(" \t");
+            if (pos != std::string::npos) target.erase(pos + 1);
+            // expand leading ~
+            if (!target.empty() && target[0] == '~') {
+                const char * home = std::getenv("HOME");
+                if (home) target = std::string(home) + target.substr(1);
+            }
+            // cd - → OLDPWD
+            if (target == "-") {
+                const char * old = std::getenv("OLDPWD");
+                if (!old) {
+                    std::fprintf(stderr, "cd: OLDPWD not set\n");
+                    return true;
+                }
+                target = old;
+            }
+        }
+        char prev[PATH_MAX];
+        if (::getcwd(prev, sizeof(prev)) != nullptr)
+            ::setenv("OLDPWD", prev, 1);
+        if (::chdir(target.c_str()) != 0) {
+            std::fprintf(stderr, "cd: %s: %s\n",
+                         target.c_str(), std::strerror(errno));
+        }
+        return true;
+    }
+
+    // export KEY=VALUE
+    if (cmd.compare(0, 7, "export ") == 0) {
+        std::string kv = cmd.substr(7);
+        auto pos = kv.find_first_not_of(" \t");
+        if (pos != std::string::npos) kv = kv.substr(pos);
+        auto eq = kv.find('=');
+        if (eq == std::string::npos || eq == 0) {
+            std::fprintf(stderr, "export: invalid format (expected KEY=VALUE)\n");
+            return true;
+        }
+        std::string key = kv.substr(0, eq);
+        std::string val = kv.substr(eq + 1);
+        // strip surrounding quotes from value
+        if (val.size() >= 2
+            && ((val.front() == '"'  && val.back() == '"')
+             || (val.front() == '\'' && val.back() == '\'')))
+            val = val.substr(1, val.size() - 2);
+        ::setenv(key.c_str(), val.c_str(), 1);
+        return true;
+    }
+
+    // unset VAR
+    if (cmd.compare(0, 6, "unset ") == 0) {
+        std::string var = cmd.substr(6);
+        auto pos = var.find_first_not_of(" \t");
+        if (pos != std::string::npos) var = var.substr(pos);
+        pos = var.find_last_not_of(" \t");
+        if (pos != std::string::npos) var.erase(pos + 1);
+        ::unsetenv(var.c_str());
+        return true;
+    }
+
+    return false;
+}
+
+static void exec_shell_command(const char * shell, const std::string & cmd) {
+    pid_t pid = ::fork();
+    if (pid < 0) {
+        std::fprintf(stderr, "fork: %s\n", std::strerror(errno));
+        return;
+    }
+    if (pid == 0) {
+        // Child — default signal disposition is restored by exec.
+        ::signal(SIGINT,  SIG_DFL);
+        ::signal(SIGTERM, SIG_DFL);
+        ::signal(SIGQUIT, SIG_DFL);
+        ::execl(shell, shell, "-c", cmd.c_str(), nullptr);
+        ::_exit(127);
+    }
+    // Parent: mark shell-cmd state so the signal handler ignores SIGINT
+    // (the child shares our process group and receives it directly).
+    g_in_shell_cmd.store(true, std::memory_order_relaxed);
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0 && errno == EINTR)
+        ;  // retry on EINTR — our signal handler returns, waitpid resumes
+    g_in_shell_cmd.store(false, std::memory_order_relaxed);
+    g_signal_count.store(0, std::memory_order_relaxed);
+}
+
+int run_shell(easyai::Client & cli, easyai::Plan & plan,
+              const Options & o, const Style & st) {
+    const char * shell = std::getenv("SHELL");
+    if (!shell || shell[0] == '\0') shell = "/bin/sh";
+
+    std::fprintf(stderr,
+        "%seasyai-shell%s — commands execute via %s%s%s.\n"
+        "Prefix with %s>%s for AI prompts.  /exit to quit, /help for commands.\n"
+        "Ctrl+C stops the current AI generation or command.\n",
+        st.bold(),  st.reset(),
+        st.bold(),  shell,  st.reset(),
+        st.cyan(),  st.reset());
+
+    std::string line;
+    while (true) {
+        cli.clear_cancel();
+        g_signal_count.store(0, std::memory_order_relaxed);
+
+        // CWD-aware prompt: ~/project $
+        char cwd_buf[PATH_MAX];
+        const char * cwd_raw = ::getcwd(cwd_buf, sizeof(cwd_buf));
+        std::string cwd_display = cwd_raw ? abbreviate_home(cwd_raw) : "?";
+        std::fprintf(stdout, "%s%s%s %s$%s ",
+                     st.bold(), cwd_display.c_str(), st.reset(),
+                     st.cyan(), st.reset());
+        std::fflush(stdout);
+
+        if (!std::getline(std::cin, line)) {
+            std::fputc('\n', stdout);
+            if (g_signal_count.load(std::memory_order_relaxed) > 0) {
+                std::cin.clear();
+                std::clearerr(stdin);
+                continue;
+            }
+            break;  // EOF
+        }
+        if (line.empty()) continue;
+
+        // Slash commands — same as REPL
+        auto save_after_mutation = [&]() {
+            if (o.no_local_session) return;
+            std::string save_err;
+            if (!save_session(cli, o.session_file, &save_err)) {
+                std::fprintf(stderr,
+                    "%swarning:%s could not save session file: %s\n",
+                    st.yellow(), st.reset(), save_err.c_str());
+            }
+        };
+
+        if (is_special(line, "/exit") || is_special(line, "/quit")) break;
+        if (is_special(line, "/clear")) {
+            cli.clear_history();
+            save_after_mutation();
+            std::fprintf(stderr, "%shistory cleared%s\n", st.dim(), st.reset());
+            continue;
+        }
+        if (is_special(line, "/reset")) {
+            cli.clear_history(); plan.clear();
+            save_after_mutation();
+            std::fprintf(stderr, "%shistory + plan cleared%s\n",
+                         st.dim(), st.reset());
+            continue;
+        }
+        if (is_special(line, "/compress")) {
+            if (do_compress(cli, st)) save_after_mutation();
+            continue;
+        }
+        if (is_special(line, "/plan"))  { render_plan(plan, st); continue; }
+        if (is_special(line, "/tools")) {
+            for (const auto & t : cli.tools()) {
+                std::fprintf(stdout, "%s%s%s\n  %s%s%s\n",
+                             st.bold(), t.name.c_str(), st.reset(),
+                             st.dim(),  t.description.c_str(), st.reset());
+            }
+            continue;
+        }
+        if (is_special(line, "/help")) {
+            std::fputs(
+                "  > prompt      send prompt to AI\n"
+                "  command       execute via shell\n"
+                "  /exit /quit   leave\n"
+                "  /clear        clear AI conversation\n"
+                "  /reset        clear conversation + plan\n"
+                "  /compress     recap session\n"
+                "  /plan         show plan checklist\n"
+                "  /tools        list AI tools\n",
+                stdout);
+            continue;
+        }
+        if (line[0] == '/' && line.size() > 1) {
+            std::fprintf(stderr, "unknown command: %s — try /help\n",
+                         line.c_str());
+            continue;
+        }
+
+        // AI prompt: > prefix
+        if (line[0] == '>') {
+            std::string prompt = line.substr(1);
+            auto pos = prompt.find_first_not_of(" \t");
+            if (pos == std::string::npos) continue;
+            prompt = prompt.substr(pos);
+            run_one(cli, plan, prompt, o, st);
+            if (g_graceful_exit.load(std::memory_order_relaxed)) break;
+            continue;
+        }
+
+        // Shell builtins (cd, export, unset)
+        if (handle_shell_builtin(line)) continue;
+
+        // Normal shell command
+        exec_shell_command(shell, line);
+    }
+    return 0;
+}
+
 int run_repl(easyai::Client & cli, easyai::Plan & plan,
              const Options & o, const Style & st) {
     std::fprintf(stderr,
@@ -1963,33 +2216,24 @@ int run_repl(easyai::Client & cli, easyai::Plan & plan,
         "Session auto-saves to %s.easyai_session%s in the current "
         "directory after every turn; pass %s--continue%s next time to "
         "resume.  /compress to recap mid-session.\n"
-        "Ctrl+C during a turn → exits AFTER the current turn finishes "
-        "(press again to force-cancel).\n"
-        "Ctrl+C at an empty prompt → exits immediately.\n",
+        "Ctrl+C stops AI generation and returns to the prompt.\n"
+        "Ctrl+D or /exit to quit.\n",
         st.bold(), st.reset(),
         st.bold(), st.reset(),
         st.bold(), st.reset());
     std::string line;
     while (true) {
-        // Reset cancel state at the top of each prompt: a Ctrl+C during
-        // the previous turn flipped the Client's flag (sticky), and
-        // without clearing it the next chat() would short-circuit
-        // immediately. The signal-caught atomic also resets here so we
-        // can detect a Ctrl+C that arrives DURING getline below.
         cli.clear_cancel();
         g_signal_count.store(0, std::memory_order_relaxed);
 
-        std::fprintf(stdout, "%s>%s ", st.cyan(), st.reset());
+        std::fprintf(stdout, "%s● %s", st.green(), st.reset());
         std::fflush(stdout);
         if (!std::getline(std::cin, line)) {
-            // getline returned false — could be EOF (Ctrl+D), or EINTR
-            // from our SIGINT handler interrupting the read. Distinguish
-            // the two so Ctrl+C at an empty prompt exits cleanly without
-            // also turning Ctrl+D into a confusing "cancelled" message.
             std::fputc('\n', stdout);
             if (g_signal_count.load(std::memory_order_relaxed) > 0) {
-                std::fprintf(stderr, "%s(interrupted)%s\n",
-                             st.dim(), st.reset());
+                std::cin.clear();
+                std::clearerr(stdin);
+                continue;
             }
             break;
         }
@@ -2127,13 +2371,23 @@ int main(int argc, char ** argv) {
     //   easyai-cli-remote --url ai.local <<EOF
     //   ... long question ...
     //   EOF
-    if (o.prompt.empty() && ::isatty(fileno(stdin)) == 0) {
+    if (o.prompt.empty() && !o.shell_mode && ::isatty(fileno(stdin)) == 0) {
         std::string buf, line;
         while (std::getline(std::cin, line)) {
             if (!buf.empty()) buf += "\n";
             buf += line;
         }
         if (!buf.empty()) o.prompt = std::move(buf);
+    }
+
+    // --shell implies --allow-bash and requires a TTY.
+    if (o.shell_mode) {
+        o.allow_bash = true;
+        if (::isatty(fileno(stdin)) == 0) {
+            std::fprintf(stderr, "%serror:%s --shell requires an interactive terminal\n",
+                         st.red(), st.reset());
+            return 2;
+        }
     }
 
     // One-shot runs (--prompt / positional / piped stdin) imply
@@ -2460,9 +2714,9 @@ int main(int argc, char ** argv) {
     int rc;
     if (any_management(o)) {
         rc = run_management(cli, o, st);
+    } else if (o.shell_mode) {
+        rc = run_shell(cli, plan, o, st);
     } else {
-        // Streaming wiring happens INSIDE run_one (per-turn) now —
-        // no longer a one-shot wire_callbacks at the top level.
         if (!o.prompt.empty()) rc = run_one(cli, plan, o.prompt, o, st);
         else                   rc = run_repl(cli, plan, o, st);
     }

@@ -1494,7 +1494,7 @@ with seven sub-actions:
 ```cpp
 engine.add_tool(easyai::tools::make_rag_tool("/var/lib/easyai/rag"));
 // memory(action="save",     title, keywords[], content, fix?)
-// memory(action="append",   title, content, keywords?)        — grow an existing memory
+// memory(action="append",   title, content, keywords?)        — grow existing or create new (keywords required if new)
 // memory(action="search",   keywords[], max_results=10)
 // memory(action="load",     titles[1..4])
 // memory(action="list",     prefix?, max=50)

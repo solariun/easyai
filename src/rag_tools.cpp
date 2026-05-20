@@ -982,20 +982,49 @@ ToolHandler make_append_handler(std::shared_ptr<RagStore> store) {
         // the existing body and the rewrite of the merged content.
         std::unique_lock<std::shared_mutex> lock(store->mu);
 
-        // Existence check before we touch disk: the model should
-        // know to call rag_save instead of rag_append for a brand-
-        // new memory. We use the in-memory index as the source of
-        // truth (load_index_locked ran at startup).
-        if (store->index.count(title) == 0) {
-            return ToolResult::error(
-                "no memory titled \"" + title + "\" — use rag_save to "
-                "create a new memory, or rag_list / rag_search to find "
-                "the title you meant.");
+        // If the title doesn't exist yet, create it as a new memory
+        // (save semantics) instead of erroring — the caller's intent
+        // is clearly "make sure this content ends up under this title".
+        const bool is_new = (store->index.count(title) == 0);
+        if (is_new) {
+            // keywords are required for a brand-new memory (search
+            // needs at least one). If the caller didn't supply any,
+            // error with a helpful message.
+            if (extra_keywords.empty()) {
+                return ToolResult::error(
+                    "no memory titled \"" + title + "\" — memory_append "
+                    "can create it, but keywords[] is required for new "
+                    "memories (search needs at least one).");
+            }
+            if (suffix.size() > kMaxContentBytes) {
+                return ToolResult::error(
+                    "content exceeds " + std::to_string(kMaxContentBytes)
+                    + " bytes; split into multiple memories");
+            }
+            if (!store->save_locked(title, extra_keywords, suffix, err)) {
+                return ToolResult::error(err);
+            }
+            std::ostringstream o;
+            o << "new memory saved as \"" << title << kEntrySuffix << "\" ("
+              << suffix.size() << " bytes, "
+              << extra_keywords.size() << " keyword"
+              << (extra_keywords.size() == 1 ? "" : "s") << ")";
+            const bool title_changed = (title_raw != title);
+            if (title_changed || !kw_changes.empty() || !kw_dropped.empty()) {
+                o << "\nnormalised:";
+                if (title_changed)
+                    o << "\n  title \"" << title_raw << "\" -> \"" << title << "\"";
+                for (const auto & ch : kw_changes)
+                    o << "\n  keyword \"" << ch.first << "\" -> \"" << ch.second << "\"";
+                if (!kw_dropped.empty()) {
+                    o << "\n  dropped (empty after normalising):";
+                    for (const auto & d : kw_dropped) o << " \"" << d << "\"";
+                }
+            }
+            return ToolResult::ok(o.str());
         }
 
         // Immutability gate: fixed memories live forever as written.
-        // Even an append would mutate them, so refuse the same way
-        // rag_save and rag_delete do.
         if (title_is_fixed(title)) {
             return ToolResult::error(
                 "memory \"" + title + "\" is fixed (immutable) — cannot "
@@ -1067,7 +1096,7 @@ ToolHandler make_append_handler(std::shared_ptr<RagStore> store) {
         }
 
         std::ostringstream o;
-        o << "appended to \"" << title << kEntrySuffix << "\" ("
+        o << "updated \"" << title << kEntrySuffix << "\" ("
           << "+" << suffix.size() << " B → " << merged.size() << " B total, "
           << merged_keywords.size() << " keyword"
           << (merged_keywords.size() == 1 ? "" : "s") << ")";
@@ -1669,10 +1698,12 @@ Tool make_rag_tool(std::string root_dir) {
             "`fix-easyai-` prefix.\n"
             "\n"
             "action=\"append\"   title, content → add to existing "
-            "memory (a Markdown `---` separates additions). Refused "
-            "on missing titles and on fix-easyai-*.\n"
+            "memory (a Markdown `---` separates additions). If the "
+            "title does not exist, creates a new memory (keywords "
+            "required). Returns whether saved (new) or updated "
+            "(appended). Refused on fix-easyai-*.\n"
             "  Optional: keywords (merged into existing, deduped, "
-            "cap 8).\n"
+            "cap 8; required if title is new).\n"
             "\n"
             "action=\"search\"   keywords (JSON array) → ranked "
             "matches.\n"
@@ -1873,14 +1904,18 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
     out.push_back(Tool::builder("memory_append")
         .describe(
             "Append to an existing memory (a Markdown `---` "
-            "separates each addition). Refused on fix-easyai-* and "
-            "missing titles.")
+            "separates each addition). If the title does not "
+            "exist, creates a new memory (keywords required). "
+            "Returns whether the memory was saved (new) or "
+            "updated (appended). Refused on fix-easyai-*.")
         .param("title",    "string",
-               "Existing memory's title.", true)
+               "Memory title — existing or new.", true)
         .param("content",  "string",
-               "Text added after the current body.", true)
+               "Text added after the current body (or full body "
+               "if new).", true)
         .param("keywords", "array",
-               "Extra keywords merged in (deduped, cap 24).", false)
+               "Extra keywords merged in (deduped, cap 24). "
+               "Required when creating a new memory.", false)
         .handle(h_append)
         .build());
 

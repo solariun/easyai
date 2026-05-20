@@ -34,6 +34,7 @@ struct Style {
     const char * yellow() const { return color ? "\033[33m" : ""; }
     const char * red   () const { return color ? "\033[31m" : ""; }
     const char * green () const { return color ? "\033[32m" : ""; }
+    const char * blue  () const { return color ? "\033[34m" : ""; }
     const char * bg_red  () const { return color ? "\033[48;5;52m"  : ""; }
     const char * bg_green() const { return color ? "\033[48;5;22m"  : ""; }
 };
@@ -120,6 +121,11 @@ public:
     // confuse the operator).  No-op when thinking_ is off.
     void set_thinking_pct(int pct);
 
+    // Feed absolute context-window token counts for the report line
+    // emitted on thinking transitions.  Called alongside set_context_pct
+    // from the streaming wiring.
+    void set_context_tokens(int used, int total);
+
 private:
     void maybe_advance_locked_();
     void erase_active_locked_();
@@ -138,6 +144,8 @@ private:
     int  shimmer_phase_= 0;      // advances with every heartbeat while thinking_
     int  active_width_ = 0;   // chars currently on stdout — backspace count for erase
     int  context_pct_  = -1;  // -1 = no suffix; 0..100 = "<pct>%"
+    int  ctx_used_     = -1;  // absolute token counts for the transition report
+    int  ctx_total_    = -1;
     int  thinking_pct_ = -1;  // real prompt-eval %, fed by Client::on_prompt_progress
     std::atomic<bool> thinking_{false};
     std::chrono::steady_clock::time_point last_advance_{};

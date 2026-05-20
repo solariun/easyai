@@ -72,7 +72,32 @@ void Spinner::initial_draw() {
 void Spinner::finish() {
     if (!enabled_) return;
     std::lock_guard<std::mutex> lg(mu_);
-    erase_active_locked_();
+    // If tokens were streaming, emit a final summary line before wiping.
+    if (token_speed_ > 0.1) {
+        erase_active_locked_();
+        char buf[128];
+        int n;
+        if (context_pct_ >= 0 && ctx_used_ >= 0) {
+            n = std::snprintf(buf, sizeof(buf),
+                "\n● %d%% / %d tokens  last: %.1ftk/s\n",
+                context_pct_, ctx_used_, token_speed_);
+        } else if (context_pct_ >= 0) {
+            n = std::snprintf(buf, sizeof(buf),
+                "\n● %d%%  last: %.1ftk/s\n",
+                context_pct_, token_speed_);
+        } else {
+            n = std::snprintf(buf, sizeof(buf),
+                "\n● last: %.1ftk/s\n",
+                token_speed_);
+        }
+        if (n > 0) {
+            if (color_) std::fputs("\033[34m", stdout);
+            std::fwrite(buf, 1, (size_t) n, stdout);
+            if (color_) std::fputs("\033[0m",  stdout);
+        }
+    } else {
+        erase_active_locked_();
+    }
     std::fflush(stdout);
     frame_          = 0;
     token_speed_    = 0.0;
@@ -100,22 +125,57 @@ void Spinner::set_context_pct(int pct) {
     }
 }
 
+void Spinner::set_context_tokens(int used, int total) {
+    if (!enabled_) return;
+    std::lock_guard<std::mutex> lg(mu_);
+    ctx_used_  = used;
+    ctx_total_ = total;
+}
+
 void Spinner::set_thinking(bool on) {
     if (!enabled_) return;
-    // Idempotent: skip the lock + repaint when nothing changes so the
-    // repeated "set_thinking(false)" call cli.cpp fires after every
-    // chat() return doesn't cost a flush per turn.
     if (thinking_.load(std::memory_order_relaxed) == on) return;
     {
         std::lock_guard<std::mutex> lg(mu_);
+
+        // Transition: token-streaming → thinking.  If we had visible
+        // token speed, emit a summary line before the shimmer starts:
+        //   ● XX% / NNNN tokens  last: 00.0tk/s
+        if (on && token_speed_ > 0.1) {
+            erase_active_locked_();
+            char buf[128];
+            int n;
+            if (context_pct_ >= 0 && ctx_used_ >= 0) {
+                n = std::snprintf(buf, sizeof(buf),
+                    "\n● %d%% / %d tokens  last: %.1ftk/s\n",
+                    context_pct_, ctx_used_, token_speed_);
+            } else if (context_pct_ >= 0) {
+                n = std::snprintf(buf, sizeof(buf),
+                    "\n● %d%%  last: %.1ftk/s\n",
+                    context_pct_, token_speed_);
+            } else {
+                n = std::snprintf(buf, sizeof(buf),
+                    "\n● last: %.1ftk/s\n",
+                    token_speed_);
+            }
+            if (n > 0) {
+                if (color_) std::fputs("\033[34m", stdout);   // dark blue
+                std::fwrite(buf, 1, (size_t) n, stdout);
+                if (color_) std::fputs("\033[0m",  stdout);
+            }
+            std::fflush(stdout);
+            active_ = false;
+            active_width_ = 0;
+        }
+
         thinking_.store(on, std::memory_order_relaxed);
-        // Reset the sweep position when entering thinking mode so the
-        // spotlight always starts from the left edge of the word —
-        // otherwise a quick prompt would catch the wave mid-pass and
-        // it'd look like the animation is jumpy.
         if (on) {
             shimmer_phase_ = 0;
-            thinking_pct_  = -1;   // clear stale % from the previous turn
+            thinking_pct_  = -1;
+            // Reset speed tracking so the next segment starts fresh.
+            token_speed_    = 0.0;
+            last_tok_count_ = tok_count_.load(std::memory_order_relaxed);
+            last_speed_time_ = std::chrono::steady_clock::now();
         }
         if (active_) {
             erase_active_locked_();
@@ -123,9 +183,6 @@ void Spinner::set_thinking(bool on) {
             std::fflush(stdout);
         }
     }
-    // Wake the heartbeat thread so it adopts the new cadence
-    // (kThinkingIntervalMs vs kIdleIntervalMs) on the very next sleep
-    // instead of finishing whatever wait it was already in.
     hb_cv_.notify_all();
 }
 

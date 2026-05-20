@@ -281,3 +281,8 @@
 ; for feeding a pre-baked session into a scheduled job without
 ; mutating the file.
 ;no_local_session = false
+
+; Hybrid AI shell mode. Normal commands execute via $SHELL;
+; lines prefixed with > are sent to the AI model. Requires TTY.
+; CLI flag --shell overrides this setting.
+;shell            = false
