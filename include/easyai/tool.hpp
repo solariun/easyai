@@ -17,9 +17,13 @@ struct ToolResult {
     std::string content;
     bool        is_error    = false;
     int         duration_ms = 0;   // wall-clock dispatch time, set by Engine
+    std::string display;           // ANSI-colored terminal output (optional)
 
-    static ToolResult ok(std::string s)    { return { std::move(s), false, 0 }; }
-    static ToolResult error(std::string s) { return { std::move(s), true,  0 }; }
+    static ToolResult ok(std::string s)    { return { std::move(s), false, 0, {} }; }
+    static ToolResult error(std::string s) { return { std::move(s), true,  0, {} }; }
+    static ToolResult ok_display(std::string s, std::string d) {
+        return { std::move(s), false, 0, std::move(d) };
+    }
 };
 
 // ToolCall is what easyai hands the handler. `arguments_json` is the raw JSON

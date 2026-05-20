@@ -125,7 +125,7 @@ bool LocalBackend::init(std::string & err) {
 
     engine.on_tool([](const ToolCall & c, const ToolResult & r){
         std::fprintf(stderr,
-            "\n\033[36m[tool] %s -> %s%.200s%s\033[0m\n",
+            "\n\033[32m● %s -> %s%.200s%s\033[0m\n",
             c.name.c_str(),
             r.is_error ? "ERR " : "",
             r.content.c_str(),

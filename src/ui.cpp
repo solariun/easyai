@@ -495,8 +495,8 @@ void Streaming::on_tool_(const ToolCall & call, const ToolResult & result) {
     ++stats_.tool_calls;
     if (result.is_error) ++stats_.tool_errors;
 
-    const char * marker = result.is_error ? "✗" : "🔧";
-    const char * color  = result.is_error ? style_.red() : style_.cyan();
+    const char * marker = result.is_error ? "✗" : "●";
+    const char * color  = result.is_error ? style_.red() : style_.green();
     std::ostringstream ss;
     ss << "\n" << color << marker << " " << call.name;
     if (result.duration_ms >= 0) {
@@ -511,6 +511,7 @@ void Streaming::on_tool_(const ToolCall & call, const ToolResult & result) {
            << style_.reset();
     }
     ss << "\n";
+    if (!result.display.empty() && style_.color) ss << result.display;
     spinner_.write(ss.str());
 
     if (verbose_) {

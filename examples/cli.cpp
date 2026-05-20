@@ -1806,7 +1806,7 @@ int run_one(easyai::Client & cli, easyai::Plan & plan,
     StreamStats stats;  stats.reset();
 
     // Attach the canonical streaming UX (spinner-locked content + dim
-    // reasoning + 🔧/✗ tool markers + live plan render) to the client
+    // reasoning + ●/✗ tool markers + live plan render) to the client
     // and plan.  MUST be a named local — the attach() lambdas capture
     // `this`, so a temporary that died at the end of its expression
     // would leave them dangling for the duration of cli.chat().

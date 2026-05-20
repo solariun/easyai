@@ -2239,7 +2239,7 @@ static void handle_chat_stream(ServerCtx & ctx,
                 if (target.size() > 80) { target.resize(80); target += "…"; }
 
                 std::ostringstream tlog;
-                tlog << "\n" << (r.is_error ? "❌ " : "🔧 ") << c.name;
+                tlog << "\n" << (r.is_error ? "❌ " : "● ") << c.name;
                 tlog << " (" << r.duration_ms << "ms)";
                 if (!target.empty()) tlog << " " << target;
                 if (r.is_error) {

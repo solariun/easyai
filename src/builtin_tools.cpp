@@ -1892,16 +1892,15 @@ namespace {
 
 ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
     return [sb](const ToolCall & c) -> ToolResult {
-        std::string path; long long offset = 0, limit = 64 * 1024;
+        std::string path;
+        long long offset = 0, limit = 0, start_line = 0;
         bool line_numbers = false;
         if (!args::get_string(c.arguments_json, "path", path))
             return ToolResult::error("missing arg: path (fs action=\"read\")");
+        bool has_limit = args::get_int(c.arguments_json, "limit",  limit);
         args::get_int(c.arguments_json, "offset", offset);
-        args::get_int(c.arguments_json, "limit",  limit);
+        args::get_int(c.arguments_json, "start_line", start_line);
         args::get_bool(c.arguments_json, "line_numbers", line_numbers);
-        if (offset < 0) offset = 0;
-        if (limit  < 1) limit  = 1;
-        if (limit > 1024 * 1024) limit = 1024 * 1024;
 
         stdfs::path p; std::string err;
         if (!sb->resolve(path, p, err)) return ToolResult::error(err);
@@ -1909,23 +1908,12 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
             return ToolResult::error("path escapes sandbox via symlink: "
                                      + sb->virtual_path(p));
         }
-        // O_NOFOLLOW + O_CLOEXEC so a symlink at the leaf (e.g. planted
-        // by the bash tool) cannot redirect us out of the sandbox
-        // between the containment check and the open(). The check
-        // above canonicalises but a TOCTOU race on fast-changing
-        // filesystems would still escape it without O_NOFOLLOW.
         int fd = ::open(p.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         if (fd < 0) {
             return ToolResult::error(std::string("cannot open: ")
                                      + sb->virtual_path(p)
                                      + " (" + std::strerror(errno) + ")");
         }
-        // Pre-empt the cryptic "read failed: Is a directory" errno that
-        // ::read returns when fd points at a directory.  open() succeeds
-        // on a dir (you can open it for read; you just can't ::read()
-        // bytes from it), so we have to fstat the result.  A targeted
-        // error message that names the right action keeps the model
-        // from retry-looping against the same path.
         {
             struct stat st_kind {};
             if (::fstat(fd, &st_kind) == 0 && S_ISDIR(st_kind.st_mode)) {
@@ -1937,6 +1925,102 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
                     "or action=\"glob\" / \"grep\" for recursive search.");
             }
         }
+
+        // ----- line-based read (start_line set) -------------------------
+        // When start_line is present, `limit` means number of lines
+        // (default 200, max 2000). Line numbers are always on.
+        if (start_line > 0) {
+            constexpr size_t kLineReadMax = 8 * 1024 * 1024;
+            std::string body;
+            {
+                char chunk[64 * 1024];
+                for (;;) {
+                    ssize_t n = ::read(fd, chunk, sizeof(chunk));
+                    if (n < 0) {
+                        if (errno == EINTR) continue;
+                        ::close(fd);
+                        return ToolResult::error(
+                            std::string("read failed: ")
+                            + std::strerror(errno));
+                    }
+                    if (n == 0) break;
+                    if (body.size() + (size_t) n > kLineReadMax) {
+                        ::close(fd);
+                        return ToolResult::error(
+                            "file too large for line-based read (>8 MiB); "
+                            "use offset/limit (byte-based) instead.");
+                    }
+                    body.append(chunk, (size_t) n);
+                }
+            }
+            ::close(fd);
+
+            // Split into line offsets.
+            std::vector<std::pair<size_t, size_t>> lns; // (start, len-incl-\n)
+            lns.reserve(body.size() / 40 + 1);
+            size_t ls = 0;
+            for (size_t i = 0; i < body.size(); ++i) {
+                if (body[i] == '\n') {
+                    lns.emplace_back(ls, i - ls + 1);
+                    ls = i + 1;
+                }
+            }
+            if (ls < body.size()) lns.emplace_back(ls, body.size() - ls);
+
+            const long long total = (long long) lns.size();
+            if (start_line > total) {
+                return ToolResult::error(
+                    "start_line " + std::to_string(start_line)
+                    + " past end of file (total lines: "
+                    + std::to_string(total) + ")");
+            }
+
+            long long line_limit = has_limit ? limit : 200;
+            if (line_limit < 1)    line_limit = 1;
+            if (line_limit > 2000) line_limit = 2000;
+
+            long long end = std::min(start_line + line_limit - 1, total);
+
+            std::string out;
+            out.reserve((size_t)(end - start_line + 1) * 90);
+            char numbuf[16];
+            for (long long ln = start_line; ln <= end; ++ln) {
+                auto & seg = lns[(size_t)(ln - 1)];
+                std::string_view sv(body.data() + seg.first, seg.second);
+                while (!sv.empty()
+                        && (sv.back() == '\n' || sv.back() == '\r'))
+                    sv.remove_suffix(1);
+                int nn = std::snprintf(numbuf, sizeof(numbuf),
+                                       "%6lld| ", ln);
+                if (nn > 0) out.append(numbuf, (size_t) nn);
+                out.append(sv.data(), sv.size());
+                out.push_back('\n');
+            }
+            if (end < total) {
+                out.append("[" + std::to_string(total - end)
+                           + " more lines; pass start_line="
+                           + std::to_string(end + 1) + " to continue]\n");
+            }
+            char mbuf[128];
+            std::snprintf(mbuf, sizeof(mbuf),
+                "\033[2m%s — %lld lines, %zu bytes, showing %lld-%lld"
+                " of %lld\033[0m\n",
+                sb->virtual_path(p).c_str(),
+                total, body.size(), start_line, end, total);
+            return ToolResult::ok_display(std::move(out), mbuf);
+        }
+
+        // ----- byte-based read (existing behaviour) ---------------------
+        if (!has_limit) limit = 64 * 1024;
+        if (offset < 0) offset = 0;
+        if (limit  < 1) limit  = 1;
+        if (limit > 1024 * 1024) limit = 1024 * 1024;
+
+        struct stat st_sz {};
+        long long file_size = -1;
+        if (::fstat(fd, &st_sz) == 0 && S_ISREG(st_sz.st_mode))
+            file_size = (long long) st_sz.st_size;
+
         if (offset > 0 && ::lseek(fd, offset, SEEK_SET) < 0) {
             ::close(fd);
             return ToolResult::error(std::string("seek failed: ")
@@ -1951,25 +2035,34 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
         }
         buf.resize((size_t) n);
 
-        // line_numbers=true prefixes each line with `<lineno>| ` so
-        // the model can plan an action="edit" call without having to
-        // count lines manually. Numbering continues from the line at
-        // `offset`: byte offsets that don't fall on a line boundary
-        // count their partial first line as line 1 (consistent with
-        // every line-numbering tool models have seen in training —
-        // grep, less, vim's `:set nu`).
+        // Count lines in what we read.
+        long long lines_read = 0;
+        for (char ch : buf) if (ch == '\n') ++lines_read;
+        if (!buf.empty() && buf.back() != '\n') ++lines_read;
+
+        auto make_byte_metric = [&]() -> std::string {
+            char mbuf[160];
+            std::snprintf(mbuf, sizeof(mbuf),
+                "\033[2m%s — %lld bytes read (offset %lld, ~%lld lines)",
+                sb->virtual_path(p).c_str(), (long long) n, offset,
+                lines_read);
+            std::string s = mbuf;
+            if (file_size >= 0) {
+                std::snprintf(mbuf, sizeof(mbuf),
+                    ", file %lld bytes", file_size);
+                s += mbuf;
+            }
+            s += "\033[0m\n";
+            return s;
+        };
+
         if (line_numbers && !buf.empty()) {
             std::string out;
             out.reserve(buf.size() + buf.size() / 32);
-            // We don't know which file-line `offset` lands on without
-            // a second read; if offset > 0 we restart numbering at 1
-            // and add an explicit `[note: numbering restarts at this
-            // chunk]` line so the model doesn't confuse a paged read
-            // with an absolute file map.
             if (offset > 0) {
                 out.append("[note: numbering restarts at this chunk; "
-                           "for absolute line numbers, read with "
-                           "offset=0 or use action=\"grep\"]\n");
+                           "for absolute line numbers, use start_line "
+                           "or action=\"grep\"]\n");
             }
             long long lineno = 1;
             char numbuf[16];
@@ -1990,10 +2083,10 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
                 if (nn > 0) out.append(numbuf, (size_t) nn);
                 out.append(buf, line_start, buf.size() - line_start);
             }
-            return ToolResult::ok(std::move(out));
+            return ToolResult::ok_display(std::move(out), make_byte_metric());
         }
 
-        return ToolResult::ok(std::move(buf));
+        return ToolResult::ok_display(std::move(buf), make_byte_metric());
     };
 }
 
@@ -2228,6 +2321,17 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
 
         const long long deleted = std::max<long long>(0, end_line - start_line + 1);
 
+        // Capture old lines for the diff display.
+        std::vector<std::string> old_lines_text;
+        old_lines_text.reserve((size_t) deleted);
+        for (long long i = start_line; i <= end_line && i <= line_count; ++i) {
+            std::string_view sv = lines[(size_t)(i - 1)];
+            while (!sv.empty()
+                    && (sv.back() == '\n' || sv.back() == '\r'))
+                sv.remove_suffix(1);
+            old_lines_text.emplace_back(sv.data(), sv.size());
+        }
+
         // Build new body: lines[0..start_line-2] + content + lines[end_line..]
         // (1-based to 0-based conversion: line N is lines[N-1]).
         std::string new_body;
@@ -2322,14 +2426,16 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
             o << "replaced lines " << start_line << "-" << end_line
               << " (" << deleted << " deleted, " << inserted << " inserted)";
         }
+        o << "\n";
 
-        // Post-edit window so the model can re-orient WITHOUT spending
-        // another hop on fs(action="read"). The classic failure mode
-        // is a sequence of edits with stale 1-based line numbers — the
-        // tool did exactly what was asked, but the model believed the
-        // file looked different than it now does. Showing the lines
-        // that surround the edit (with insertion markers) anchors the
-        // model in the actual post-state.
+        // Show the old deleted lines so the model sees what it replaced.
+        if (!old_lines_text.empty()) {
+            for (long long i = 0; i < (long long) old_lines_text.size(); ++i) {
+                o << "- " << std::setw(5) << (start_line + i) << ": "
+                  << old_lines_text[(size_t) i] << "\n";
+            }
+        }
+
         std::vector<std::string_view> new_lines;
         {
             size_t ls = 0;
@@ -2356,11 +2462,8 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
             win_end = std::min<long long>(
                 new_line_count, start_line + inserted - 1 + kCtxLines);
         } else {
-            // Pure delete — show the seam where the deletion landed.
             win_end = std::min<long long>(
                 new_line_count, start_line + kCtxLines);
-            // If the delete consumed the tail, start_line may now be
-            // past EOF; pull the window back so it still shows context.
             if (start_line > new_line_count) {
                 win_start = std::max<long long>(
                     1, new_line_count - 2 * kCtxLines);
@@ -2372,6 +2475,7 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
           << (new_line_count == 1 ? "" : "s")
           << " (was " << line_count << ")";
 
+        // Model-facing post-edit window (plain text, no ANSI).
         if (new_line_count > 0 && win_end >= win_start) {
             o << "; window [" << win_start << ".." << win_end << "]:\n";
             const long long inserted_first = start_line;
@@ -2379,14 +2483,13 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
             for (long long ln = win_start; ln <= win_end; ++ln) {
                 std::string_view sv = new_lines[(size_t)(ln - 1)];
                 while (!sv.empty()
-                        && (sv.back() == '\n' || sv.back() == '\r')) {
+                        && (sv.back() == '\n' || sv.back() == '\r'))
                     sv.remove_suffix(1);
-                }
-                const bool is_inserted =
+                const bool is_ins =
                     (inserted > 0
                      && ln >= inserted_first
                      && ln <= inserted_last);
-                o << (is_inserted ? "> " : "  ")
+                o << (is_ins ? "+ " : "  ")
                   << std::setw(5) << ln << ": ";
                 if ((long long) sv.size() > kPerLineCap) {
                     o.write(sv.data(), kPerLineCap);
@@ -2400,7 +2503,80 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
             o << "; file is now empty";
         }
 
-        return ToolResult::ok(o.str());
+        // ANSI diff display for the terminal (ToolResult::display).
+        // Dark red background for deleted lines, dark green for added,
+        // no background for context.
+        static const char * kBgRed   = "\033[48;5;52m";
+        static const char * kBgGreen = "\033[48;5;22m";
+        static const char * kDim     = "\033[2m";
+        static const char * kRst     = "\033[0m";
+
+        std::ostringstream d;
+        // Context before the edit point.
+        for (long long ln = win_start; ln < start_line && ln <= new_line_count; ++ln) {
+            std::string_view sv = new_lines[(size_t)(ln - 1)];
+            while (!sv.empty()
+                    && (sv.back() == '\n' || sv.back() == '\r'))
+                sv.remove_suffix(1);
+            char nb[16];
+            std::snprintf(nb, sizeof(nb), "%5lld", ln);
+            d << kDim << "  " << nb << ": ";
+            if ((long long) sv.size() > kPerLineCap)
+                d.write(sv.data(), kPerLineCap);
+            else
+                d.write(sv.data(), (std::streamsize) sv.size());
+            d << kRst << "\n";
+        }
+        // Deleted lines (old, with original line numbers).
+        for (long long i = 0; i < (long long) old_lines_text.size(); ++i) {
+            long long orig_ln = start_line + i;
+            char nb[16];
+            std::snprintf(nb, sizeof(nb), "%5lld", orig_ln);
+            d << kBgRed << "- " << nb << ": ";
+            auto & sv = old_lines_text[(size_t) i];
+            if ((long long) sv.size() > kPerLineCap)
+                d.write(sv.data(), kPerLineCap);
+            else
+                d.write(sv.data(), (std::streamsize) sv.size());
+            d << kRst << "\n";
+        }
+        // Inserted lines (new content, with new line numbers).
+        if (inserted > 0) {
+            for (long long ln = start_line;
+                    ln < start_line + inserted && ln <= new_line_count; ++ln) {
+                std::string_view sv = new_lines[(size_t)(ln - 1)];
+                while (!sv.empty()
+                        && (sv.back() == '\n' || sv.back() == '\r'))
+                    sv.remove_suffix(1);
+                char nb[16];
+                std::snprintf(nb, sizeof(nb), "%5lld", ln);
+                d << kBgGreen << "+ " << nb << ": ";
+                if ((long long) sv.size() > kPerLineCap)
+                    d.write(sv.data(), kPerLineCap);
+                else
+                    d.write(sv.data(), (std::streamsize) sv.size());
+                d << kRst << "\n";
+            }
+        }
+        // Context after the edit point.
+        long long ctx_after_start = start_line + inserted;
+        for (long long ln = ctx_after_start;
+                ln <= win_end && ln <= new_line_count; ++ln) {
+            std::string_view sv = new_lines[(size_t)(ln - 1)];
+            while (!sv.empty()
+                    && (sv.back() == '\n' || sv.back() == '\r'))
+                sv.remove_suffix(1);
+            char nb[16];
+            std::snprintf(nb, sizeof(nb), "%5lld", ln);
+            d << kDim << "  " << nb << ": ";
+            if ((long long) sv.size() > kPerLineCap)
+                d.write(sv.data(), kPerLineCap);
+            else
+                d.write(sv.data(), (std::streamsize) sv.size());
+            d << kRst << "\n";
+        }
+
+        return ToolResult::ok_display(o.str(), d.str());
     };
 }
 
@@ -2884,7 +3060,9 @@ Tool fs(std::string root) {
             "guess-and-fail loops.\n"
             "\n"
             "action=\"read\"        path → file content.\n"
-            "  Optional: offset (default 0), limit (default 65536, "
+            "  Line mode (recommended for editing): start_line (1-based), "
+            "limit = lines (default 200, max 2000). Always numbered.\n"
+            "  Byte mode: offset (default 0), limit (default 65536 bytes, "
             "max 1048576), line_numbers (prefix each line `<n>| `).\n"
             "\n"
             "action=\"write\"       path, content → overwrites the "
@@ -2953,15 +3131,19 @@ Tool fs(std::string root) {
                "write only. Append instead of overwrite. Default "
                "false.", false)
         .param("start_line",        "integer",
-               "edit only. 1-based, inclusive. line_count+1 appends "
+               "read+edit. 1-based. read: first line to return "
+               "(switches to line mode — limit becomes line count). "
+               "edit: first line to replace; line_count+1 appends "
                "at EOF.", false)
         .param("end_line",          "integer",
                "edit only. 1-based, inclusive. start_line-1 inserts "
                "before start_line.", false)
         .param("offset",            "integer",
-               "read only. Byte offset, default 0.", false)
+               "read byte-mode only. Byte offset, default 0.", false)
         .param("limit",             "integer",
-               "read only. Max bytes, default 65536, max 1048576.",
+               "read: line count when start_line set (default 200, "
+               "max 2000); byte count otherwise (default 65536, "
+               "max 1048576).",
                false)
         .param("line_numbers",      "boolean",
                "read only. Prefix each line `<n>| `. Default false.",
@@ -3224,16 +3406,24 @@ std::vector<Tool> fs_split(std::string root) {
     out.push_back(Tool::builder("fs_read")
         .describe(
             "Read a UTF-8 text file. RELATIVE path under the sandbox "
-            "root.")
+            "root.\n"
+            "  Line mode (recommended): pass start_line (1-based). "
+            "limit = lines (default 200, max 2000). Always numbered.\n"
+            "  Byte mode: offset + limit (bytes, default 65536).")
         .param("path",         "string",
                "Relative path. `.` for root.", true)
+        .param("start_line",   "integer",
+               "1-based first line. Switches to line mode — limit "
+               "becomes line count, output always numbered.", false)
         .param("offset",       "integer",
-               "Byte offset, default 0.", false)
+               "Byte mode only. Byte offset, default 0.", false)
         .param("limit",        "integer",
-               "Max bytes, default 65536, max 1048576.", false)
+               "Line mode: line count (default 200, max 2000). "
+               "Byte mode: max bytes (default 65536, max 1048576).",
+               false)
         .param("line_numbers", "boolean",
-               "Prefix each line `<n>| ` (for fs_edit planning). "
-               "Default false.", false)
+               "Byte mode only. Prefix each line `<n>| `. "
+               "Default false (always on in line mode).", false)
         .handle(make_fs_read_handler(sb))
         .build());
 

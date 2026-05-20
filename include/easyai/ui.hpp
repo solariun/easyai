@@ -34,6 +34,8 @@ struct Style {
     const char * yellow() const { return color ? "\033[33m" : ""; }
     const char * red   () const { return color ? "\033[31m" : ""; }
     const char * green () const { return color ? "\033[32m" : ""; }
+    const char * bg_red  () const { return color ? "\033[48;5;52m"  : ""; }
+    const char * bg_green() const { return color ? "\033[48;5;22m"  : ""; }
 };
 
 // Honours the NO_COLOR convention (https://no-color.org).

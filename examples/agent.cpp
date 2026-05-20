@@ -59,7 +59,7 @@ int main(int argc, char ** argv) {
           }))
           .on_token([](const std::string & p){ std::cout << p << std::flush; })
           .on_tool([](const easyai::ToolCall & c, const easyai::ToolResult & r) {
-              std::fprintf(stderr, "\n\033[36m[tool] %s(%s) -> %s%s\033[0m\n",
+              std::fprintf(stderr, "\n\033[32m● %s(%s) -> %s%s\033[0m\n",
                            c.name.c_str(),
                            c.arguments_json.c_str(),
                            r.is_error ? "ERR: " : "",
