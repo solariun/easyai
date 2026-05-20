@@ -861,10 +861,8 @@ void usage(const char * argv0) {
 "                                hard-cancels the in-flight request (the\n"
 "                                expected behaviour for `kill <pid>` in\n"
 "                                a script).  Without --quiet, Ctrl-C\n"
-"                                triggers a GRACEFUL exit — prints a\n"
-"                                banner and lets the current AI session\n"
-"                                finish before the program quits; press\n"
-"                                Ctrl-C a second time to force-cancel.\n"
+"                                stops the current generation; press\n"
+"                                Ctrl-C a second time to quit.\n"
 "    --log-file PATH            opt in to a raw transaction log at PATH\n"
 "                                (request body + every SSE chunk + every\n"
 "                                tool dispatch input/output).  Default\n"
@@ -1689,46 +1687,33 @@ using easyai::cli::client_has_tool;
 // Two modes — selected at startup based on --quiet / -q:
 //
 // QUIET MODE (batch / scripted runs)
-//   First signal hard-cancels the in-flight request. The Client's
-//   cooperative-cancel flag flips, the active SSE read aborts on its next
-//   chunk, the TCP socket closes, the server cancels its decode loop.
-//   End result: model stops immediately, exit 130. This is what scripts
-//   and service consumers expect from `kill <pid>`.
+//   First signal hard-cancels the in-flight request and exits.
+//   Second signal force-exits via _exit(130).
 //
 // INTERACTIVE (default) MODE
-//   First signal during a chat turn → GRACEFUL EXIT: a banner prints to
-//   stderr and the in-flight request is allowed to finish naturally so
-//   the conversation isn't truncated mid-stream. After the chat returns
-//   the program exits cleanly (rc=0).
-//   Second signal in the same turn → user's clearly impatient — fall
-//   back to a cooperative cancel like quiet mode (flips the Client's
-//   cancel flag; takes effect on the next SSE chunk).
-//   Third signal in the same turn → cooperative cancel didn't unblock
-//   us (stalled socket, blocked tool handler, deadlocked syscall). Bail
-//   out of the process via _exit(130): no destructors, no atexit, just
-//   gone. This is the operator's "I've waited long enough" lever.
-//   First signal at the REPL prompt (no chat in flight) → existing
-//   behavior: getline returns EINTR, the prompt loop exits cleanly.
+//   First signal during a chat turn → STOP GENERATION: cooperative
+//   cancel flips, the SSE stream aborts, the model stops. The REPL
+//   returns to the prompt so the user can continue the conversation.
+//   Second signal (same turn or at prompt) → QUIT: set graceful_exit
+//   and cancel. The REPL breaks.
+//   Third signal → force _exit(130) — operator's escape hatch for
+//   stalled sockets / deadlocked tool handlers.
+//   First signal at the REPL prompt → getline returns EINTR, REPL
+//   exits cleanly.
 //
 // std::atomic<T>::store on a lock-free atomic_bool is async-signal-safe in
 // practice on every platform we care about (x86, ARM64, RISC-V) — that
 // plus a single ::write() to STDERR_FILENO is all we do from inside the
 // handler. printf / fprintf would NOT be safe.
-static std::atomic<int>    g_signal_count{0};     // 0=none, 1=graceful, 2=cancel, 3+=force
+static std::atomic<int>    g_signal_count{0};     // 0=none, 1=stop, 2=quit, 3+=force
 static std::atomic<bool>   g_quiet_mode{false};   // mirror of o.quiet
 static std::atomic<bool>   g_in_chat{false};      // true between cli.chat() entry/exit
-static std::atomic<bool>   g_graceful_exit{false};// "exit cleanly when the turn ends"
+static std::atomic<bool>   g_graceful_exit{false}; // "exit the REPL when the turn ends"
 static easyai::Client *    g_active_client = nullptr;
 
 static void on_terminating_signal(int /*sig*/) {
     const int count = g_signal_count.fetch_add(1, std::memory_order_relaxed) + 1;
 
-    // ::write is async-signal-safe; stdio is not. GCC's warn_unused_result
-    // on write() bypasses the (void) cast, so assign-then-discard.
-
-    // Third (or later) signal — operator hammered Ctrl-C; cooperative
-    // cancel clearly isn't taking effect. Bypass C++ destructors and
-    // atexit, exit the process directly.
     if (count >= 3) {
         static const char kMsg[] = "\n<force-exiting now.>\n";
         ssize_t _ = ::write(STDERR_FILENO, kMsg, sizeof(kMsg) - 1);
@@ -1736,33 +1721,34 @@ static void on_terminating_signal(int /*sig*/) {
         ::_exit(130);
     }
 
-    // Second signal OR --quiet → cooperative cancel (flip the flag).
-    if (count >= 2 || g_quiet_mode.load(std::memory_order_relaxed)) {
-        if (count == 2) {
-            static const char kMsg[] =
-                "\n<cancelling… Ctrl-C once more to force-exit.>\n";
-            ssize_t _ = ::write(STDERR_FILENO, kMsg, sizeof(kMsg) - 1);
-            (void) _;
-        }
+    // Quiet mode: first signal is always a hard cancel.
+    if (g_quiet_mode.load(std::memory_order_relaxed)) {
         if (g_active_client != nullptr) g_active_client->request_cancel();
         return;
     }
 
-    // First signal in interactive mode.
-    if (g_in_chat.load(std::memory_order_relaxed)) {
-        // Mid-turn: queue graceful exit, let the chat finish naturally.
+    // Second signal: quit.
+    if (count >= 2) {
         g_graceful_exit.store(true, std::memory_order_relaxed);
+        if (g_active_client != nullptr) g_active_client->request_cancel();
         static const char kMsg[] =
-            "\n<exiting: waiting for the ai session to be finished. "
-            "Ctrl-C again to cancel; once more to force-exit.>\n";
+            "\n<exiting… Ctrl-C once more to force-exit.>\n";
         ssize_t _ = ::write(STDERR_FILENO, kMsg, sizeof(kMsg) - 1);
         (void) _;
         return;
     }
 
-    // At a REPL prompt (or before any chat): the prompt loop's getline
-    // will return EINTR and the existing "(interrupted)" path handles it.
-    // Nothing else to do from here.
+    // First signal mid-chat: stop generation, return to REPL.
+    if (g_in_chat.load(std::memory_order_relaxed)) {
+        if (g_active_client != nullptr) g_active_client->request_cancel();
+        static const char kMsg[] =
+            "\n<stopping generation… Ctrl-C again to quit.>\n";
+        ssize_t _ = ::write(STDERR_FILENO, kMsg, sizeof(kMsg) - 1);
+        (void) _;
+        return;
+    }
+
+    // At REPL prompt: getline returns EINTR, the prompt loop exits.
 }
 
 static void install_cancel_handlers() {
@@ -1905,22 +1891,26 @@ int run_one(easyai::Client & cli, easyai::Plan & plan,
         }
     }
 
-    // Cancel guard fires BEFORE every other diagnostic.
-    //
-    // Two paths now:
-    //   - graceful: user hit Ctrl-C in interactive mode and we let the
-    //     turn finish naturally. The streamed bytes are complete; we
-    //     just print a soft footer and return 0 so main() exits cleanly.
-    //   - hard:     quiet-mode kill or second Ctrl-C. Same as before —
-    //     yellow ── cancelled ── banner, return 130.
+    // Signal guard. Three outcomes:
+    //   - graceful_exit (second Ctrl+C): print exit banner, return 0
+    //     so the REPL breaks.
+    //   - stopped (first Ctrl+C, generation cancelled): print a soft
+    //     "stopped" footer and return 0 — the REPL continues.
+    //   - quiet-mode cancel: return 130 for the script.
     if (g_graceful_exit.load(std::memory_order_relaxed)) {
-        std::fprintf(stderr, "%s── exited gracefully ──%s\n",
+        std::fprintf(stderr, "%s── exited ──%s\n",
                      st.dim(), st.reset());
         return 0;
     }
     if (g_signal_count.load(std::memory_order_relaxed) > 0) {
-        std::fprintf(stderr, "%s── cancelled ──%s\n", st.yellow(), st.reset());
-        return 130;   // conventional exit code for SIGINT
+        if (g_quiet_mode.load(std::memory_order_relaxed)) {
+            std::fprintf(stderr, "%s── cancelled ──%s\n",
+                         st.yellow(), st.reset());
+            return 130;
+        }
+        std::fprintf(stderr, "%s── stopped ──%s\n",
+                     st.dim(), st.reset());
+        return 0;
     }
 
     // Context-full guard fires BEFORE the generic error/incomplete
@@ -2064,8 +2054,7 @@ int run_repl(easyai::Client & cli, easyai::Plan & plan,
 
         run_one(cli, plan, line, o, st);
 
-        // Graceful exit: user hit Ctrl-C during the turn; run_one let
-        // the chat finish, now we exit the REPL cleanly.
+        // Second Ctrl+C sets graceful_exit → quit the REPL.
         if (g_graceful_exit.load(std::memory_order_relaxed)) break;
     }
     return 0;
