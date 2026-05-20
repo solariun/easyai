@@ -2559,7 +2559,7 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
             while (!sv.empty()
                     && (sv.back() == '\n' || sv.back() == '\r'))
                 sv.remove_suffix(1);
-            char nb[16];
+            char nb[32];
             long long clen = (long long) sv.size() > kPerLineCap ? kPerLineCap : (long long) sv.size();
             std::snprintf(nb, sizeof(nb), "%5lld", ln);
             d << kBgCtx << "  " << nb << ": ";
@@ -2570,7 +2570,7 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
         // Deleted lines (old, with original line numbers).
         for (long long i = 0; i < (long long) old_lines_text.size(); ++i) {
             long long orig_ln = start_line + i;
-            char nb[16];
+            char nb[32];
             std::snprintf(nb, sizeof(nb), "%5lld", orig_ln);
             auto & sv = old_lines_text[(size_t) i];
             long long clen = (long long) sv.size() > kPerLineCap ? kPerLineCap : (long long) sv.size();
@@ -2587,7 +2587,7 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
                 while (!sv.empty()
                         && (sv.back() == '\n' || sv.back() == '\r'))
                     sv.remove_suffix(1);
-                char nb[16];
+                char nb[32];
                 long long clen = (long long) sv.size() > kPerLineCap ? kPerLineCap : (long long) sv.size();
                 std::snprintf(nb, sizeof(nb), "%5lld", ln);
                 d << kBgGreen << "+ " << nb << ": ";
@@ -2604,7 +2604,7 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
             while (!sv.empty()
                     && (sv.back() == '\n' || sv.back() == '\r'))
                 sv.remove_suffix(1);
-            char nb[16];
+            char nb[32];
             long long clen = (long long) sv.size() > kPerLineCap ? kPerLineCap : (long long) sv.size();
             std::snprintf(nb, sizeof(nb), "%5lld", ln);
             d << kBgCtx << "  " << nb << ": ";
