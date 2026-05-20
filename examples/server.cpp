@@ -906,7 +906,7 @@ class AssistantTurn {
     const ms  = evt.prompt_ms || 0;
     const n   = evt.n_tokens   || 0;
     const cached = evt.n_cached || 0;
-    el.textContent = '📝 prompt eval: ' + n + ' tok'
+    el.textContent = '*  ' + n + ' tok'
       + (cached > 0 ? ' (' + cached + ' cached)' : '')
       + ' · ' + Math.round(ms) + ' ms · ' + tps.toFixed(1) + ' t/s';
   }
@@ -2200,6 +2200,7 @@ static void handle_chat_stream(ServerCtx & ctx,
                 res_evt["content"]     = r.content;
                 res_evt["is_error"]    = r.is_error;
                 res_evt["duration_ms"] = r.duration_ms;
+                if (!r.display.empty()) res_evt["display"] = r.display;
                 emit_event("easyai.tool_result", safe_dump(res_evt));
 
                 // Tool-call status line goes into the reasoning channel
@@ -2361,7 +2362,7 @@ static void handle_chat_stream(ServerCtx & ctx,
                     emit_event("easyai.prompt_eval", safe_dump(evt));
 
                     std::ostringstream line;
-                    line << "\n📝 prompt eval: " << r.n_tokens << " tok";
+                    line << "\n          *  " << r.n_tokens << " tok";
                     if (r.n_cached > 0) line << " (" << r.n_cached << " cached)";
                     line << " · " << (long long) r.prompt_ms << " ms · "
                          << std::fixed << std::setprecision(1) << tps
@@ -5094,8 +5095,13 @@ int main(int argc, char ** argv) {
                         "continue;"
                       "}"
                       "if(evtType==='easyai.tool_result'){"
-                        // Back to whatever generation phase we're in.
                         "setLive(inThink?'thinking':'answering',liveExtra());"
+                        "try{"
+                          "const j=JSON.parse(data);"
+                          "if(j.display&&window.__easyaiToolDisplay){"
+                            "window.__easyaiToolDisplay(j.display,j.name,j.is_error);"
+                          "}"
+                        "}catch(e){}"
                         "continue;"
                       "}"
                       // easyai.prompt_eval — server-side llama-server-style
@@ -6226,6 +6232,68 @@ int main(int argc, char ** argv) {
                     "{childList:true,subtree:true});"
                 "});"
                 "sweep();"
+              "})();</script>"
+
+            // ----- block8: tool display (diff + metrics) -----------------
+            // Renders ToolResult.display (ANSI-formatted diff / metrics)
+            // as styled HTML inside the reasoning panel. Converts ANSI
+            // bg colors to CSS classes, appends to the last assistant
+            // message's reasoning panel.
+            "<script>(()=>{"
+                "console.log('[easyai-inject] block8 tool-display');"
+                "if(!document.getElementById('__easyaiToolDisplayCSS')){"
+                  "const s=document.createElement('style');"
+                  "s.id='__easyaiToolDisplayCSS';"
+                  "s.textContent='"
+                    ".__ea-td{font-family:ui-monospace,SFMono-Regular,"
+                      "Menlo,monospace;font-size:.7rem;line-height:1.4;"
+                      "margin:.2rem 0 .4rem 0;white-space:pre-wrap;"
+                      "border-radius:4px;padding:.3rem .5rem}"
+                    ".__ea-td-del{background:#3b1419;color:#fca5a5}"
+                    ".__ea-td-add{background:#14302a;color:#86efac}"
+                    ".__ea-td-ctx{opacity:.5}"
+                    ".__ea-td-met{opacity:.55;font-size:.65rem}"
+                  "';"
+                  "(document.head||document.documentElement).appendChild(s);"
+                "}"
+                "window.__easyaiToolDisplay=(ansi,name,isErr)=>{"
+                  "if(!ansi)return;"
+                  "const lines=ansi.split('\\n');"
+                  "let html='';"
+                  "for(const raw of lines){"
+                    "if(!raw&&!html)continue;"
+                    "const clean=raw.replace(/\\x1b\\[[0-9;]*m/g,'');"
+                    "if(!clean)continue;"
+                    "const esc=(s)=>s.replace(/&/g,'&amp;')"
+                      ".replace(/</g,'&lt;').replace(/>/g,'&gt;');"
+                    "if(raw.indexOf('\\x1b[48;5;52m')>=0){"
+                      "html+='<div class=__ea-td-del>'+esc(clean)+'</div>';"
+                    "}else if(raw.indexOf('\\x1b[48;5;22m')>=0){"
+                      "html+='<div class=__ea-td-add>'+esc(clean)+'</div>';"
+                    "}else if(raw.indexOf('\\x1b[2m')>=0){"
+                      "if(clean.indexOf('bytes')>=0||"
+                          "clean.indexOf('lines')>=0||"
+                          "clean.indexOf('showing')>=0){"
+                        "html+='<div class=__ea-td-met>'+esc(clean)+'</div>';"
+                      "}else{"
+                        "html+='<div class=__ea-td-ctx>'+esc(clean)+'</div>';"
+                      "}"
+                    "}else{"
+                      "html+='<div>'+esc(clean)+'</div>';"
+                    "}"
+                  "}"
+                  "if(!html)return;"
+                  "const el=document.createElement('div');"
+                  "el.className='__ea-td';"
+                  "el.innerHTML=html;"
+                  // Append to the last reasoning panel's inner content.
+                  "const panels=document.querySelectorAll("
+                    "'[data-slot=\"collapsible-content\"]');"
+                  "if(panels.length){"
+                    "const last=panels[panels.length-1];"
+                    "last.appendChild(el);"
+                  "}"
+                "};"
               "})();</script>";
 
             // Splice immediately after <head>.
