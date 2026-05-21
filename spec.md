@@ -113,6 +113,15 @@ Emitted on:
 
 Not emitted when `token_speed_ < 0.1` (no meaningful generation occurred).
 
+## fs_read Tool Behavior
+
+Output always prefixes every line with `<n>| ` (line numbers on by default in both modes). Reports total line count for files ≤ 8 MiB. Description tells the model to read before `fs_edit` for accurate line references.
+
+| Mode | Trigger | Default limit | Line numbers | Total count |
+|------|---------|---------------|-------------|-------------|
+| Line mode | `start_line` set | 200 lines (max 2000) | Always on | Yes |
+| Byte mode | default / `offset` set | 65536 bytes (max 1 MiB) | On (default true) | Yes (≤ 8 MiB files) |
+
 ## memory_append Tool Behavior
 
 | Title exists? | Behavior | Return message |

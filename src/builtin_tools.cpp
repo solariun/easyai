@@ -1894,7 +1894,7 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
     return [sb](const ToolCall & c) -> ToolResult {
         std::string path;
         long long offset = 0, limit = 0, start_line = 0;
-        bool line_numbers = false;
+        bool line_numbers = true;
         if (!args::get_string(c.arguments_json, "path", path))
             return ToolResult::error("missing arg: path (fs action=\"read\")");
         bool has_limit = args::get_int(c.arguments_json, "limit",  limit);
@@ -2028,8 +2028,8 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
         }
         std::string buf((size_t) limit, '\0');
         ssize_t n = ::read(fd, buf.data(), (size_t) limit);
-        ::close(fd);
         if (n < 0) {
+            ::close(fd);
             return ToolResult::error(std::string("read failed: ")
                                      + std::strerror(errno));
         }
@@ -2039,6 +2039,25 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
         long long lines_read = 0;
         for (char ch : buf) if (ch == '\n') ++lines_read;
         if (!buf.empty() && buf.back() != '\n') ++lines_read;
+
+        // Count total lines in file (for files <= 8 MiB).
+        long long total_lines = -1;
+        if (file_size > 0 && file_size <= 8LL * 1024 * 1024) {
+            if (::lseek(fd, 0, SEEK_SET) >= 0) {
+                total_lines = 0;
+                char cnt[64 * 1024];
+                char last = 0;
+                for (;;) {
+                    ssize_t r = ::read(fd, cnt, sizeof(cnt));
+                    if (r <= 0) break;
+                    for (ssize_t i = 0; i < r; ++i)
+                        if (cnt[i] == '\n') ++total_lines;
+                    last = cnt[r - 1];
+                }
+                if (last != '\n') ++total_lines;
+            }
+        }
+        ::close(fd);
 
         auto make_byte_metric = [&]() -> std::string {
             char mbuf[160];
@@ -2050,6 +2069,11 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
             if (file_size >= 0) {
                 std::snprintf(mbuf, sizeof(mbuf),
                     ", file %lld bytes", file_size);
+                s += mbuf;
+            }
+            if (total_lines >= 0) {
+                std::snprintf(mbuf, sizeof(mbuf),
+                    ", %lld total lines", total_lines);
                 s += mbuf;
             }
             s += "\033[0m\n";
@@ -3096,11 +3120,13 @@ Tool fs(std::string root) {
             "action=\"check_path\" on the target. Skipping causes "
             "guess-and-fail loops.\n"
             "\n"
-            "action=\"read\"        path → file content.\n"
+            "action=\"read\"        path → file content. Output "
+            "prefixes every line with `<n>| ` and reports total line "
+            "count — read before edit to get accurate line refs.\n"
             "  Line mode (recommended for editing): start_line (1-based), "
-            "limit = lines (default 200, max 2000). Always numbered.\n"
+            "limit = lines (default 200, max 2000).\n"
             "  Byte mode: offset (default 0), limit (default 65536 bytes, "
-            "max 1048576), line_numbers (prefix each line `<n>| `).\n"
+            "max 1048576). line_numbers on by default.\n"
             "\n"
             "action=\"write\"       path, content → overwrites the "
             "file. Creates parent dirs.\n"
@@ -3443,10 +3469,13 @@ std::vector<Tool> fs_split(std::string root) {
     out.push_back(Tool::builder("fs_read")
         .describe(
             "Read a UTF-8 text file. RELATIVE path under the sandbox "
-            "root.\n"
+            "root. Output prefixes every line with `<n>| ` and reports "
+            "the total line count — use before fs_edit to get accurate "
+            "line references.\n"
             "  Line mode (recommended): pass start_line (1-based). "
-            "limit = lines (default 200, max 2000). Always numbered.\n"
-            "  Byte mode: offset + limit (bytes, default 65536).")
+            "limit = lines (default 200, max 2000).\n"
+            "  Byte mode: offset + limit (bytes, default 65536). "
+            "line_numbers on by default.")
         .param("path",         "string",
                "Relative path. `.` for root.", true)
         .param("start_line",   "integer",
@@ -3460,7 +3489,7 @@ std::vector<Tool> fs_split(std::string root) {
                false)
         .param("line_numbers", "boolean",
                "Byte mode only. Prefix each line `<n>| `. "
-               "Default false (always on in line mode).", false)
+               "Default true (always on in line mode).", false)
         .handle(make_fs_read_handler(sb))
         .build());
 
