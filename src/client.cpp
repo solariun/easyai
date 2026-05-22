@@ -866,6 +866,18 @@ struct Client::Impl {
         last_was_ctx_full           = false;
         int incomplete_retries      = 0;
 
+        // Snapshot history size before the loop runs. We use this on the
+        // exhausted-retry exit path to roll back the nudge(s) and the
+        // empty assistant turn we'd otherwise leave behind — see the
+        // post-retry-branch rollback below for the full rationale.
+        const size_t history_size_at_start = history_json.size();
+
+        // We only push the corrective nudge ONCE per call. Stacking 10
+        // identical nudges (the old behaviour) just inflates the history
+        // without changing the prompt's meaning, and on later turns the
+        // chat template can throw on 10 consecutive user messages.
+        bool nudge_pushed = false;
+
         for (int hop = 0; hop < max_tool_hops; ++hop) {
             // Honour cancel between agentic hops too — the per-chunk
             // check inside stream_chat catches mid-stream aborts; this
@@ -944,22 +956,29 @@ struct Client::Impl {
                         turn.finish_reason.c_str(),
                         tail.c_str());
                 }
-                ordered_json nudge;
-                nudge["role"]    = "user";
-                nudge["content"] =
-                    "Your previous reply only announced an action without "
-                    "emitting any tool_call. Do NOT say \"let me…\", "
-                    "\"I'll…\", or similar setup phrases unless the "
-                    "tool_call follows in the SAME turn. Right now: "
-                    "either call the next tool you actually need to make "
-                    "progress, or give the user the final answer. Pick "
-                    "one and execute it now.";
-                // history_json is std::vector<std::string> (raw JSON); we
-                // serialise here.  Earlier this pushed `nudge` directly,
-                // which threw json::type_error 302 at runtime when the
-                // implicit nlohmann json→string conversion ran on an
-                // object-typed value.
-                history_json.push_back(nudge.dump());
+                if (!nudge_pushed) {
+                    ordered_json nudge;
+                    nudge["role"]    = "user";
+                    nudge["content"] =
+                        "Your previous reply only announced an action without "
+                        "emitting any tool_call. Do NOT say \"let me…\", "
+                        "\"I'll…\", or similar setup phrases unless the "
+                        "tool_call follows in the SAME turn. Right now: "
+                        "either call the next tool you actually need to make "
+                        "progress, or give the user the final answer. Pick "
+                        "one and execute it now.";
+                    // history_json is std::vector<std::string> (raw JSON); we
+                    // serialise here.  Earlier this pushed `nudge` directly,
+                    // which threw json::type_error 302 at runtime when the
+                    // implicit nlohmann json→string conversion ran on an
+                    // object-typed value.
+                    history_json.push_back(nudge.dump());
+                    nudge_pushed = true;
+                }
+                // On retries 2..N the nudge is already at the tail; we
+                // re-issue the same prompt and rely on sampling
+                // stochasticity (the same input is the only thing the
+                // retry can reasonably try again with).
                 if (verbose) {
                     std::fprintf(stderr,
                         "[easyai-cli] retry_on_incomplete: discarding bad turn "
@@ -969,6 +988,32 @@ struct Client::Impl {
                         incomplete_retries, max_incomplete_retries);
                 }
                 continue;
+            }
+
+            // Exhausted-retry exit (or retry_on_incomplete was off) on
+            // an incomplete turn. Roll history back to the pre-loop
+            // snapshot so the nudge and the empty assistant turn don't
+            // poison the NEXT user turn — without this rollback, every
+            // subsequent request the CLI sends carries the same junk
+            // and the server bounces immediately into another
+            // exhausted-retry loop (template rendering throws on the
+            // sequence of consecutive user messages we built up). The
+            // user's most recent message remains in place; the CLI
+            // surfaces turn.incomplete to the caller which renders the
+            // "(incomplete response — ...)" placeholder against it.
+            if (turn.incomplete) {
+                history_json.resize(history_size_at_start);
+                last_was_incomplete = true;
+                easyai::log::mark_problem(
+                    "Client::run_chat_loop exhausted incomplete retries — "
+                    "rolling history back to %zu entries "
+                    "(retries=%d/%d, retry_on_incomplete=%s) hop=%d "
+                    "content_bytes=%zu reasoning_bytes=%zu",
+                    history_size_at_start,
+                    incomplete_retries, max_incomplete_retries,
+                    retry_on_incomplete ? "on" : "off",
+                    hop, turn.content.size(), turn.reasoning.size());
+                return turn.content;
             }
 
             history_json.push_back(assistant_msg_json(turn));
@@ -1232,11 +1277,27 @@ bool     Client::cancel_requested() const {
 
 std::string Client::chat(const std::string & user_message) {
     p_->last_error.clear();
+    // Snapshot BEFORE pushing the user turn so we can roll all the way
+    // back if the loop ends incomplete. Without this pop, the failed
+    // user message would land in the saved .easyai_session file; on
+    // --continue the next user input would create two consecutive
+    // "user" turns and the chat template throws (Qwen3-class templates
+    // require user/assistant alternation), reproducing the exhausted-
+    // retry loop the user already escaped from.
+    const size_t pre_user_size = p_->history_json.size();
     ordered_json u;
     u["role"]    = "user";
     u["content"] = user_message;
     p_->history_json.push_back(u.dump());
-    return p_->run_chat_loop();
+    std::string answer = p_->run_chat_loop();
+    if (p_->last_was_incomplete) {
+        // run_chat_loop already trimmed any nudges and the empty
+        // assistant turn; this pops the user message too so the
+        // session-file write below sees a fully-clean history that
+        // matches the state at the end of the last successful turn.
+        p_->history_json.resize(pre_user_size);
+    }
+    return answer;
 }
 
 std::string Client::chat_continue() {
