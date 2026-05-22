@@ -1809,6 +1809,16 @@ void Engine::pop_last(size_t n) {
 std::string Engine::generate() {
     if (!p_->loaded) { p_->last_error = "engine not loaded"; return {}; }
 
+    // Clear sticky error from a previous call. The gate after generate()
+    // ("if (!last_error.empty() && raw.empty()) return {}") would otherwise
+    // misfire on this run if a prior request left last_error set
+    // (e.g. "cancelled" from a dropped client) AND this run happens to
+    // produce empty output (model emits EOG on the first sample after a
+    // tool turn it can't follow up on). Symptom: every subsequent request
+    // returns prompt_n=0, predicted_n=0 with no recovery until process
+    // restart.
+    p_->last_error.clear();
+
     auto chat_p = p_->render(/*add_generation_prompt=*/true);
 
     // Compute how many KV tokens are already cached so we only feed the new
@@ -1900,6 +1910,12 @@ std::string Engine::chat(const std::string & user_message) {
 
 std::string Engine::chat_continue() {
     if (!p_->loaded) { p_->last_error = "engine not loaded"; return {}; }
+
+    // Drop any sticky error from a prior call (see Engine::generate for
+    // the full rationale — same fix point, belt-and-braces here since
+    // chat_continue itself can set last_error in its between-hop cancel
+    // check before generate() runs).
+    p_->last_error.clear();
 
     const int kMaxToolHops          = p_->max_tool_hops;
     // Bumped from 2/1 → 10/10 in 2026-04-28: malformed / "announce only"
@@ -2060,8 +2076,18 @@ std::string Engine::chat_continue() {
             }
         }
 
-        thought_retries    = 0;
-        incomplete_retries = 0;
+        // thought_retries resets every iteration that survived past the
+        // thought-only branch (either model produced content/tool_calls,
+        // or the budget was exhausted and we promoted reasoning). The
+        // announce-only counter (incomplete_retries) is NOT reset here —
+        // see the comment at the tool-dispatch site below. The previous
+        // unconditional reset of incomplete_retries at this spot is the
+        // bug that pinned the counter at 1 across all retries: each
+        // announce-retry would `continue`, fall back here, and zero the
+        // counter before the next iteration's announce-check could
+        // observe it — so kMaxIncompleteRetries was never reached and
+        // the loop kept retrying past any reasonable budget.
+        thought_retries = 0;
         p_->history.push_back(msg);
 
         // Hard ceiling on context fill — once the KV cache hits the
@@ -2220,6 +2246,13 @@ std::string Engine::chat_continue() {
             }
             break;
         }
+
+        // Tool-call success — reset the announce-retry counter so a
+        // later announce-only turn within the SAME chat_continue call
+        // gets a fresh budget. The semantics the user wants for this
+        // counter: per-turn (per chat_continue), errors accumulate,
+        // success (tool dispatch) resets.
+        incomplete_retries = 0;
 
         // Run each tool call; append a tool message for each result.
         for (const auto & tc : msg.tool_calls) {
@@ -2415,6 +2448,12 @@ void Engine::replace_history(const std::vector<HistoryMessage> & messages) {
 Engine::GeneratedTurn Engine::generate_one() {
     GeneratedTurn out{};
     if (!p_->loaded) { out.finish_reason = "error"; p_->last_error = "engine not loaded"; return out; }
+
+    // Same recovery-from-sticky-error fix as Engine::generate /
+    // Engine::chat_continue. Without this, a leftover last_error makes
+    // the gate at line ~2421 short-circuit any future request whose
+    // generate() returns empty.
+    p_->last_error.clear();
 
     auto chat_p = p_->render(/*add_generation_prompt=*/true);
     std::string raw = generate();
