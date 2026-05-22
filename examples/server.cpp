@@ -2631,13 +2631,61 @@ static void handle_chat_stream(ServerCtx & ctx,
             // with the engine's promoted reasoning. Flagging that as
             // "incomplete" with a "no tool_call" warning is just
             // misleading.
+            // A zero-work turn (predicted_n == 0 — no tokens generated)
+            // is a HARD failure of this request, not an "incomplete"
+            // one. The "incomplete" signal means "retry might help" —
+            // model announced a tool, finished early, etc. — and the
+            // client (libeasyai-cli + webui) will retry up to N times
+            // on that signal. If predicted_n == 0 the model didn't run
+            // at all (rendered prompt produced nothing decodable, or
+            // EOG on the first sample), and a retry will reproduce
+            // exactly the same zero work. The retry storm we see in
+            // logs as "10 WARN incomplete in 0ms each" is the client
+            // doing exactly this against a turn the server should
+            // never have flagged as recoverable. Surface a distinct
+            // "engine produced no output" WARN instead, and emit a
+            // synthetic content delta + finish_reason="error" so the
+            // client gets a real signal instead of an empty bubble.
+            const bool engine_zero_work = (predicted_n == 0);
             const bool incomplete =
-                tool_calls.empty()
+                !engine_zero_work
+                && tool_calls.empty()
                 && engine_tool_dispatches == 0
                 && (content_bytes_emitted < kAnnounceFloor
                     || (req_state->last_is_tool
                         && content_bytes_emitted < kPostToolFloor))
                 && looks_like_announce(content_text_emitted);
+            if (engine_zero_work && content_bytes_emitted == 0 && tool_calls.empty()) {
+                std::fprintf(stderr,
+                    "[easyai-server] WARN zero-work turn (prompt_n=%d, "
+                    "predicted_n=%d, finish_reason=%s, last_is_tool=%s).  "
+                    "The engine produced nothing — likely the chat template "
+                    "rendered an empty prompt (malformed assistant turn in "
+                    "history?) or the model emitted EOG on the first sample. "
+                    "Marking finish_reason=\"error\" so the client doesn't "
+                    "retry against an input that can't recover.\n",
+                    prompt_n, predicted_n, finish_reason.c_str(),
+                    req_state->last_is_tool ? "yes" : "no");
+                easyai::log::mark_problem(
+                    "Server: zero-work turn (prompt_n=%d predicted_n=%d "
+                    "last_is_tool=%s) — finish_reason set to \"error\"",
+                    prompt_n, predicted_n,
+                    req_state->last_is_tool ? "yes" : "no");
+                finish_reason = "error";
+                // Emit a brief synthetic content delta so the client
+                // bubble isn't empty. Distinguishable from a normal
+                // empty reply by finish_reason="error".
+                ordered_json synth;
+                synth["choices"] = json::array({{
+                    {"index", 0},
+                    {"delta", {{"content",
+                        "[engine produced no output — the request likely "
+                        "hit a malformed assistant turn in history. Start a "
+                        "new chat or rephrase.]"}}},
+                    {"finish_reason", nullptr},
+                }});
+                emit_data(safe_dump(synth));
+            }
             if (incomplete) {
                 std::fprintf(stderr,
                     "[easyai-server] WARN incomplete response (content_bytes=%zu, "
