@@ -2457,7 +2457,70 @@ Engine::GeneratedTurn Engine::generate_one() {
 
     auto chat_p = p_->render(/*add_generation_prompt=*/true);
     std::string raw = generate();
+
+    // Zero-work retry loop. The model emitted EOG on the first sample
+    // OR the chat template produced a prompt the model treats as
+    // already terminated (usual cause: a malformed assistant turn in
+    // history — tool_call args with stray <|...|> tokens scraped by
+    // the recovery parser — made the rendered tail look complete to
+    // the model). Push a synthetic "please respond" nudge ONCE so
+    // the prompt's tail changes, then keep re-issuing up to the
+    // configured budget so the sampler's advancing RNG state can
+    // produce different output even on the same rendered prompt.
+    // Mirrors the announce-only retry budget in chat_continue —
+    // bound by max_incomplete_retries (default 10). Only after the
+    // whole budget is exhausted do we surface finish_reason="error";
+    // a one-attempt give-up was the wrong shape (the server's
+    // zero-work signal would fire after the first attempt, defeating
+    // the point of having a retry budget at all).
+    const int kMaxZeroWorkRetries = std::max(0, p_->max_incomplete_retries);
+    int zero_work_retries = 0;
+    bool nudge_pushed = false;
+    while (raw.empty() && p_->last_error.empty()
+                       && zero_work_retries < kMaxZeroWorkRetries) {
+        ++zero_work_retries;
+        if (!nudge_pushed) {
+            p_->history.push_back({
+                "user",
+                "Your previous turn produced no output. Please respond "
+                "to the previous message — either call the next tool you "
+                "actually need or give the user the final answer. Do not "
+                "leave the turn empty.",
+                {}, {}, "", "", ""
+            });
+            nudge_pushed = true;
+        }
+        // Surface each retry to streaming consumers so the webui /
+        // libeasyai-cli can render the attempts live in the Thinking
+        // panel instead of staring at silence.
+        if (p_->on_incomplete_retry) {
+            p_->on_incomplete_retry(
+                zero_work_retries, kMaxZeroWorkRetries,
+                "engine produced no output — nudging and retrying");
+        }
+        std::fprintf(stderr,
+            "[easyai] generate_one zero-work retry %d/%d\n",
+            zero_work_retries, kMaxZeroWorkRetries);
+        chat_p = p_->render(/*add_generation_prompt=*/true);
+        raw = generate();
+    }
+
+    // Budget exhausted on zero-work — give-up signal so consumers can
+    // render a distinct cue.
+    if (raw.empty() && p_->last_error.empty()
+                    && zero_work_retries >= kMaxZeroWorkRetries
+                    && p_->on_incomplete_retry) {
+        p_->on_incomplete_retry(
+            -1, kMaxZeroWorkRetries,
+            "engine produced no output after "
+            + std::to_string(kMaxZeroWorkRetries) + " retries");
+    }
+
     if (!p_->last_error.empty() && raw.empty()) {
+        out.finish_reason = "error";
+        return out;
+    }
+    if (raw.empty()) {
         out.finish_reason = "error";
         return out;
     }
