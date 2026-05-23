@@ -79,15 +79,14 @@ constexpr std::size_t kMaxKeywordsPerEntry    = 24;
 // enough that 1 000 entries fit comfortably on disk and in memory.
 constexpr std::size_t kMaxContentBytes    = 256u * 1024u;
 
-// rag_load can fan out to up to 4 entries per call. The cap is
-// deliberate: more than 4 means the model is probably about to
-// drown the prompt in stale content rather than focusing on what
-// matters, and the agent loop stays cheaper too.
-constexpr std::size_t kMaxLoadAtOnce      = 4;
+// rag_load can fan out to up to 20 entries per call — matching the
+// search result cap so the model can load every hit in one round
+// trip when it needs broad context.
+constexpr std::size_t kMaxLoadAtOnce      = 20;
 
 // Search result cap. The model gets a list of (title, keywords,
-// preview) and picks 1..4 to rag_load — so we don't need a huge
-// list, just enough to cover obvious keyword clusters.
+// preview) and picks titles to rag_load — same cap so a full page
+// of search results can be loaded at once.
 constexpr std::size_t kSearchResultsMax   = 20;
 constexpr std::size_t kSearchResultsDflt  = 10;
 
@@ -1712,7 +1711,7 @@ Tool make_rag_tool(std::string root_dir) {
             "  Optional: max_results (default 10, max 20), page "
             "(default 1).\n"
             "\n"
-            "action=\"load\"     titles (1..4 exact) → full content.\n"
+            "action=\"load\"     titles (1..20 exact) → full content.\n"
             "\n"
             "action=\"list\"     → titles only.\n"
             "  Optional: prefix (e.g. `fix-easyai-`), max (default "
@@ -1726,41 +1725,42 @@ Tool make_rag_tool(std::string root_dir) {
             "  Optional: min_count (default 1), max (default 200, "
             "max 500).\n"
             "\n"
-            "GUIDELINES (not absolute rules — use judgment):\n"
+            "KNOWLEDGE LOOP (MANDATORY when memory + web are "
+            "available):\n"
             "\n"
-            "  1. Save what's DURABLE. A memory is for facts you'll "
-            "still want NEXT session: the user's stable preferences, "
-            "a project's architecture, a working command, a fix for "
-            "a recurring error, a recipe. NOT for transient research "
-            "notes from this turn that the user is already reading "
-            "in your reply. If the info dies with this conversation, "
-            "skip the save.\n"
+            "  1. MEMORY FIRST — search memory for relevant keywords "
+            "before anything else. Load hits. Memory is your primary "
+            "knowledge base across sessions.\n"
             "\n"
-            "  2. ONE comprehensive memory, not many fragments. If "
-            "you'd save several related entries about the same topic "
-            "in one turn, save ONE memory with multiple keywords and "
-            "all the info in the body. Or append to an existing "
-            "memory. Three separate \"BitNet_Papers\", "
-            "\"BitNet_Install\", \"BitNet_Benchmarks\" memories from "
-            "one research session is fragmentation — make it one "
-            "\"BitNet\" memory.\n"
+            "  2. WEB SECOND — also search the web, even when memory "
+            "had results. The web may have newer or broader info.\n"
             "\n"
-            "  3. Search memory FIRST for stable facts. Definitions, "
-            "architecture, syntax, project decisions, user "
-            "preferences — these don't change between sessions. When "
-            "memory has them, TRUST them; don't re-verify with the "
-            "web unless the user explicitly asks for \"latest\" / "
-            "\"current\" / dated info newer than the memory's "
-            "`modified` timestamp.\n"
+            "  3. MERGE & ANSWER — combine both sources. Prefer the "
+            "more recent or authoritative one when they conflict; "
+            "note the discrepancy to the user.\n"
             "\n"
-            "  4. Web for what memory doesn't know OR for "
-            "time-sensitive queries. After fetching from the web, "
-            "save only the durable distilled fact (see #1), not the "
-            "raw page contents.\n"
+            "  4. UPDATE MEMORY — if the web produced durable "
+            "knowledge that memory lacked or had outdated, save or "
+            "append it now. Save the distilled fact, not raw page "
+            "content.\n"
             "\n"
-            "  5. Reusable procedures → save with keyword \"skill\". "
-            "Search keywords=[\"skill\", ...] before working a "
-            "procedure out from scratch.\n"
+            "Skipping either source when both are available is a "
+            "failure mode.\n"
+            "\n"
+            "SAVE GUIDELINES:\n"
+            "\n"
+            "  - Save what's DURABLE — facts you'll want next "
+            "session: preferences, architecture, commands, fixes, "
+            "recipes. NOT transient research the user is already "
+            "reading.\n"
+            "\n"
+            "  - ONE comprehensive memory per topic, not fragments. "
+            "Append to existing entries instead of creating parallel "
+            "ones.\n"
+            "\n"
+            "  - Reusable procedures → keyword \"skill\". Search "
+            "keywords=[\"skill\", ...] before working a procedure "
+            "out from scratch.\n"
             "\n"
             "CITATION (INVIOLABLE): after ANY memory search or load "
             "this turn that returns content you use in your reply, "
@@ -1776,7 +1776,7 @@ Tool make_rag_tool(std::string root_dir) {
                "1..64 chars [A-Za-z0-9._+-]. save/append/delete.",
                false)
         .param("titles",      "array",
-               "1..4 exact titles. load only.", false)
+               "1..20 exact titles. load only.", false)
         .param("keywords",    "array",
                "JSON array of 1..8 short strings [A-Za-z0-9._+-]. "
                "On search: first keyword is required, rest rank.",
@@ -1922,7 +1922,9 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
     out.push_back(Tool::builder("memory_search")
         .describe(
             "Find memories by keyword. Returns ranked matches "
-            "tagged `[matched N/M]`.\n"
+            "tagged `[matched N/M]`. Search memory FIRST before "
+            "the web — then also web_search for freshness. Update "
+            "memory with any durable new facts the web provided.\n"
             "\n"
             "CITATION: if you use retrieved content in your reply, "
             "it MUST end with a `Sources:` block citing "
@@ -1939,13 +1941,13 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
 
     out.push_back(Tool::builder("memory_load")
         .describe(
-            "Read the full content of 1..4 memories by exact title.\n"
+            "Read the full content of 1..20 memories by exact title.\n"
             "\n"
             "CITATION: if you use loaded content in your reply, "
             "it MUST end with a `Sources:` block citing "
             "`memory: \"<title>\"` per entry.")
         .param("titles", "array",
-               "1..4 exact titles.", true)
+               "1..20 exact titles.", true)
         .handle(h_load)
         .build());
 

@@ -1571,6 +1571,11 @@ std::vector<Tool> web_split(bool google_enabled) {
             "list. After searching, fetch the top 1-3 URLs — "
             "snippets alone are too short to answer from.\n"
             "\n"
+            "KNOWLEDGE LOOP: always search memory FIRST for what "
+            "you already know, then search the web for freshness. "
+            "If the web returns durable facts memory didn't have, "
+            "update memory after answering.\n"
+            "\n"
             "CITATION (INVIOLABLE): after ANY web_search / web_fetch "
             "this turn, your final reply MUST end with a `Sources:` "
             "block listing the URLs you actually fetched, one per "
@@ -1623,6 +1628,11 @@ Tool web(bool google_enabled) {
     return Tool::builder("web")
         .describe(
             "Web search and fetch — pick an action.\n"
+            "\n"
+            "KNOWLEDGE LOOP: always search memory FIRST for what "
+            "you already know, then search the web for freshness. "
+            "If the web returns durable facts memory didn't have, "
+            "update memory after answering.\n"
             "\n"
             "CITATION (INVIOLABLE): after ANY call to this tool in a "
             "turn, your final reply MUST end with a `Sources:` block "

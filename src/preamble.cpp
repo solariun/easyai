@@ -57,17 +57,43 @@ std::string build(const Options & opt) {
         std::string vocab = easyai::tools::render_memory_vocabulary(
             opt.memory_root);
         if (!vocab.empty()) {
-            // The leading "\n\n" lets this block stand alone when
-            // it's the first thing in the preamble (inject_datetime
-            // was false). When the date/time block precedes it,
-            // the extra blank line is absorbed by the renderer's
-            // own trailing newline.
             out << "\n\n# MEMORY VOCABULARY (the keywords your "
                    "private memory currently has tagged — the FIRST "
                    "place to look for anything you might already "
                    "know)\n"
                 << vocab << "\n";
         }
+
+        out << "\n\n# KNOWLEDGE LOOP — MANDATORY WORKFLOW\n"
+               "For EVERY user question that could benefit from "
+               "stored knowledge or external information, follow "
+               "this loop IN ORDER:\n"
+               "\n"
+               "  1. MEMORY FIRST — search your memory for relevant "
+               "keywords. If hits exist, load them. Memory is your "
+               "primary knowledge base; always check it before "
+               "anything else.\n"
+               "\n"
+               "  2. WEB SECOND — if web tools are available, ALSO "
+               "search the web for the same topic. Do this even when "
+               "memory returned results — the web may have newer or "
+               "broader information.\n"
+               "\n"
+               "  3. MERGE & ANSWER — combine what memory and web "
+               "gave you. When they conflict, prefer the more recent "
+               "or more authoritative source and note the discrepancy "
+               "to the user.\n"
+               "\n"
+               "  4. UPDATE MEMORY — if the web produced durable "
+               "knowledge that your memory didn't have (or had "
+               "outdated), save or append it to memory so future "
+               "sessions benefit. Save the distilled fact, not the "
+               "raw page.\n"
+               "\n"
+               "BOTH sources matter: memory for accumulated context "
+               "and preferences, web for freshness and breadth. "
+               "Skipping either when both are available is a failure "
+               "mode.\n";
     }
 
     if (opt.cite_sources) {

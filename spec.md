@@ -122,6 +122,26 @@ Output always prefixes every line with `<n>| ` (line numbers on by default in bo
 | Line mode | `start_line` set | 200 lines (max 2000) | Always on | Yes |
 | Byte mode | default / `offset` set | 65536 bytes (max 1 MiB) | On (default true) | Yes (≤ 8 MiB files) |
 
+## Knowledge Loop (memory + web)
+
+Mandatory workflow when both memory and web tools are available:
+
+1. **Memory first** — search/load relevant keywords
+2. **Web second** — also search the web, even if memory had results
+3. **Merge & answer** — combine both, prefer more recent/authoritative on conflict
+4. **Update memory** — save durable new facts the web provided
+
+Enforced in three places: system preamble (preamble.cpp), memory tool description (rag_tools.cpp), web tool descriptions (builtin_tools.cpp).
+
+## memory_load / memory_search Limits
+
+| Operation | Default | Max |
+|-----------|---------|-----|
+| load (titles per call) | — | 20 |
+| search (results per page) | 10 | 20 |
+| list (entries) | 50 | 200 |
+| keywords (vocabulary) | 200 | 500 |
+
 ## memory_append Tool Behavior
 
 | Title exists? | Behavior | Return message |
