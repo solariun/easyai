@@ -2385,7 +2385,20 @@ Engine & Engine::push_message(std::string role,
 
 void Engine::clear_history() {
     p_->history.clear();
-    if (p_->ctx())   llama_memory_clear(llama_get_memory(p_->ctx()), true);
+    if (p_->ctx()) {
+        try {
+            llama_memory_clear(llama_get_memory(p_->ctx()), true);
+        } catch (const std::exception & e) {
+            fprintf(stderr,
+                "[easyai] WARNING: GPU error during KV cache clear: %s "
+                "(device may be lost — the server will restart)\n",
+                e.what());
+        } catch (...) {
+            fprintf(stderr,
+                "[easyai] WARNING: unknown error during KV cache clear "
+                "(device may be lost — the server will restart)\n");
+        }
+    }
     if (p_->sampler) common_sampler_reset(p_->sampler);
 }
 
