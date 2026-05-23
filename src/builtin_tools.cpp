@@ -1570,6 +1570,8 @@ std::vector<Tool> web_split(bool google_enabled) {
             "Search the web. Returns a numbered title/url/snippet "
             "list. After searching, fetch the top 1-3 URLs — "
             "snippets alone are too short to answer from.\n"
+            "Arguments are PLAIN JSON — no XML tags, no markup.\n"
+            "Example: {\"query\":\"BitNet quantization\"}\n"
             "\n"
             "KNOWLEDGE LOOP: always search memory FIRST for what "
             "you already know, then search the web for freshness. "
@@ -1628,6 +1630,7 @@ Tool web(bool google_enabled) {
     return Tool::builder("web")
         .describe(
             "Web search and fetch — pick an action.\n"
+            "Arguments are PLAIN JSON — no XML tags, no markup.\n"
             "\n"
             "KNOWLEDGE LOOP: always search memory FIRST for what "
             "you already know, then search the web for freshness. "
@@ -1638,6 +1641,10 @@ Tool web(bool google_enabled) {
             "turn, your final reply MUST end with a `Sources:` block "
             "listing the URLs you actually fetched, one per line, "
             "prefixed `- `. Skipping it makes the reply incomplete.\n"
+            "\n"
+            "CALL EXAMPLES (exact JSON):\n"
+            "  {\"action\":\"search\",\"query\":\"BitNet quantization\"}\n"
+            "  {\"action\":\"fetch\",\"url\":\"https://example.com/page\"}\n"
             "\n"
             "action=\"search\"\n"
             "  Required: query.\n"

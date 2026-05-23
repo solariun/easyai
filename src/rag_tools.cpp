@@ -1686,6 +1686,7 @@ Tool make_rag_tool(std::string root_dir) {
     return Tool::builder("memory")
         .describe(
             "Your private memory — one tool, seven actions.\n"
+            "Arguments are PLAIN JSON — no XML tags, no markup.\n"
             "\n"
             "PRIVATE: the user can't see, list, or browse this store. "
             "Never say \"check memory\" / \"I saved it\" — load it "
@@ -1724,6 +1725,15 @@ Tool make_rag_tool(std::string root_dir) {
             "+ count).\n"
             "  Optional: min_count (default 1), max (default 200, "
             "max 500).\n"
+            "\n"
+            "CALL EXAMPLES (exact JSON):\n"
+            "  {\"action\":\"search\",\"keywords\":[\"BitNet\",\"binary\"]}\n"
+            "  {\"action\":\"load\",\"titles\":[\"BitNet\"]}\n"
+            "  {\"action\":\"save\",\"title\":\"BitNet\","
+            "\"keywords\":[\"BitNet\",\"quantization\"],"
+            "\"content\":\"...\"}\n"
+            "  {\"action\":\"list\"}\n"
+            "  {\"action\":\"keywords\"}\n"
             "\n"
             "KNOWLEDGE LOOP (MANDATORY when memory + web are "
             "available):\n"
@@ -1887,7 +1897,11 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
         .describe(
             "Store a new memory or overwrite an existing one. Title "
             "and keywords are normalised (spaces → `_`, punctuation "
-            "dropped); the canonical key is reported back.")
+            "dropped); the canonical key is reported back.\n"
+            "Arguments are PLAIN JSON — no XML tags, no markup.\n"
+            "Example: {\"title\":\"BitNet\","
+            "\"keywords\":[\"BitNet\",\"quantization\"],"
+            "\"content\":\"...\"}")
         .param("title",    "string",
                "1..64 chars after normalisation.", true)
         .param("keywords", "array",
@@ -1925,6 +1939,8 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
             "tagged `[matched N/M]`. Search memory FIRST before "
             "the web — then also web_search for freshness. Update "
             "memory with any durable new facts the web provided.\n"
+            "Arguments are PLAIN JSON — no XML tags, no markup.\n"
+            "Example: {\"keywords\":[\"BitNet\",\"binary\"]}\n"
             "\n"
             "CITATION: if you use retrieved content in your reply, "
             "it MUST end with a `Sources:` block citing "
@@ -1942,6 +1958,8 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
     out.push_back(Tool::builder("memory_load")
         .describe(
             "Read the full content of 1..20 memories by exact title.\n"
+            "Arguments are PLAIN JSON — no XML tags, no markup.\n"
+            "Example: {\"titles\":[\"BitNet\",\"Preferences\"]}\n"
             "\n"
             "CITATION: if you use loaded content in your reply, "
             "it MUST end with a `Sources:` block citing "
