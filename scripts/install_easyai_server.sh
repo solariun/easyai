@@ -1050,10 +1050,10 @@ RAG_README
 #
 #     sudo systemctl restart easyai-server
 #
-# Precedence is: CLI flag (in the systemd unit) > value here >
-# hardcoded default in the binary. So tweaking this file is the
-# normal path; flipping a CLI flag is the exception (e.g.
-# emergency overrides, debug runs).
+# Precedence is: CLI flag > value here > hardcoded default.
+# The systemd unit only passes --config; everything else
+# (including the model path) is read from this file.
+# Tweaking this file + restart is the normal path.
 
 # ============================================================
 # [SERVER] — HTTP layer + tool gating + paths
@@ -1398,18 +1398,17 @@ if [[ $do_service -eq 1 ]]; then
         sudo systemctl daemon-reload
     fi
 
-    # ----- INI-FIRST: every flag below now lives in $ini_file by default.
-    # The systemd ExecStart only carries flags that CHANGE per-deploy
-    # OR that are operationally inconvenient to put in INI (the model
-    # path, the config path itself). Operator edits $ini_file + restart
-    # to tune anything else — no `systemctl edit` cadence required.
+    # ----- INI-ONLY: every setting (including the model path) lives
+    # in $ini_file. The systemd ExecStart carries only --config and
+    # flags that are operationally inconvenient to put in INI.
+    # Operator edits $ini_file + restart to tune anything — no
+    # `systemctl edit` cadence required.
     #
     # CLI > INI > hardcoded default precedence is honoured by the
     # binary. Operators who prefer the old all-flags-in-unit shape
     # (e.g. for ansible's drift detection) can still pass everything
     # explicitly — both CLI and INI converge on the same setting.
     args=( --config "$ini_file" )
-    args+=( -m "$service_model_dir/$service_model_link" )
     if [[ -f "$api_key_file" ]]; then
         # api-key sourced from a separate file at runtime so it's never
         # visible in `ps` (and the INI doesn't carry secrets either).
