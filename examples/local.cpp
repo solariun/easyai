@@ -477,8 +477,10 @@ static std::string build_builtin_system_prompt(const CliArgs & args) {
     // it once here; the preamble path adds a second copy at the end
     // of the prompt when --memory is enabled, for models (notably
     // Qwen3.x reasoning fine-tunes) that drop the Sources block
-    // after a long <think> trace.
-    s += easyai::preamble::cite_sources_block();
+    // after a long <think> trace. has_memory gates the memory-tool
+    // bullets so we don't tell the model to cite a tool that isn't
+    // wired up this run.
+    s += easyai::preamble::cite_sources_block(/*has_memory=*/ rag_on);
     return s;
 }
 

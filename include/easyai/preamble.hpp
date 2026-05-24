@@ -43,7 +43,10 @@
 //     prefix and send the combined text as the system message.
 #pragma once
 
+#include "easyai/tool.hpp"
+
 #include <string>
+#include <vector>
 
 namespace easyai::preamble {
 
@@ -70,6 +73,14 @@ struct Options {
     // Default off so the historical "empty Options → empty preamble"
     // contract still holds. Server, local, and cli all opt in.
     bool cite_sources = false;
+
+    // When true, the cite_sources block emits its memory-tool bullets
+    // (memory(action="search"), memory(action="load"), memory_search,
+    // memory_load). When false, those bullets are omitted so the model
+    // is not told to cite tools that aren't registered. Drive this from
+    // whether the memory/RAG tool is actually wired up this session.
+    // Ignored when cite_sources=false.
+    bool has_memory = false;
 };
 
 // Build the AUTHORITATIVE preamble. Returns a string that should
@@ -94,6 +105,32 @@ std::string build(const Options & opt);
 // Sources block after a long <think> trace. This revision enumerates
 // every triggering tool by exact call name, adds a POST-REASONING
 // CHECKPOINT, and shows the memory citation format in the example.
-std::string cite_sources_block();
+//
+// `has_memory` gates the memory(action=...) bullets: when false they
+// are omitted so the model is not told to cite a tool that isn't
+// registered this session.
+std::string cite_sources_block(bool has_memory = true);
+
+// Build the AVAILABLE TOOLS + VERIFY-BEFORE-YOU-CALL block. The
+// returned string starts with a blank-line separator so it joins
+// cleanly onto whatever came before. Returns "" if `tools` is empty.
+//
+// What this is for: weak tool-callers (notably Qwen3-Coder-Next) drift
+// into hallucinated tool names — most often by calling a composite
+// tool's sub-action as if it were a standalone tool
+// (e.g. `update(...)` instead of `plan(action="update", ...)`). The
+// block:
+//   1. Lists every registered tool by canonical name, with the action
+//      enum spelled out for composite tools, so the model sees the
+//      exact dispatch shape.
+//   2. Carries an UNBREAKABLE rule pointing at the most common
+//      mistakes and instructing the model to call `tool_lookup` first
+//      whenever a name was not previously confirmed.
+//
+// CALL SITE — emit this ONCE per session, on the FIRST user turn (no
+// prior assistant message in the history). The existing preamble's
+// datetime block is what refreshes per turn; re-emitting the tool
+// catalogue every turn just burns tokens for no behavioural gain.
+std::string build_session_info(const std::vector<easyai::Tool> & tools);
 
 }  // namespace easyai::preamble

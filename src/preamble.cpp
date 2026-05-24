@@ -102,13 +102,21 @@ std::string build(const Options & opt) {
         // it the strongest positional weight for models (notably
         // Qwen3.x reasoning fine-tunes) that otherwise "forget"
         // it after a long <think> trace.
-        out << "\n\n" << cite_sources_block();
+        //
+        // Auto-derive has_memory from memory_root so callers that
+        // already pass memory_root don't also need to set the bool —
+        // the two flags are virtually always in sync. Explicit
+        // opt.has_memory still wins (lets a caller force the memory
+        // bullets on even with no memory_root, e.g. for a client-tools
+        // proxy that exposes memory via a remote name).
+        const bool has_memory = opt.has_memory || !opt.memory_root.empty();
+        out << "\n\n" << cite_sources_block(has_memory);
     }
 
     return out.str();
 }
 
-std::string cite_sources_block() {
+std::string cite_sources_block(bool has_memory) {
     // Strengthened text — third revision. The second revision fixed
     // Qwen3-coder-next and Gemma4 but Qwen3.6-class reasoning
     // fine-tunes still drop the Sources block after a long <think>
@@ -120,7 +128,8 @@ std::string cite_sources_block() {
     //   * repeats the rule in imperative-negative form ("a reply
     //     that used X without Sources is INCOMPLETE") which lands
     //     better on instruction-tuned reasoning models
-    return
+    std::ostringstream out;
+    out <<
         "# CITE SOURCES — MANDATORY, NON-NEGOTIABLE\n"
         "If you used ANY external lookup this turn, your reply is "
         "INVALID without a `Sources:` block at the very end.\n"
@@ -129,9 +138,16 @@ std::string cite_sources_block() {
         "required):\n"
         "  - web_search, web_fetch, web(action=\"search\"), "
         "web(action=\"fetch\")\n"
-        "  - browse, fetch_url\n"
-        "  - memory(action=\"search\"), memory(action=\"load\"), "
-        "memory_search, memory_load\n"
+        "  - browse, fetch_url\n";
+    if (has_memory) {
+        // Gated on memory being registered: when memory is off, telling
+        // the model these tools trigger Sources is a lie that nudges it
+        // to invent calls to a non-existent `memory` / `memory_search`.
+        out <<
+            "  - memory(action=\"search\"), memory(action=\"load\"), "
+            "memory_search, memory_load\n";
+    }
+    out <<
         "  - ANY other tool that returned content from outside your "
         "weights (document search, RAG retrieval, file reads of "
         "fetched content)\n"
@@ -179,6 +195,140 @@ std::string cite_sources_block() {
         "  - If outside tools returned nothing useful AND you "
         "answered from your own knowledge, OMIT the block entirely "
         "— do not fabricate one.\n";
+    return out.str();
+}
+
+namespace {
+
+// Pull the `action` enum out of a JSON-schema parameters blob via a
+// loose substring scan — we deliberately avoid pulling nlohmann into
+// this translation unit. Returns the values verbatim, in order, or
+// empty if there is no `action` enum at all (i.e. the tool is not a
+// composite multi-action dispatcher).
+//
+// The scan is intentionally conservative: it locates `"action"` then
+// looks for `"enum"` within the next ~400 chars (the action property
+// is virtually always declared as `{"type":"string","enum":[…]}` and
+// the schema strings we ship are compact). False positives — picking
+// up an unrelated enum on a different property that happens to follow
+// `action` — are acceptable: the worst case is we render an extra
+// `(action="…")` annotation on the tool, which still helps the model.
+std::vector<std::string> extract_action_enum(const std::string & params_json) {
+    std::vector<std::string> out;
+    size_t a = params_json.find("\"action\"");
+    if (a == std::string::npos) return out;
+    size_t e = params_json.find("\"enum\"", a);
+    if (e == std::string::npos || e - a > 400) return out;
+    size_t lb = params_json.find('[', e);
+    if (lb == std::string::npos) return out;
+    size_t rb = params_json.find(']', lb);
+    if (rb == std::string::npos) return out;
+    for (size_t i = lb + 1; i < rb; ) {
+        size_t q1 = params_json.find('"', i);
+        if (q1 == std::string::npos || q1 >= rb) break;
+        size_t q2 = params_json.find('"', q1 + 1);
+        if (q2 == std::string::npos || q2 >= rb) break;
+        out.push_back(params_json.substr(q1 + 1, q2 - q1 - 1));
+        i = q2 + 1;
+    }
+    return out;
+}
+
+// Return the first non-empty line of a multi-line description, with
+// trailing whitespace trimmed. Tool descriptions in easyai are
+// "one-line summary, blank line, detail rules" so the first line is a
+// good one-liner; we don't want to dump the entire description into
+// the catalogue (would blow the token budget).
+std::string first_description_line(const std::string & d) {
+    size_t start = 0;
+    while (start < d.size() && (d[start] == '\n' || d[start] == '\r' ||
+                                d[start] == ' '  || d[start] == '\t')) {
+        ++start;
+    }
+    size_t nl = d.find('\n', start);
+    std::string r = (nl == std::string::npos)
+                        ? d.substr(start)
+                        : d.substr(start, nl - start);
+    while (!r.empty() && (r.back() == ' ' || r.back() == '\t' ||
+                          r.back() == '\r')) {
+        r.pop_back();
+    }
+    return r;
+}
+
+}  // anonymous
+
+std::string build_session_info(const std::vector<easyai::Tool> & tools) {
+    if (tools.empty()) return std::string();
+
+    std::ostringstream out;
+    out << "\n\n# AVAILABLE TOOLS — call ONLY these names this session\n"
+           "These are the EXACT tools registered in your session. The "
+           "names are case-sensitive. Calling a name NOT in this list "
+           "returns `unknown tool` and wastes the turn.\n\n";
+
+    for (const auto & t : tools) {
+        out << "  - " << t.name;
+        const auto actions = extract_action_enum(t.parameters_json);
+        if (!actions.empty()) {
+            out << "(action=";
+            for (size_t i = 0; i < actions.size(); ++i) {
+                if (i) out << '|';
+                out << '"' << actions[i] << '"';
+            }
+            out << ")";
+        }
+        const std::string fl = first_description_line(t.description);
+        if (!fl.empty()) {
+            // Cap the one-liner so a verbose first line doesn't blow up
+            // the catalogue (some descriptions cram a whole sentence in
+            // line 1; 140 bytes is enough to convey purpose without
+            // turning the block into a wall).
+            //
+            // UTF-8 safety: substr() works on bytes, so a naive cut can
+            // split a multi-byte codepoint and produce invalid UTF-8.
+            // The eventual JSON serialisation
+            // (client.cpp / build_chat_body via nlohmann) then aborts
+            // with json.exception.type_error.316. Walk back from the
+            // cut point to the previous codepoint boundary — a UTF-8
+            // continuation byte has top bits 10xxxxxx, lead bytes do
+            // not. Worst case we lose a few extra bytes from the
+            // one-liner; the catalogue stays valid.
+            if (fl.size() > 140) {
+                size_t cut = 137;
+                while (cut > 0
+                       && (static_cast<unsigned char>(fl[cut]) & 0xC0) == 0x80) {
+                    --cut;
+                }
+                out << ": " << fl.substr(0, cut) << "...";
+            } else {
+                out << ": " << fl;
+            }
+        }
+        out << '\n';
+    }
+
+    out << "\n# VERIFY BEFORE YOU CALL — UNBREAKABLE RULE\n"
+           "Composite tools (those shown above with `action=\"…\"`) "
+           "dispatch via the `action` parameter. The sub-action is "
+           "NEVER callable as a top-level tool — it must always be "
+           "wrapped in the parent tool's call.\n"
+           "\n"
+           "Common mistakes (do NOT do these):\n"
+           "  WRONG: update(items=[…])           "
+           "RIGHT: plan(action=\"update\", items=[…])\n"
+           "  WRONG: search(query=\"…\")            "
+           "RIGHT: web(action=\"search\", query=\"…\")\n"
+           "  WRONG: read(path=\"…\")               "
+           "RIGHT: fs(action=\"read\", path=\"…\")\n"
+           "\n"
+           "If you are about to invoke a tool name you have NOT seen "
+           "in the AVAILABLE TOOLS list above THIS turn, call "
+           "`tool_lookup()` FIRST to confirm it is registered. A "
+           "no-match result from `tool_lookup` is authoritative — do "
+           "NOT retry variations of the same name.\n";
+
+    return out.str();
 }
 
 }  // namespace easyai::preamble

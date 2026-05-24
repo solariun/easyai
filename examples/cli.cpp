@@ -2446,6 +2446,15 @@ int main(int argc, char ** argv) {
     cli.model(o.model).timeout_seconds(o.timeout).http_retries(o.http_retries);
     if (!o.api_key.empty())            cli.api_key(o.api_key);
 
+    // Register tools UP FRONT — before the system-prompt prefix builder
+    // appends the AVAILABLE TOOLS / VERIFY-BEFORE-YOU-CALL session-info
+    // block (which needs cli.tools() to be populated) and before
+    // --show-system-prompt dumps the resolved prompt (so the diagnostic
+    // reflects what the model will actually see). The chat path / REPL
+    // also rely on the catalogue being ready; --list-tools always did.
+    easyai::Plan plan;
+    register_tools(cli, plan, o, st);
+
     // Prefix the user's system prompt with two small in-binary blocks:
     //
     //   [environment] — the absolute path of the agent's sandbox root.
@@ -2568,9 +2577,12 @@ int main(int argc, char ** argv) {
         // the centralised text here so server + local + cli all agree
         // verbatim. The memory-vocab preamble below ALSO re-emits the
         // block at the prompt tail when --memory is on, for models
-        // that drop sources after a long reasoning trace.
+        // that drop sources after a long reasoning trace. has_memory
+        // gates the memory-tool bullets so we don't tell the model to
+        // cite a tool that isn't registered this session.
         if (!prefix.empty()) prefix += "\n";
-        prefix += easyai::preamble::cite_sources_block();
+        prefix += easyai::preamble::cite_sources_block(
+            /*has_memory=*/ !o.rag_dir.empty());
         if (!prefix.empty()) {
             o.system_prompt = o.system_prompt.empty()
                                   ? prefix
@@ -2599,6 +2611,21 @@ int main(int argc, char ** argv) {
         if (!vocab.empty()) {
             o.system_prompt += vocab;
         }
+    }
+
+    // AVAILABLE TOOLS + VERIFY-BEFORE-YOU-CALL block. easyai-cli's
+    // system prompt is baked once at startup (no per-request rebuild
+    // like the server does), and the tool registry doesn't change
+    // mid-session, so we append the catalogue once here. The model
+    // sees it every turn as part of the rolling system message —
+    // slightly redundant after turn 1 but avoids needing first-turn
+    // detection across the HTTP boundary. The block carries the
+    // unbreakable "call tool_lookup first if unsure" rule which is
+    // the actual fix for the qwen3-coder-next sub-action-as-tool
+    // mistake (see 2026-05-24 session screenshot).
+    {
+        std::string si = easyai::preamble::build_session_info(cli.tools());
+        if (!si.empty()) o.system_prompt += si;
     }
 
     // --show-system-prompt: dump the resolved prompt (built-in injection
@@ -2642,11 +2669,10 @@ int main(int argc, char ** argv) {
     if (o.max_reasoning   > 0)         cli.max_reasoning_chars(o.max_reasoning);
     if (o.retry_on_incomplete)         cli.retry_on_incomplete(true);
 
-    // Plan + tools registered up-front so --list-tools (which prints the
-    // LOCAL catalog this CLI sends to the model) can show them and the
-    // chat path / REPL also has them ready.
-    easyai::Plan plan;
-    register_tools(cli, plan, o, st);
+    // (Plan + tool registration moved up front, right after the Client
+    // is configured — needed there so the system-prompt builder can
+    // call build_session_info(cli.tools()) and so --show-system-prompt
+    // reflects the registered catalogue.)
 
     // --------------- session persistence --------------------------------
     // `.easyai_session` in cwd is the per-process state.  Default

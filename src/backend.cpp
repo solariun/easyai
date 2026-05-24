@@ -6,6 +6,7 @@
 #include "easyai/cli.hpp"
 #include "easyai/engine.hpp"
 #include "easyai/external_tools.hpp"
+#include "easyai/preamble.hpp"
 #include "easyai/presets.hpp"
 #include "easyai/rag_tools.hpp"
 #include "easyai/tool.hpp"
@@ -131,6 +132,19 @@ bool LocalBackend::init(std::string & err) {
             r.content.c_str(),
             r.content.size() > 200 ? "…" : "");
     });
+
+    // Append AVAILABLE TOOLS + VERIFY-BEFORE-YOU-CALL block to the
+    // system prompt now that every tool has been registered. Done once
+    // at init (the registry doesn't change after this point), so every
+    // LocalBackend caller — local one-shot, embedded REPL, anything
+    // wiring up a LocalBackend directly — gets the catalogue +
+    // lookup-first rule without having to call build_session_info()
+    // themselves. Mirrors the per-request injection server.cpp does on
+    // the first user turn.
+    if (cfg.load_tools && !engine.tools().empty()) {
+        const std::string si = preamble::build_session_info(engine.tools());
+        if (!si.empty()) engine.system(cfg.system_prompt + si);
+    }
 
     if (!engine.load()) {
         err = engine.last_error();

@@ -694,6 +694,75 @@ bool looks_like_announce_phrase(const std::string & s) {
     return false;
 }
 
+// Build the message body for an "unknown tool" failure that goes back
+// to the model as the tool-role reply. Plain `"unknown tool: X"` leaves
+// weak tool-callers (Qwen3-Coder-Next observed 2026-05-24) with no new
+// signal — they retry the same call indefinitely. This enrichment adds
+// three pieces of information:
+//   1. did-you-mean — if `bogus_name` appears as a quoted string inside
+//      some registered tool's parameters JSON, it is almost certainly
+//      the value of an `action` enum (composite tool sub-action). The
+//      most common failure: `update(items=…)` instead of
+//      `plan(action="update", items=…)`.
+//   2. canonical tool list — the names the model is allowed to call
+//      this session, so it can pick a correct one without first calling
+//      tool_lookup.
+//   3. a "do NOT retry the same call" line — disrupts the retry-loop
+//      cycle by giving the model an explicit instruction to change
+//      behaviour on the next hop.
+std::string format_unknown_tool_error(
+    const std::string &        bogus_name,
+    const std::vector<Tool> &  tools)
+{
+    std::ostringstream out;
+    out << "unknown tool: \"" << bogus_name << "\"\n\n"
+        << "This is NOT a registered tool name.\n\n";
+
+    // Heuristic did-you-mean: scan every tool's schema string for the
+    // bogus name appearing as a quoted literal. False positives are
+    // possible (the name might appear in a description), but composite
+    // tools almost always carry their sub-action names as enum string
+    // literals on the `action` property, so this catches the failure
+    // mode we care about. We also defend against the trivial case
+    // where the bogus name is empty.
+    std::vector<std::string> candidates;
+    if (!bogus_name.empty()) {
+        const std::string needle = "\"" + bogus_name + "\"";
+        for (const auto & t : tools) {
+            if (t.name == bogus_name) continue;   // exact match would not be unknown
+            if (t.parameters_json.find(needle) != std::string::npos) {
+                candidates.push_back(t.name);
+            }
+        }
+    }
+    if (!candidates.empty()) {
+        out << "Likely cause: \"" << bogus_name
+            << "\" is a SUB-ACTION of an existing tool, not a "
+               "standalone tool. Sub-actions are NEVER callable on "
+               "their own.\n";
+        for (const auto & m : candidates) {
+            out << "  Did you mean: " << m
+                << "(action=\"" << bogus_name << "\", ...)\n";
+        }
+        out << "\n";
+    }
+
+    out << "Registered tools this session (canonical names only):\n";
+    if (tools.empty()) {
+        out << "  (none)\n";
+    } else {
+        for (const auto & t : tools) {
+            out << "  - " << t.name << "\n";
+        }
+    }
+
+    out << "\nDO NOT retry the same call. Either invoke the correct "
+           "tool from the list above, or call tool_lookup() with no "
+           "argument first to confirm what is registered.";
+
+    return out.str();
+}
+
 }  // namespace (top-level helpers)
 
 // ===========================================================================
@@ -2295,7 +2364,8 @@ std::string Engine::chat_continue() {
 
             const auto t_tool_begin = std::chrono::steady_clock::now();
             if (!tool) {
-                result = ToolResult::error("unknown tool: " + tc.name);
+                result = ToolResult::error(
+                    format_unknown_tool_error(tc.name, p_->tools));
                 easyai::log::error(
                     "[easyai] Engine: model called unknown tool '%s' (id=%s) "
                     "args=%.*s",

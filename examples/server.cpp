@@ -1790,8 +1790,29 @@ static void prepare_engine_for_request(ServerCtx & ctx, const ChatRequest & req)
     if      (req.inject_override == "on")  inject_now = true;
     else if (req.inject_override == "off") inject_now = false;
 
+    // First-user-turn detection: no assistant message anywhere in the
+    // client-supplied history. On that turn (and only that turn) we
+    // also append the AVAILABLE TOOLS + VERIFY-BEFORE-YOU-CALL block
+    // built from the live tool registry, so the model sees the exact
+    // catalogue + lookup-first rule in its context from token 1.
+    // Re-emitting it on every turn would just burn tokens — the
+    // catalogue does not change mid-session, and once the model has
+    // seen it once it remains in the rolling history.
+    const bool first_user_turn = std::none_of(
+        hist_minus_last.begin(), hist_minus_last.end(),
+        [](const easyai::Engine::HistoryMessage & m) {
+            return m.role == "assistant";
+        });
+
+    std::string addendum;
     if (inject_now) {
-        const std::string preamble = build_authoritative_preamble(ctx);
+        addendum += build_authoritative_preamble(ctx);
+    }
+    if (first_user_turn) {
+        addendum += easyai::preamble::build_session_info(ctx.engine.tools());
+    }
+
+    if (!addendum.empty()) {
         // Find the LAST system message in the client-supplied history.
         // (Most clients put it at index 0, but we walk backwards to be
         // safe — multi-system histories pick the most recent.)
@@ -1800,10 +1821,10 @@ static void prepare_engine_for_request(ServerCtx & ctx, const ChatRequest & req)
                 return m.role == "system";
             });
         if (it != hist_minus_last.rend()) {
-            it->content += preamble;
+            it->content += addendum;
             ctx.engine.system(ctx.default_system);
         } else {
-            ctx.engine.system(ctx.default_system + preamble);
+            ctx.engine.system(ctx.default_system + addendum);
         }
     } else {
         ctx.engine.system(ctx.default_system);
@@ -4279,7 +4300,10 @@ static std::string build_builtin_system_prompt(const ServerArgs & args) {
     // local, and cli render the exact same text. The per-request
     // preamble also re-emits this block at the END of the prompt for
     // Qwen3.x-style models that drop sources after a long <think>.
-    s += easyai::preamble::cite_sources_block();
+    // has_memory gates the memory-tool bullets: when memory is off,
+    // the model otherwise sees instructions naming a tool that isn't
+    // registered, which nudges it to invent `memory_search` calls.
+    s += easyai::preamble::cite_sources_block(/*has_memory=*/ rag_on);
     s +=
         "\n"
         "Be terse. Be honest about uncertainty: \"I'm not sure — let me\n"
