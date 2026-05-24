@@ -12,11 +12,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout llama.cpp
-        uses: actions/checkout@v4
-        with:
-          repository: ggml-org/llama.cpp
-          path: ../llama.cpp
+      - name: Clone llama.cpp
+        run: git clone --depth 1 https://github.com/ggml-org/llama.cpp.git ../llama.cpp
 
       - name: Install dependencies
         run: |
@@ -44,28 +41,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout llama.cpp
-        uses: actions/checkout@v4
-        with:
-          repository: ggml-org/llama.cpp
-          path: ../llama.cpp
+      - name: Clone llama.cpp
+        run: git clone --depth 1 https://github.com/ggml-org/llama.cpp.git ../llama.cpp
 
-      - name: Install cross-compiler and dependencies
+      - name: Install cross-compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++-aarch64-linux-gnu \
-            libcurl4-openssl-dev:arm64 libssl-dev:arm64
-        env:
-          DEBIAN_FRONTEND: noninteractive
-
-      - name: Add arm64 architecture
-        run: |
-          sudo dpkg --add-architecture arm64
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ noble main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
-          sudo apt-get update
-          sudo apt-get install -y libcurl4-openssl-dev:arm64 libssl-dev:arm64
+          sudo apt-get install -y cmake g++-aarch64-linux-gnu
 
       - name: Configure
         run: |
@@ -92,11 +74,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout llama.cpp
-        uses: actions/checkout@v4
-        with:
-          repository: ggml-org/llama.cpp
-          path: ../llama.cpp
+      - name: Clone llama.cpp
+        run: git clone --depth 1 https://github.com/ggml-org/llama.cpp.git ../llama.cpp
 
       - name: Install cross-compiler
         run: |
