@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <random>
 #include <sstream>
@@ -1572,6 +1573,32 @@ bool Engine::load() {
         p_->last_error = "model path not set; call .model(\"path/to/file.gguf\") first";
         easyai::log::error("[easyai] Engine::load: %s", p_->last_error.c_str());
         return false;
+    }
+
+    // If the operator pointed at a symlink (typical on the AI box where
+    // /var/lib/easyai/models/ai.gguf is a link to the current weight file
+    // and gets swapped between models), resolve to the canonical real
+    // path before handing to llama.cpp.  llama_load_model_from_file
+    // tolerates symlinks via the kernel's open(), but logs/metrics that
+    // surface model_path() are clearer when they report the real file —
+    // and tooling that mmaps by inode comparison (e.g. cache hits across
+    // restarts) needs the resolved path to match.  Applied to both the
+    // target model and the speculative-decoding draft model.
+    {
+        namespace fs = std::filesystem;
+        auto resolve_symlink = [](std::string & path) {
+            if (path.empty()) return;
+            std::error_code ec;
+            if (!fs::is_symlink(path, ec) || ec) return;
+            fs::path resolved = fs::canonical(path, ec);
+            if (ec) return;
+            easyai::log::write("[easyai] Engine::load: following symlink %s -> %s",
+                               path.c_str(),
+                               resolved.string().c_str());
+            path = resolved.string();
+        };
+        resolve_symlink(p_->params.model.path);
+        resolve_symlink(p_->params.speculative.draft.mparams.path);
     }
 
     // Pre-load the optional Jinja chat-template override (read once,
