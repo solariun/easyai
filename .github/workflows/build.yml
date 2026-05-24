@@ -1,0 +1,146 @@
+name: Build
+
+on:
+  push:
+    branches: [main, develop, release]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout llama.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          path: ../llama.cpp
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libcurl4-openssl-dev libssl-dev
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Package
+        run: |
+          cmake --install build --prefix build/install
+          tar -czf easyai-linux-x86_64.tar.gz -C build/install .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easyai-linux-x86_64
+          path: easyai-linux-x86_64.tar.gz
+
+  build-linux-aarch64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout llama.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          path: ../llama.cpp
+
+      - name: Install cross-compiler and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++-aarch64-linux-gnu \
+            libcurl4-openssl-dev:arm64 libssl-dev:arm64
+        env:
+          DEBIAN_FRONTEND: noninteractive
+
+      - name: Add arm64 architecture
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list.d/*.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ noble main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev:arm64 libssl-dev:arm64
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/aarch64-linux-gnu.cmake \
+            -DEASYAI_WITH_CURL=OFF
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Package
+        run: |
+          cmake --install build --prefix build/install
+          tar -czf easyai-linux-aarch64.tar.gz -C build/install .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easyai-linux-aarch64
+          path: easyai-linux-aarch64.tar.gz
+
+  build-linux-armhf:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout llama.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: ggml-org/llama.cpp
+          path: ../llama.cpp
+
+      - name: Install cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++-arm-linux-gnueabihf
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/armhf-linux-gnu.cmake \
+            -DEASYAI_WITH_CURL=OFF
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Package
+        run: |
+          cmake --install build --prefix build/install
+          tar -czf easyai-linux-armhf.tar.gz -C build/install .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: easyai-linux-armhf
+          path: easyai-linux-armhf.tar.gz
+
+  release:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [build-linux-x86_64, build-linux-aarch64, build-linux-armhf]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release (tag-triggered)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/easyai-linux-x86_64/easyai-linux-x86_64.tar.gz
+            artifacts/easyai-linux-aarch64/easyai-linux-aarch64.tar.gz
+            artifacts/easyai-linux-armhf/easyai-linux-armhf.tar.gz
