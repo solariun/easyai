@@ -27,6 +27,11 @@ option(EASYAI_BUILD_EXAMPLES "Build easyai example agents"             ON)
 option(EASYAI_WITH_CURL      "Build web_fetch / web_search"            ON)
 option(EASYAI_BUILD_WEBUI    "Embed the llama-server-style webui"      ON)
 option(EASYAI_INSTALL        "Generate install + find_package targets" ON)
+# Also build the standard llama.cpp tool binaries (llama-cli, llama-server,
+# llama-gguf-split, llama-quantize, llama-bench, ...) alongside easyai.
+# OFF keeps configure/build fast; the installer flips this ON so the
+# AI box ships with the full tool set under $prefix/bin.
+option(EASYAI_BUILD_LLAMA_TOOLS "Also build llama.cpp tool binaries"   OFF)
 
 # ----- 64-bit std::atomic probe ---------------------------------------------
 # Some example binaries declare `std::atomic<int64_t>` /
@@ -62,8 +67,13 @@ endif()
 # is fast and we only get the libraries we need.
 set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
+if (EASYAI_BUILD_LLAMA_TOOLS)
+    set(LLAMA_BUILD_TOOLS    ON  CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_SERVER   ON  CACHE BOOL "" FORCE)
+else()
+    set(LLAMA_BUILD_TOOLS    OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
+endif()
 set(LLAMA_CURL           OFF CACHE BOOL "" FORCE)
 # We DO need the `common` static library — it provides chat templates,
 # tool-call parsing and the high-level sampler used by easyai.
@@ -80,6 +90,34 @@ if (NOT TARGET llama)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp
                      ${CMAKE_BINARY_DIR}/_deps/llama.cpp
                      EXCLUDE_FROM_ALL)
+endif()
+
+# llama.cpp is added EXCLUDE_FROM_ALL, so its tool/server targets exist but
+# aren't built by `cmake --build` unless we depend on them.  This aggregate
+# target pulls in every llama-* tool target that actually got defined, so a
+# normal build produces llama-cli / llama-server / llama-gguf-split / ... in
+# build/bin alongside the libraries.  Skipped tools (toggled off in
+# llama.cpp upstream, removed between versions) are silently ignored.
+if (EASYAI_BUILD_LLAMA_TOOLS)
+    set(_easyai_llama_tool_targets
+        llama-cli
+        llama-server
+        llama-gguf-split
+        llama-quantize
+        llama-bench
+        llama-batched-bench
+        llama-tokenize
+        llama-imatrix
+        llama-perplexity
+        llama-cvector-generator
+        llama-export-lora
+        llama-tts)
+    add_custom_target(easyai_llama_tools ALL)
+    foreach(_tool IN LISTS _easyai_llama_tool_targets)
+        if (TARGET ${_tool})
+            add_dependencies(easyai_llama_tools ${_tool})
+        endif()
+    endforeach()
 endif()
 
 # ============================================================================

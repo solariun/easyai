@@ -75,6 +75,16 @@
 #                                                    # (only the template ships).
 #   ./install_easyai_server.sh --enable-now          # systemctl start now
 #   ./install_easyai_server.sh --enable-verbose      # bake --verbose into ExecStart (noisy)
+#   ./install_easyai_server.sh --no-llama-tools      # skip the llama.cpp tool
+#                                                    # binaries (llama-cli,
+#                                                    # llama-server,
+#                                                    # llama-gguf-split,
+#                                                    # llama-quantize,
+#                                                    # llama-bench, ...).
+#                                                    # default: they are
+#                                                    # built and installed to
+#                                                    # $prefix/bin alongside
+#                                                    # easyai-server.
 #   ./install_easyai_server.sh --mtp                 # bake --spec-type draft-mtp
 #                                                    # --spec-draft-n-max 6 into
 #                                                    # ExecStart. Only for MTP-
@@ -126,6 +136,20 @@ do_presets=1                                  # symlink easyai-cli → /usr/bin/
 do_model=1
 do_upgrade=0
 copy_model=0
+do_llama_tools=1                              # also build + install
+                                              # llama.cpp's CLI tools
+                                              # (llama-cli, llama-server,
+                                              # llama-gguf-split,
+                                              # llama-quantize, llama-bench,
+                                              # llama-tokenize,
+                                              # llama-imatrix,
+                                              # llama-perplexity, ...) so
+                                              # the AI box has the full
+                                              # llama.cpp tool surface
+                                              # next to easyai-server. Set
+                                              # to 0 via --no-llama-tools
+                                              # for a faster rebuild when
+                                              # iterating on easyai itself.
 
 # easyai-server runtime config (compiled into the unit file)
 service_user="easyai"
@@ -276,6 +300,8 @@ while [[ $# -gt 0 ]]; do
         --no-model)         do_model=0; shift ;;
         --no-avahi)         do_avahi=0; shift ;;
         --no-presets)       do_presets=0; shift ;;
+        --no-llama-tools)   do_llama_tools=0; shift ;;
+        --with-llama-tools) do_llama_tools=1; shift ;;
         --no-swap)          do_swap="off"; shift ;;
         --swap-tune)        do_swap="tune"; shift ;;
         --keep-swap)        do_swap=""; shift ;;
@@ -366,7 +392,7 @@ while [[ $# -gt 0 ]]; do
             exit 0 ;;
         # -----------------------------------------------------------------
 
-        -h|--help)          sed -n '2,77p' "$0"; exit 0 ;;
+        -h|--help)          sed -n '2,96p' "$0"; exit 0 ;;
         *)
             echo "unknown arg: $1" >&2
             echo "run with --help for usage" >&2
@@ -507,6 +533,8 @@ printf '    sampling         = temp=%s top_p=%s top_k=%s min_p=%s\n' \
 printf '                       repeat_penalty=%s  max_tokens=%s\n' "$repeat_penalty" "$max_tokens"
 printf '    metrics          = %s\n' "$enable_metrics"
 printf '    verbose          = %s\n' "$enable_verbose"
+printf '    llama_tools      = %s   (llama-cli/server/gguf-split/quantize/bench/... in $prefix/bin)\n' \
+    "$([[ $do_llama_tools -eq 1 ]] && echo on || echo off)"
 printf '    webui_title      = %s\n' "$webui_title"
 printf '    webui_icon       = %s\n' "${webui_icon:-<default — no icon>}"
 printf '    api_key          = %s\n' "$([[ -n "$api_key" ]] && echo "<set>" || echo "<none — server is open>")"
@@ -539,7 +567,7 @@ if [[ $do_install -eq 1 ]]; then
     sudo apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build git ccache pkg-config curl ca-certificates \
         libcurl4-openssl-dev libomp-dev libcap2-bin jq \
-        systemd-coredump
+        systemd-coredump patchelf
 
     case "$backend_resolved" in
         vulkan)
@@ -632,6 +660,9 @@ fi
 if [[ $do_build -eq 1 ]]; then
     log "configuring easyai build (backend=$backend_resolved)"
     cmake_flags=( -DCMAKE_BUILD_TYPE=Release -DEASYAI_BUILD_EXAMPLES=ON )
+    if [[ $do_llama_tools -eq 1 ]]; then
+        cmake_flags+=( -DEASYAI_BUILD_LLAMA_TOOLS=ON )
+    fi
     case "$backend_resolved" in
         vulkan)  cmake_flags+=( -DGGML_VULKAN=ON ) ;;
         cuda)    cmake_flags+=( -DGGML_CUDA=ON ) ;;
@@ -746,6 +777,55 @@ if [[ $do_build -eq 1 ]]; then
     if [[ $do_presets -eq 1 ]]; then
         log "installing easyai-cli as 'ai' shortcut → $install_prefix/bin/ai"
         sudo ln -sf "$install_prefix/bin/easyai-cli" "$install_prefix/bin/ai"
+    fi
+
+    # ---- llama.cpp tool binaries ------------------------------------------
+    # When EASYAI_BUILD_LLAMA_TOOLS=ON the build dropped llama-cli /
+    # llama-server / llama-gguf-split / ... into build/bin/ next to the
+    # shared libraries.  We ship them to $install_prefix/bin and patch the
+    # RPATH so they pick up libllama / libggml from $install_prefix/lib/easyai
+    # (where the easyai install above placed them), independent of
+    # LD_LIBRARY_PATH or ldconfig state.
+    if [[ $do_llama_tools -eq 1 ]]; then
+        tools_installed=0
+        tools_skipped=0
+        while IFS= read -r tool_path; do
+            [[ -f "$tool_path" ]] || continue
+            tool_name="$(basename "$tool_path")"
+            sudo install -Dm755 "$tool_path" "$install_prefix/bin/$tool_name"
+            # Point the binary at $prefix/lib/easyai (where easyai's libllama
+            # lives). patchelf is a Linux-only ELF tool — on macOS dev boxes
+            # the binary already carries an @rpath that the build set, so we
+            # skip silently if patchelf isn't around.
+            if command -v patchelf >/dev/null 2>&1; then
+                sudo patchelf --set-rpath "\$ORIGIN/../lib/easyai" \
+                    "$install_prefix/bin/$tool_name" 2>/dev/null || true
+            fi
+            tools_installed=$((tools_installed+1))
+        done < <(find "$easyai_dir/build/bin" -maxdepth 1 -type f \
+                       -name 'llama-*' -not -name 'lib*' \
+                       -perm -u+x 2>/dev/null)
+
+        if (( tools_installed > 0 )); then
+            log "installed $tools_installed llama.cpp tool binaries to $install_prefix/bin"
+            # Quick sanity: do the freshly-installed tools resolve their
+            # libllama dependency? If not, the RPATH patch failed and the
+            # operator will hit "cannot open shared object" at runtime.
+            if command -v ldd >/dev/null 2>&1; then
+                first_tool=$(find "$easyai_dir/build/bin" -maxdepth 1 -type f \
+                                 -name 'llama-cli' -perm -u+x 2>/dev/null \
+                                 | head -n1)
+                if [[ -n "$first_tool" ]] && \
+                   ldd "$install_prefix/bin/llama-cli" 2>/dev/null \
+                       | grep -q 'libllama.*not found'; then
+                    warn "llama-cli can't resolve libllama — RPATH patch may have failed (patchelf installed? $(command -v patchelf || echo no))"
+                fi
+            fi
+        else
+            warn "EASYAI_BUILD_LLAMA_TOOLS was on but build/bin/llama-* came up empty"
+            warn "  re-run with --upgrade after fixing $easyai_dir/build (or pass --no-llama-tools to skip)"
+            tools_skipped=1
+        fi
     fi
 fi
 
