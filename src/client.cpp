@@ -383,6 +383,7 @@ struct Client::Impl {
             last_error = "transport setup failed for endpoint " + endpoint;
             return nullptr;
         }
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
         if (u.scheme == "https") {
             if (tls_insecure) {
                 cli->enable_server_certificate_verification(false);
@@ -391,6 +392,7 @@ struct Client::Impl {
                 cli->set_ca_cert_path(tls_ca_path.c_str());
             }
         }
+#endif
         cli->set_read_timeout (timeout_seconds, 0);
         cli->set_write_timeout(timeout_seconds, 0);
         cli->set_keep_alive(true);
