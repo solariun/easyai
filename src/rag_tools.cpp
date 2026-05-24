@@ -1890,6 +1890,52 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
     auto h_delete   = make_delete_handler  (store);
     auto h_keywords = make_keywords_handler(store);
 
+    // Inner handlers cite the legacy seven-tool names (rag_save,
+    // rag_append, rag_search, ...) in their guidance prose because
+    // those were the original tool names. With memory_split_tools
+    // registered, the actual callable names are memory_save /
+    // memory_search / etc. — leaving rag_<verb> in handler output
+    // would point the model at non-existent tool names. Wrap every
+    // handler with a substitution that rewrites occurrences in place.
+    // Mirrors the same idiom make_rag_tool uses (line ~1850); the
+    // unified dispatcher there maps to `memory(action="...")` form
+    // because that IS its tool surface, while we map to the split
+    // names. Cheap O(n) string scan per call.
+    struct Sub { const char * from; const char * to; };
+    static const Sub kSubs[] = {
+        { "rag_append",   "memory_append"   },
+        { "rag_delete",   "memory_delete"   },
+        { "rag_keywords", "memory_keywords" },
+        { "rag_list",     "memory_list"     },
+        { "rag_load",     "memory_load"     },
+        { "rag_save",     "memory_save"     },
+        { "rag_search",   "memory_search"   },
+    };
+    auto rewrite_for_split = [](ToolResult r) -> ToolResult {
+        for (const auto & s : kSubs) {
+            std::string from = s.from;
+            std::string to   = s.to;
+            size_t pos = 0;
+            while ((pos = r.content.find(from, pos)) != std::string::npos) {
+                r.content.replace(pos, from.size(), to);
+                pos += to.size();
+            }
+        }
+        return r;
+    };
+    auto wrap = [&](auto inner) {
+        return [inner, rewrite_for_split](const ToolCall & c) -> ToolResult {
+            return rewrite_for_split(inner(c));
+        };
+    };
+    h_save     = wrap(h_save);
+    h_append   = wrap(h_append);
+    h_search   = wrap(h_search);
+    h_load     = wrap(h_load);
+    h_list     = wrap(h_list);
+    h_delete   = wrap(h_delete);
+    h_keywords = wrap(h_keywords);
+
     std::vector<Tool> out;
     out.reserve(7);
 
@@ -2055,15 +2101,16 @@ std::string render_memory_vocabulary(const std::string & root_dir) {
     std::ostringstream o;
     o << total_entries << " entr"
       << (total_entries == 1 ? "y" : "ies")
-      << " (most-common first; call memory(action=\"search\", "
-      << "keywords=[\"<name>\", ...]) to recall):\n";
+      << " (most-common first; use your memory-search tool with these "
+      << "keywords to recall — the exact callable name is in your "
+      << "AVAILABLE TOOLS list):\n";
     for (std::size_t i = 0; i < rows.size(); ++i) {
         if (i) o << ' ';
         o << rows[i].keyword << '(' << rows[i].count << ')';
     }
     if (truncated) {
-        o << " …(+" << (total_kw - kCap) << " more; call "
-          << "memory(action=\"keywords\") for the full list)";
+        o << " …(+" << (total_kw - kCap)
+          << " more; use the memory-keywords tool for the full list)";
     }
     return o.str();
 }

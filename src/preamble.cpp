@@ -134,18 +134,21 @@ std::string cite_sources_block(bool has_memory) {
         "If you used ANY external lookup this turn, your reply is "
         "INVALID without a `Sources:` block at the very end.\n"
         "\n"
-        "TRIGGERING TOOLS (if you called ANY of these, Sources is "
-        "required):\n"
-        "  - web_search, web_fetch, web(action=\"search\"), "
-        "web(action=\"fetch\")\n"
-        "  - browse, fetch_url\n";
+        "TRIGGERING CATEGORIES (if you called any tool in these "
+        "categories, Sources is required). The CALLABLE tool names "
+        "are in AVAILABLE TOOLS above — never copy the descriptions "
+        "below as tool names, they are categories, not callables:\n"
+        "  - WEB TOOLS — anything that fetched a URL or searched the "
+        "internet (e.g. web_search, web_fetch, browse, fetch_url, or "
+        "a unified web dispatcher)\n";
     if (has_memory) {
         // Gated on memory being registered: when memory is off, telling
-        // the model these tools trigger Sources is a lie that nudges it
-        // to invent calls to a non-existent `memory` / `memory_search`.
+        // the model memory tools trigger Sources is a lie that nudges
+        // it to invent calls to a non-existent memory tool.
         out <<
-            "  - memory(action=\"search\"), memory(action=\"load\"), "
-            "memory_search, memory_load\n";
+            "  - MEMORY / RAG TOOLS — anything that searched or loaded "
+            "persistent memory (e.g. memory_search, memory_load, or a "
+            "unified memory dispatcher)\n";
     }
     out <<
         "  - ANY other tool that returned content from outside your "
@@ -309,18 +312,28 @@ std::string build_session_info(const std::vector<easyai::Tool> & tools) {
     }
 
     out << "\n# VERIFY BEFORE YOU CALL — UNBREAKABLE RULE\n"
-           "Composite tools (those shown above with `action=\"…\"`) "
-           "dispatch via the `action` parameter. The sub-action is "
-           "NEVER callable as a top-level tool — it must always be "
-           "wrapped in the parent tool's call.\n"
+           "The AVAILABLE TOOLS list above is the COMPLETE set of "
+           "callable names this session. The tool name you put in a "
+           "tool_call MUST be one of those names — exactly, "
+           "case-sensitive, with NOTHING else attached.\n"
            "\n"
-           "Common mistakes (do NOT do these):\n"
-           "  WRONG: update(items=[…])           "
-           "RIGHT: plan(action=\"update\", items=[…])\n"
-           "  WRONG: search(query=\"…\")            "
-           "RIGHT: web(action=\"search\", query=\"…\")\n"
-           "  WRONG: read(path=\"…\")               "
-           "RIGHT: fs(action=\"read\", path=\"…\")\n"
+           "Two failure modes that waste the turn:\n"
+           "\n"
+           "1. Calling a SUB-ACTION as if it were a tool. Composite "
+           "tools (those shown above with `action=\"…\"`) dispatch "
+           "via the `action` parameter; the sub-action is NEVER "
+           "callable on its own. Example:\n"
+           "  WRONG: update(items=[…])\n"
+           "  RIGHT: plan(action=\"update\", items=[…])\n"
+           "\n"
+           "2. Putting CALL SYNTAX into the tool name field. The "
+           "tool_call name slot takes ONLY the bare tool name; "
+           "arguments go in the arguments field. Never include "
+           "parentheses, never include `action=\"…\"`, never include "
+           "argument values in the name. Example:\n"
+           "  WRONG: name=\"memory_search(keywords=[\\\"x\\\"])\"\n"
+           "  RIGHT: name=\"memory_search\", "
+           "arguments={\"keywords\":[\"x\"]}\n"
            "\n"
            "If you are about to invoke a tool name you have NOT seen "
            "in the AVAILABLE TOOLS list above THIS turn, call "
