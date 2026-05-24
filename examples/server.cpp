@@ -6471,6 +6471,21 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    // Engine::load() resolves symlinks on the model path (so the AI box's
+    // /var/lib/easyai/models/ai.gguf → real-weight-file pattern surfaces
+    // the actual filename downstream).  Re-derive ctx->model_id from the
+    // post-resolution path so /v1/models, the webui badge, and the chat-
+    // completion response all advertise the real model name instead of
+    // the symlink stub.  Operator-provided --alias still wins.
+    if (args.alias.empty()) {
+        std::string p = ctx->engine.model_path();
+        auto slash = p.find_last_of("/\\");
+        if (slash != std::string::npos) p = p.substr(slash + 1);
+        auto dot = p.find_last_of('.');
+        if (dot != std::string::npos) p = p.substr(0, dot);
+        if (!p.empty()) ctx->model_id = p;
+    }
+
     std::fprintf(stderr,
         "[easyai-server] %s loaded\n"
         "                backend=%s  ctx=%d  tools=%zu  preset=%s\n"
