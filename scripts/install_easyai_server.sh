@@ -92,6 +92,20 @@
 #                                                    # V3, MimoVL, etc.); plain
 #                                                    # models won't load.
 #   ./install_easyai_server.sh --mtp --mtp-n-max 8   # override the draft window
+#   ./install_easyai_server.sh --no-lemonade         # skip the Lemonade Server
+#                                                    # install. Default: install
+#                                                    # Lemonade Server (AMD's
+#                                                    # NPU-capable LLM runtime)
+#                                                    # alongside easyai-server,
+#                                                    # but leave its systemd
+#                                                    # unit DISABLED — operator
+#                                                    # starts it manually via
+#                                                    # `lemonade-server serve
+#                                                    # --no-tray`. Default port
+#                                                    # 13305. Ubuntu-only path
+#                                                    # (PPA); on Debian we warn
+#                                                    # and skip with a pointer
+#                                                    # to the manual build.
 #   ./install_easyai_server.sh --no-service          # build/install only
 #   ./install_easyai_server.sh -h                    # show this help
 # ============================================================================
@@ -136,6 +150,22 @@ do_presets=1                                  # symlink easyai-cli → /usr/bin/
 do_model=1
 do_upgrade=0
 copy_model=0
+do_lemonade=1                                 # install Lemonade Server (AMD's
+                                              # NPU-capable LLM runtime) via
+                                              # the lemonade-team PPA on
+                                              # Ubuntu. Skipped on non-Ubuntu
+                                              # (Debian etc.) with a pointer
+                                              # to the upstream manual build.
+                                              # The systemd unit shipped by
+                                              # the PPA is DISABLED + STOPPED
+                                              # after install so the operator
+                                              # runs Lemonade by hand — that
+                                              # was the user's explicit ask
+                                              # (manual NPU experimentation,
+                                              # no auto-start). Default port
+                                              # is upstream 13305 (not
+                                              # configurable here). Set 0 via
+                                              # --no-lemonade.
 do_llama_tools=1                              # also build + install
                                               # llama.cpp's CLI tools
                                               # (llama-cli, llama-server,
@@ -302,6 +332,8 @@ while [[ $# -gt 0 ]]; do
         --no-presets)       do_presets=0; shift ;;
         --no-llama-tools)   do_llama_tools=0; shift ;;
         --with-llama-tools) do_llama_tools=1; shift ;;
+        --no-lemonade)      do_lemonade=0; shift ;;
+        --with-lemonade)    do_lemonade=1; shift ;;
         --no-swap)          do_swap="off"; shift ;;
         --swap-tune)        do_swap="tune"; shift ;;
         --keep-swap)        do_swap=""; shift ;;
@@ -392,7 +424,7 @@ while [[ $# -gt 0 ]]; do
             exit 0 ;;
         # -----------------------------------------------------------------
 
-        -h|--help)          sed -n '2,96p' "$0"; exit 0 ;;
+        -h|--help)          sed -n '2,110p' "$0"; exit 0 ;;
         *)
             echo "unknown arg: $1" >&2
             echo "run with --help for usage" >&2
@@ -535,6 +567,8 @@ printf '    metrics          = %s\n' "$enable_metrics"
 printf '    verbose          = %s\n' "$enable_verbose"
 printf '    llama_tools      = %s   (llama-cli/server/gguf-split/quantize/bench/... in $prefix/bin)\n' \
     "$([[ $do_llama_tools -eq 1 ]] && echo on || echo off)"
+printf '    lemonade         = %s   (AMD Lemonade Server for NPU; systemd unit DISABLED, manual start)\n' \
+    "$([[ $do_lemonade -eq 1 ]] && echo on || echo off)"
 printf '    webui_title      = %s\n' "$webui_title"
 printf '    webui_icon       = %s\n' "${webui_icon:-<default — no icon>}"
 printf '    api_key          = %s\n' "$([[ -n "$api_key" ]] && echo "<set>" || echo "<none — server is open>")"
@@ -1713,6 +1747,83 @@ AVA
     fi
 fi
 
+# ---------- Lemonade Server (NPU sidecar, manual start) --------------------
+# Installs AMD's Lemonade Server alongside easyai-server so the box has a
+# second LLM runtime that can target the XDNA2 NPU (Ryzen AI). Per the
+# operator's explicit ask: install everything BUT leave the lemonade-server
+# systemd unit DISABLED + STOPPED — they want to run it by hand
+# (`lemonade-server serve --no-tray --port 13305`) while they iterate on
+# the NPU path. Default port is 13305 (upstream default; we don't override).
+#
+# Path matrix:
+#   Ubuntu (any release the PPA supports): add ppa:lemonade-team/stable,
+#     `apt install lemonade-server`, then disable+stop the unit.
+#   Debian (no PPA): warn, skip, point at the upstream "build from source"
+#     guide. Doing apt-add-repository against a Debian release silently
+#     mismatches the dists/ tree and breaks future updates — not worth it.
+#   Other distros (Arch / Fedora / ...): same warn-and-skip. The script's
+#     overall target is Debian/Ubuntu; Lemonade has its own docs for the
+#     rest.
+#
+# `do_lemonade=0` (set via --no-lemonade) skips the whole block.
+if [[ $do_lemonade -eq 1 ]]; then
+    log "Lemonade Server install (NPU sidecar — systemd unit will be left DISABLED for manual use)"
+
+    distro_id=""
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        distro_id="$(. /etc/os-release && echo "${ID:-}")"
+    fi
+
+    case "$distro_id" in
+        ubuntu)
+            # software-properties-common gives us add-apt-repository on
+            # minimal Ubuntu images. Idempotent: re-running is a no-op
+            # once the PPA + package are in place. The whole script runs
+            # as NON-root (see EUID check above) and uses `sudo` for
+            # privileged commands — mirror that here.
+            if ! command -v add-apt-repository >/dev/null 2>&1; then
+                log "  installing software-properties-common (needed for add-apt-repository)"
+                sudo apt-get install -y software-properties-common
+            fi
+            if ! grep -rq 'lemonade-team' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+                log "  adding PPA: ppa:lemonade-team/stable"
+                sudo add-apt-repository -y ppa:lemonade-team/stable
+                sudo apt-get update
+            else
+                log "  PPA ppa:lemonade-team/stable already present, skipping add"
+            fi
+            log "  apt-get install lemonade-server"
+            sudo apt-get install -y lemonade-server
+
+            # Per operator request: keep the PPA-shipped systemd unit
+            # DISABLED + STOPPED. The .service file stays on disk so the
+            # operator can `systemctl start lemonade-server` if they
+            # decide to flip later. `|| true` because the unit name has
+            # changed across PPA versions before and a not-found is fine.
+            if systemctl list-unit-files 2>/dev/null | grep -q '^lemonade-server\.service'; then
+                log "  disabling + stopping lemonade-server.service (manual-start per operator request)"
+                sudo systemctl disable lemonade-server.service 2>/dev/null || true
+                sudo systemctl stop    lemonade-server.service 2>/dev/null || true
+            else
+                log "  no lemonade-server.service registered (nothing to disable)"
+            fi
+
+            log "Lemonade Server installed. Manual start:  lemonade-server serve --no-tray --port 13305"
+            ;;
+        debian)
+            warn "Lemonade Server: Debian path is 'build from source' upstream — skipping the PPA install"
+            warn "  follow https://lemonade-server.ai/docs/guide/install/ for the source build,"
+            warn "  or pass --no-lemonade next run to silence this notice."
+            ;;
+        *)
+            warn "Lemonade Server: distro '${distro_id:-unknown}' is not a supported install path here"
+            warn "  Ubuntu: PPA install runs automatically. Other distros: see"
+            warn "  https://lemonade-server.ai/docs/guide/install/ . Pass --no-lemonade to skip."
+            ;;
+    esac
+fi
+
 # ---------- summary ---------------------------------------------------------
 echo
 log "DONE."
@@ -1754,3 +1865,10 @@ printf '  if it crashes:\n'
 printf '    sudo journalctl -u %s -n 200 --no-pager\n' "$service_name"
 printf '    coredumpctl list %s   # then: coredumpctl gdb <PID>\n' "$service_name"
 echo
+if [[ $do_lemonade -eq 1 ]] && command -v lemonade-server >/dev/null 2>&1; then
+    printf '  lemonade  : installed (NPU sidecar), systemd unit DISABLED for manual use.\n'
+    printf '              start by hand:  lemonade-server serve --no-tray --port 13305\n'
+    printf '              web UI:         http://localhost:13305/\n'
+    printf '              flip to auto-start later: sudo systemctl enable --now lemonade-server\n'
+    echo
+fi
