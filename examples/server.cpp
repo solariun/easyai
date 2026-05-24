@@ -4455,23 +4455,32 @@ int main(int argc, char ** argv) {
     }
 
     // RAG — the agent's persistent registry / long-term memory.
-    // Seven tools (rag_save / rag_append / rag_search / rag_load /
-    // rag_list / rag_delete / rag_keywords) registered when
-    // --RAG <dir> is given. The dir does NOT have to exist yet;
-    // rag_save creates it on first call. The systemd-installed
-    // server passes --RAG by default (see
-    // scripts/install_easyai_server.sh). See RAG.md.
+    // Seven single-responsibility tools (memory_save, memory_append,
+    // memory_search, memory_load, memory_list, memory_delete,
+    // memory_keywords) registered when --RAG <dir> is given. The
+    // dir does NOT have to exist yet; memory_save creates it on
+    // first call. The systemd-installed server passes --RAG by
+    // default (see scripts/install_easyai_server.sh). See RAG.md.
+    //
+    // Split surface chosen over the unified `memory(action=...)`
+    // dispatcher because weaker tool-callers (qwen3-coder-next
+    // observed 2026-05-24) routinely collapse composite sub-actions
+    // into top-level tool names; making the verb BE the tool name
+    // removes that failure mode for memory entirely. The unified
+    // surface is still available via easyai::tools::make_rag_tool().
     if (!args.rag_dir.empty()) {
-        ctx->default_tools.push_back(
-            easyai::tools::make_rag_tool(args.rag_dir));
+        for (auto & t : easyai::tools::memory_split_tools(args.rag_dir)) {
+            ctx->default_tools.push_back(std::move(t));
+        }
         // Remember the root so build_authoritative_preamble can render
         // the current keyword vocabulary into every request — the model
         // sees what keywords it has tagged without having to call
-        // memory(action="keywords") itself.
+        // memory_keywords itself.
         ctx->memory_root = args.rag_dir;
         std::fprintf(stderr,
-            "easyai-server: memory enabled (single memory tool), "
-            "root = %s\n",
+            "easyai-server: memory enabled (split: memory_save, "
+            "memory_append, memory_search, memory_load, memory_list, "
+            "memory_delete, memory_keywords), root = %s\n",
             args.rag_dir.c_str());
     }
 
