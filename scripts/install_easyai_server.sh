@@ -2115,12 +2115,20 @@ Unit=easyai-tdp.service
 WantedBy=timers.target
 TDP_TIMER
 
-        # ---- enable + start ---------------------------------------------
+        # ---- enable + (re)start -----------------------------------------
+        # daemon-reload picks up the new unit files from disk, but if the
+        # timer was already running (re-install / upgrade path) the
+        # in-memory instance keeps its OLD schedule until we explicitly
+        # restart it. `enable --now` is a no-op on an already-active
+        # timer — it does NOT re-read the unit file. So we do the dance
+        # manually: enable (idempotent), then restart timer + service
+        # unconditionally so both pick up whatever we just wrote.
         # Apply once immediately so the operator doesn't need to reboot
-        # to feel the unlock. The timer then keeps it pinned.
+        # to feel the unlock; the timer then keeps it pinned.
         sudo systemctl daemon-reload
-        sudo systemctl enable --now easyai-tdp.timer
-        sudo systemctl start easyai-tdp.service
+        sudo systemctl enable easyai-tdp.timer
+        sudo systemctl restart easyai-tdp.timer
+        sudo systemctl restart easyai-tdp.service
 
         log "  TDP unlock active: cap=${tdp_watts}W tctl=${tdp_tctl}°C, reapplied every 60s"
         log "  verify:    sudo ryzenadj -i      # current SMU rails"
