@@ -344,12 +344,16 @@ ngl=-1
 webui_title="EasyAi"                          # --webui-title <text>
 webui_icon=""                                 # --webui-icon <path/to/.ico|.png|.svg|.gif|.jpg|.webp>
 webui_icon_dest="$config_dir/favicon"         # final installed path under /etc/easyai
-# Threads: hardcoded to 16 (matches the production AI box). Over-
-# subscribing on smaller hosts hurts throughput more than it helps —
-# operators on different hardware override with --threads /
-# --threads-batch (or edit easyai.ini after install).
-n_threads_default=16
-n_threads_batch_default=16
+# Threads: 8 (sweet spot for Strix Point / Ryzen AI 9 HX 370 with most
+# layers on iGPU). The production AI box was hardcoded at 16 originally;
+# llama-bench on the 890M with an 80B MoE running ngl=99 reproduced the
+# same tps at 8 threads as at 16 — the extra 8 just contend with
+# sampling / KV management / network paths that still run on CPU.
+# Operators with dense models running CPU-side (or no GPU offload at
+# all) should override to physical core count via --threads /
+# --threads-batch.
+n_threads_default=8
+n_threads_batch_default=8
 preset="precise"                              # written commented in the INI; engine
                                               # picks "precise" when no preset is set
 thinking="on"
@@ -388,21 +392,25 @@ no_mmap=1
 # where slow-loris resilience matters more than long-thinking-turn support.
 http_timeout=86400
 # Sampling defaults written into [ENGINE] ACTIVE (not commented).  Tuned for
-# code / agent workloads on the production AI box: temperature 0.5 trades a
-# bit of determinism for richer tool-use phrasing, top-* for some tail
-# diversity, min_p=0.5 as a tight cutoff (only tokens within 2x of the
-# top token's probability survive — keeps output focused),
-# repeat_penalty=1.0 (no penalty — paired with presence_penalty=1.5, the
-# anti-loop floor moved from token-history slope to fixed-cost-per-seen-
-# token, which is gentler on long agentic flows). max_tokens=81920 is the
-# per-turn cap; any single response longer than that is almost certainly
-# a runaway loop.
-temperature="0.5"
+# modern thinking-MoE models (Qwen3-Next, GLM-4.6, DeepSeek-V3-class) on
+# the production AI box. The previous code/agent tune (temp 0.5, min_p
+# 0.5, presence_penalty 1.5) was too aggressive for chat: min_p 0.5
+# only keeps tokens within 2x of the top probability — fine for tight
+# tool-use phrasing, but cuts off most of the distribution on creative
+# / multi-step reasoning, and produces flat output on long chains of
+# thought. The values below follow the Qwen3 family's own recommended
+# defaults (temp 0.6, top_p 0.95, top_k 40, min_p 0.05) and pair with
+# presence_penalty 1.0 — MoE experts self-regulate, so the heavy anti-
+# loop floor is no longer needed. max_tokens=81920 is the per-turn cap;
+# any single response longer than that is almost certainly a runaway
+# loop. Override per-workload via --temperature / --top-p / --top-k /
+# --min-p / --presence-penalty / --repeat-penalty.
+temperature="0.6"
 top_p="0.95"
-top_k=64
-min_p="0.5"
+top_k=40
+min_p="0.05"
 repeat_penalty="1.0"
-presence_penalty="1.5"
+presence_penalty="1.0"
 max_tokens=81920
 api_key=""                                    # leave empty to skip auth (open server)
 
@@ -470,6 +478,7 @@ while [[ $# -gt 0 ]]; do
         --use-mmap)         no_mmap=0; shift ;;
         --no-mmap)          no_mmap=1; shift ;;
         --repeat-penalty)   repeat_penalty="$2"; shift 2 ;;
+        --presence-penalty) presence_penalty="$2"; shift 2 ;;
         --temperature)      temperature="$2"; shift 2 ;;
         --top-p)            top_p="$2"; shift 2 ;;
         --top-k)            top_k="$2"; shift 2 ;;
