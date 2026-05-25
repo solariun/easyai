@@ -2048,7 +2048,13 @@ if [[ $do_tdp_unlock -eq 1 ]]; then
                   -DCMAKE_BUILD_TYPE=Release
             cmake --build "$ryzenadj_src/build" -j "$jobs"
             sudo install -m 0755 "$ryzenadj_src/build/ryzenadj" /usr/local/bin/ryzenadj
-            log "  installed: $(/usr/local/bin/ryzenadj --version 2>&1 | head -1)"
+            # ryzenadj has no --version flag (verified by `error: unknown
+            # option --version` in the wild). Best we can do is log the
+            # git describe of the source we just built — pins the build
+            # to a specific commit/tag for debugging "why did this stop
+            # working after a pull".
+            ryzenadj_ver="$(git -C "$ryzenadj_src" describe --tags --always 2>/dev/null || echo unknown)"
+            log "  installed: /usr/local/bin/ryzenadj ($ryzenadj_ver)"
         else
             log "  ryzenadj already on PATH at $(command -v ryzenadj); skipping build"
         fi
@@ -2115,6 +2121,30 @@ Unit=easyai-tdp.service
 WantedBy=timers.target
 TDP_TIMER
 
+        # ---- kernel lockdown / Secure Boot guard ------------------------
+        # ryzenadj reaches the SMU by writing PCI config space through
+        # /dev/mem (or sysfs PCI config). The kernel forbids those writes
+        # when lockdown is in 'integrity' or 'confidentiality' mode —
+        # which Secure Boot turns on by default on Ubuntu. Symptom in the
+        # journal (verified in the wild):
+        #     pcilib: sysfs_write: write failed: Operation not permitted
+        #     PCI Bus is not writeable, check secure boot
+        # /proc/sys/kernel/lockdown is the authoritative signal here (a
+        # kernel can be locked down without SB — kernel cmdline lockdown=
+        # — and SB on some BIOSes leaves lockdown=none). When blocked we
+        # still install the units (idempotent, future-ready) so the
+        # operator can flip SB / install ryzen_smu and engage with one
+        # systemctl call; we just skip enable+start to avoid spamming the
+        # journal with a service that fails every 60 s.
+        sb_blocked=0
+        lockdown_mode=""
+        if [[ -r /proc/sys/kernel/lockdown ]]; then
+            lockdown_mode="$(cat /proc/sys/kernel/lockdown 2>/dev/null)"
+            if ! echo "$lockdown_mode" | grep -q '\[none\]'; then
+                sb_blocked=1
+            fi
+        fi
+
         # ---- enable + (re)start -----------------------------------------
         # daemon-reload picks up the new unit files from disk, but if the
         # timer was already running (re-install / upgrade path) the
@@ -2126,14 +2156,26 @@ TDP_TIMER
         # Apply once immediately so the operator doesn't need to reboot
         # to feel the unlock; the timer then keeps it pinned.
         sudo systemctl daemon-reload
-        sudo systemctl enable easyai-tdp.timer
-        sudo systemctl restart easyai-tdp.timer
-        sudo systemctl restart easyai-tdp.service
+        if [[ $sb_blocked -eq 1 ]]; then
+            warn "TDP unlock: kernel lockdown is '${lockdown_mode}' — ryzenadj will fail with"
+            warn "  'PCI Bus is not writeable, check secure boot'. The .service / .timer"
+            warn "  files are installed but the timer is NOT enabled (would fail every"
+            warn "  60 s and spam the journal). Unblock via one of:"
+            warn "    a) Disable Secure Boot in the BIOS, reboot, then:"
+            warn "         sudo systemctl enable --now easyai-tdp.timer"
+            warn "    b) Install leogx9r/ryzen_smu kernel module (DKMS + MOK signing"
+            warn "       under SB). ryzenadj will then use sysfs and bypass /dev/mem"
+            warn "       lockdown without disabling SB."
+        else
+            sudo systemctl enable easyai-tdp.timer
+            sudo systemctl restart easyai-tdp.timer
+            sudo systemctl restart easyai-tdp.service
 
-        log "  TDP unlock active: cap=${tdp_watts}W tctl=${tdp_tctl}°C, reapplied every 60s"
-        log "  verify:    sudo ryzenadj -i      # current SMU rails"
-        log "  thermals:  sensors               # watch Tctl under load"
-        log "  disable:   sudo systemctl disable --now easyai-tdp.timer easyai-tdp.service"
+            log "  TDP unlock active: cap=${tdp_watts}W tctl=${tdp_tctl}°C, reapplied every 60s"
+            log "  verify:    sudo ryzenadj -i      # current SMU rails"
+            log "  thermals:  sensors               # watch Tctl under load"
+            log "  disable:   sudo systemctl disable --now easyai-tdp.timer easyai-tdp.service"
+        fi
     fi
 fi
 
@@ -2262,11 +2304,21 @@ if [[ $do_lemonade -eq 1 ]] && command -v lemonade-server >/dev/null 2>&1; then
     printf '              flip to auto-start later: sudo systemctl enable --now lemonade-server\n'
     echo
 fi
-if [[ $do_tdp_unlock -eq 1 ]] && systemctl list-unit-files 2>/dev/null | grep -q '^easyai-tdp\.timer'; then
+if [[ $do_tdp_unlock -eq 1 ]] && systemctl is-enabled easyai-tdp.timer >/dev/null 2>&1; then
     printf '  tdp unlock: %sW cap, Tctl=%s°C, reapplied every 60s via easyai-tdp.timer\n' \
         "$tdp_watts" "$tdp_tctl"
     printf '              verify:   sudo ryzenadj -i\n'
     printf '              thermals: sensors      # watch Tctl under load (target <%s°C)\n' "$tdp_tctl"
     printf '              disable:  sudo systemctl disable --now easyai-tdp.timer easyai-tdp.service\n'
+    echo
+elif [[ $do_tdp_unlock -eq 1 ]] && [[ -f /etc/systemd/system/easyai-tdp.timer ]]; then
+    # Units written but timer not enabled — almost always kernel lockdown
+    # (SB on). Echo the unblock recipe so it's visible in the DONE summary
+    # too, not just buried in the install-time warns.
+    printf '  tdp unlock: units INSTALLED but TIMER NOT ENABLED (kernel lockdown active)\n'
+    printf '              ryzenadj cannot write SMU under Secure Boot / lockdown.\n'
+    printf '              fix:  disable Secure Boot in BIOS, then:\n'
+    printf '                    sudo systemctl enable --now easyai-tdp.timer\n'
+    printf '              or:   install ryzen_smu kernel module (DKMS, MOK-signed under SB)\n'
     echo
 fi
