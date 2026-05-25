@@ -106,6 +106,70 @@
 #                                                    # (PPA); on Debian we warn
 #                                                    # and skip with a pointer
 #                                                    # to the manual build.
+#   ./install_easyai_server.sh --no-rocm-install     # skip auto-install of the
+#                                                    # ROCm SDK when --backend
+#                                                    # hip is used. Default:
+#                                                    # ON for AMD-CPU boxes —
+#                                                    # the installer adds the
+#                                                    # repo.radeon.com APT repo
+#                                                    # (noble pinned on non-LTS
+#                                                    # Ubuntu like 25.10), then
+#                                                    # apt-installs the minimal
+#                                                    # HIP set (rocm-hip-runtime
+#                                                    # + rocm-hip-sdk + rocblas
+#                                                    # + hipblas + rocm-device-
+#                                                    # libs, ~5 GB, NOT the full
+#                                                    # ~25 GB ROCm meta-pkg).
+#                                                    # /etc/profile.d/rocm.sh
+#                                                    # is dropped so /opt/rocm/
+#                                                    # bin is on PATH for every
+#                                                    # shell. AMDGPU_TARGETS is
+#                                                    # auto-detected from
+#                                                    # rocminfo and passed to
+#                                                    # cmake (e.g. gfx1151 on
+#                                                    # Strix Point / 890M).
+#                                                    # Skipped on non-AMD CPU,
+#                                                    # non-hip backend, non-
+#                                                    # Ubuntu distro, or if
+#                                                    # hipcc is already on PATH.
+#   ./install_easyai_server.sh --rocm-version 6.4    # override ROCm repo version
+#                                                    # (default 6.4). Bump when
+#                                                    # newer ROCm lands or pin
+#                                                    # to an older series for
+#                                                    # reproducibility.
+#   ./install_easyai_server.sh --no-tdp-unlock       # skip the Ryzen TDP unlock.
+#                                                    # Default: ON for AMD Ryzen
+#                                                    # CPUs — the installer
+#                                                    # builds ryzenadj from
+#                                                    # source (no apt package
+#                                                    # exists), drops a systemd
+#                                                    # oneshot + a 60 s timer
+#                                                    # under easyai-tdp.{service,
+#                                                    # timer}, and reapplies
+#                                                    # STAPM/PPT/SLOW/FAST = 54 W
+#                                                    # plus Tctl = 95 °C on every
+#                                                    # boot AND every 60 s
+#                                                    # (ryzenadj limits drift back
+#                                                    # after C6/sleep on some
+#                                                    # platforms — the timer
+#                                                    # keeps them pinned). The
+#                                                    # 54 W cap matches the
+#                                                    # HX 370's spec limit;
+#                                                    # check `sensors` under
+#                                                    # load and back off via
+#                                                    # --tdp-watts if the box
+#                                                    # throttles past 95 °C.
+#                                                    # Skipped on non-AMD CPUs.
+#   ./install_easyai_server.sh --tdp-watts 45        # cap STAPM/PPT/SLOW/FAST
+#                                                    # in watts (default 54).
+#                                                    # ryzenadj uses mW under
+#                                                    # the hood — we multiply
+#                                                    # by 1000 for you.
+#   ./install_easyai_server.sh --tdp-tctl 90         # Tctl junction temp cap
+#                                                    # in °C (default 95). Lower
+#                                                    # values throttle sooner;
+#                                                    # raise only if cooling is
+#                                                    # confirmed adequate.
 #   ./install_easyai_server.sh --no-service          # build/install only
 #   ./install_easyai_server.sh -h                    # show this help
 # ============================================================================
@@ -166,6 +230,43 @@ do_lemonade=1                                 # install Lemonade Server (AMD's
                                               # is upstream 13305 (not
                                               # configurable here). Set 0 via
                                               # --no-lemonade.
+do_rocm_install=1                             # auto-install minimal ROCm SDK
+                                              # (rocm-hip-runtime + rocm-hip-
+                                              # sdk + rocblas + hipblas +
+                                              # rocm-device-libs) when CPU is
+                                              # AMD AND --backend hip ends up
+                                              # selected. Adds repo.radeon.com
+                                              # APT repo (pinned to noble on
+                                              # non-LTS Ubuntu like 25.10
+                                              # because AMD only publishes for
+                                              # LTS). The installer's existing
+                                              # "assuming rocm-dev installed"
+                                              # warn becomes a real install.
+                                              # Set 0 via --no-rocm-install.
+rocm_version="6.4"                            # ROCm series for the APT repo
+                                              # URL. Bump as new releases land
+                                              # (https://repo.radeon.com/rocm/
+                                              # apt/<ver>) or override with
+                                              # --rocm-version.
+do_tdp_unlock=1                               # auto-unlock TDP on AMD Ryzen.
+                                              # Builds ryzenadj from source
+                                              # (no apt package), installs to
+                                              # /usr/local/bin, drops a oneshot
+                                              # systemd unit + 60 s timer that
+                                              # reapplies the limits on every
+                                              # boot and every 60 s (ryzenadj
+                                              # values can drift back after
+                                              # C6/sleep on some platforms;
+                                              # the timer keeps them pinned).
+                                              # Skipped on non-AMD CPUs. Set
+                                              # 0 via --no-tdp-unlock.
+tdp_watts=54                                  # STAPM / PPT-SLOW / PPT-FAST
+                                              # cap in W (HX 370 spec limit).
+                                              # Converted to mW for ryzenadj.
+                                              # Override with --tdp-watts.
+tdp_tctl=95                                   # Tctl junction temp cap in °C.
+                                              # 95 = chip max; lower throttles
+                                              # earlier. Override --tdp-tctl.
 do_llama_tools=1                              # also build + install
                                               # llama.cpp's CLI tools
                                               # (llama-cli, llama-server,
@@ -334,6 +435,13 @@ while [[ $# -gt 0 ]]; do
         --with-llama-tools) do_llama_tools=1; shift ;;
         --no-lemonade)      do_lemonade=0; shift ;;
         --with-lemonade)    do_lemonade=1; shift ;;
+        --no-rocm-install)  do_rocm_install=0; shift ;;
+        --with-rocm-install) do_rocm_install=1; shift ;;
+        --rocm-version)     rocm_version="$2"; shift 2 ;;
+        --no-tdp-unlock)    do_tdp_unlock=0; shift ;;
+        --with-tdp-unlock)  do_tdp_unlock=1; shift ;;
+        --tdp-watts)        tdp_watts="$2"; shift 2 ;;
+        --tdp-tctl)         tdp_tctl="$2"; shift 2 ;;
         --no-swap)          do_swap="off"; shift ;;
         --swap-tune)        do_swap="tune"; shift ;;
         --keep-swap)        do_swap=""; shift ;;
@@ -569,6 +677,10 @@ printf '    llama_tools      = %s   (llama-cli/server/gguf-split/quantize/bench/
     "$([[ $do_llama_tools -eq 1 ]] && echo on || echo off)"
 printf '    lemonade         = %s   (AMD Lemonade Server for NPU; systemd unit DISABLED, manual start)\n' \
     "$([[ $do_lemonade -eq 1 ]] && echo on || echo off)"
+printf '    rocm_install     = %s   (auto-install minimal ROCm SDK for --backend hip on AMD CPU; version=%s)\n' \
+    "$([[ $do_rocm_install -eq 1 ]] && echo on || echo off)" "$rocm_version"
+printf '    tdp_unlock       = %s   (Ryzen TDP unlock via ryzenadj+systemd timer; cap=%sW tctl=%s°C)\n' \
+    "$([[ $do_tdp_unlock -eq 1 ]] && echo on || echo off)" "$tdp_watts" "$tdp_tctl"
 printf '    webui_title      = %s\n' "$webui_title"
 printf '    webui_icon       = %s\n' "${webui_icon:-<default — no icon>}"
 printf '    api_key          = %s\n' "$([[ -n "$api_key" ]] && echo "<set>" || echo "<none — server is open>")"
@@ -615,8 +727,116 @@ if [[ $do_install -eq 1 ]]; then
             warn "If 'nvcc --version' fails, install the CUDA Toolkit from https://developer.nvidia.com/cuda-downloads"
             ;;
         hip)
-            log "ROCm/HIP backend selected — assuming rocm-dev is installed."
-            warn "Install the ROCm SDK manually if rocminfo / hipcc are missing."
+            # Detect CPU vendor — auto-install is gated on AMD CPU because
+            # on Intel boxes `--backend hip` usually means something custom
+            # (eg. a slot-in AMD dGPU) and we shouldn't drop the
+            # repo.radeon.com APT source unless we're clearly on an AMD
+            # shop. Operator can pass --with-rocm-install to force.
+            cpu_vendor="$(awk -F: '/vendor_id/{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+
+            # Distro detection — repo.radeon.com only publishes builds
+            # for Ubuntu LTS releases (jammy / noble at time of writing).
+            distro_id=""
+            distro_codename=""
+            if [[ -r /etc/os-release ]]; then
+                # shellcheck disable=SC1091
+                distro_id="$(. /etc/os-release && echo "${ID:-}")"
+                # shellcheck disable=SC1091
+                distro_codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}")"
+            fi
+
+            if [[ $do_rocm_install -ne 1 ]]; then
+                log "ROCm/HIP backend selected — auto-install disabled (--no-rocm-install)."
+                warn "Install the ROCm SDK manually if rocminfo / hipcc are missing."
+            elif [[ "$cpu_vendor" != "AuthenticAMD" ]]; then
+                log "ROCm/HIP backend selected — CPU vendor is '${cpu_vendor:-unknown}', not AMD; skipping auto-install."
+                warn "Install the ROCm SDK manually, or pass --with-rocm-install to force on a non-AMD CPU."
+            elif command -v hipcc >/dev/null 2>&1 && command -v rocminfo >/dev/null 2>&1; then
+                log "ROCm/HIP backend selected — hipcc + rocminfo already on PATH; skipping auto-install."
+            elif [[ "$distro_id" != "ubuntu" ]]; then
+                warn "ROCm auto-install: distro '${distro_id:-unknown}' is not Ubuntu; skipping."
+                warn "  install ROCm manually per https://rocm.docs.amd.com/projects/install-on-linux/en/latest/"
+                warn "  or pass --no-rocm-install to silence this notice."
+            else
+                # On non-LTS Ubuntu (25.10 / questing etc.) AMD doesn't
+                # publish a matching .deb — pin the APT source to the
+                # latest LTS (noble). The ROCm runtime libs are decoupled
+                # enough from the Ubuntu userspace that the LTS .deb runs
+                # on non-LTS once apt resolves libssl3 / libssl3t64
+                # transition packages. Tested path on the AI box.
+                case "$distro_codename" in
+                    jammy|noble) ;;
+                    *)
+                        log "ROCm: Ubuntu '${distro_codename:-unknown}' is non-LTS; pinning APT source to 'noble'"
+                        distro_codename="noble"
+                        ;;
+                esac
+
+                log "ROCm/HIP auto-install — minimal SDK from repo.radeon.com/rocm/apt/${rocm_version} (${distro_codename})"
+
+                # gnupg may not be on minimal Ubuntu images (gpg dearmors the key below).
+                if ! command -v gpg >/dev/null 2>&1; then
+                    sudo apt-get install -y gnupg
+                fi
+
+                # GPG key + sources.list, both idempotent.
+                sudo mkdir -p --mode=0755 /etc/apt/keyrings
+                if [[ ! -r /etc/apt/keyrings/rocm.gpg ]]; then
+                    log "  fetching ROCm GPG key"
+                    wget -qO- https://repo.radeon.com/rocm/rocm.gpg.key \
+                        | gpg --dearmor \
+                        | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
+                fi
+                if [[ ! -r /etc/apt/sources.list.d/rocm.list ]]; then
+                    log "  adding APT source: rocm.list"
+                    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${rocm_version} ${distro_codename} main" \
+                        | sudo tee /etc/apt/sources.list.d/rocm.list > /dev/null
+                    sudo apt-get update
+                else
+                    log "  /etc/apt/sources.list.d/rocm.list already present, skipping add"
+                fi
+
+                # The MINIMAL HIP set for llama.cpp's GGML_HIP backend
+                # (~5 GB). Avoids the full `rocm` meta-package (~25 GB
+                # with MIOpen / migraphx / rocFFT / hipSPARSE etc. that
+                # llama.cpp's HIP path does not link against).
+                log "  apt-get install minimal HIP set (~5 GB)"
+                sudo apt-get install -y \
+                    rocm-hip-runtime rocm-hip-sdk rocblas-dev hipblas-dev \
+                    hip-dev rocm-device-libs
+
+                # /etc/profile.d snippet so every login shell + the cmake
+                # invocation below find hipcc and link against /opt/rocm/lib.
+                if [[ ! -r /etc/profile.d/rocm.sh ]]; then
+                    log "  writing /etc/profile.d/rocm.sh"
+                    sudo tee /etc/profile.d/rocm.sh >/dev/null <<'PROF'
+# Added by easyai installer — /opt/rocm/bin on PATH, /opt/rocm/lib on linker.
+export PATH="/opt/rocm/bin${PATH:+:$PATH}"
+export LD_LIBRARY_PATH="/opt/rocm/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+PROF
+                fi
+                # Source for the rest of this installer run (cmake call
+                # below needs hipcc on PATH; new login shells get it via
+                # /etc/profile.d).
+                # shellcheck disable=SC1091
+                [[ -r /etc/profile.d/rocm.sh ]] && source /etc/profile.d/rocm.sh
+
+                # Sanity: confirm hipcc + rocminfo are now resolvable, and
+                # that ROCm sees an actual gfx device. If rocminfo finds
+                # nothing the operator likely needs to add their user to
+                # render+video and relog (handled elsewhere by do_groups).
+                if command -v hipcc >/dev/null 2>&1 && command -v rocminfo >/dev/null 2>&1; then
+                    log "  hipcc:    $(hipcc --version 2>/dev/null | head -1)"
+                    gfx_found="$(rocminfo 2>/dev/null | awk '/Name:[[:space:]]+gfx[0-9]+/{print $2; exit}')"
+                    if [[ -n "$gfx_found" ]]; then
+                        log "  AMD GPU visible to ROCm: $gfx_found"
+                    else
+                        warn "  ROCm installed but rocminfo sees no gfx device — confirm membership in render+video and relog."
+                    fi
+                else
+                    warn "  ROCm install: hipcc or rocminfo still missing after apt — check apt output"
+                fi
+            fi
             ;;
         cpu)
             log "CPU-only backend — no GPU SDK to install."
@@ -700,7 +920,24 @@ if [[ $do_build -eq 1 ]]; then
     case "$backend_resolved" in
         vulkan)  cmake_flags+=( -DGGML_VULKAN=ON ) ;;
         cuda)    cmake_flags+=( -DGGML_CUDA=ON ) ;;
-        hip)     cmake_flags+=( -DGGML_HIP=ON ) ;;
+        hip)
+            cmake_flags+=( -DGGML_HIP=ON )
+            # Auto-detect the gfx target from rocminfo so cmake builds
+            # kernels for the actual installed GPU instead of the broad
+            # default set (which inflates build time and may emit code
+            # that doesn't match this box, e.g. gfx1100 on a gfx1151
+            # Strix Point iGPU). If rocminfo isn't available (because
+            # --no-rocm-install was set and the operator hasn't sourced
+            # /etc/profile.d/rocm.sh in this shell), we leave AMDGPU_TARGETS
+            # unset and let llama.cpp's HIP cmake pick its default.
+            if command -v rocminfo >/dev/null 2>&1; then
+                gfx_target="$(rocminfo 2>/dev/null | awk '/Name:[[:space:]]+gfx[0-9]+/{print $2; exit}')"
+                if [[ -n "$gfx_target" ]]; then
+                    log "  AMDGPU_TARGETS=$gfx_target (auto-detected from rocminfo)"
+                    cmake_flags+=( -DAMDGPU_TARGETS="$gfx_target" )
+                fi
+            fi
+            ;;
         cpu)     ;;  # no GPU flag
     esac
 
@@ -1747,6 +1984,140 @@ AVA
     fi
 fi
 
+# ---------- Ryzen TDP unlock (ryzenadj + systemd oneshot + 60s timer) ------
+# Pushes the chip out of its conservative laptop-class default (28 W STAPM
+# on the HX 370) up to the spec cap (54 W) so iGPU clocks and NPU power
+# don't get budget-starved during sustained LLM inference. ryzenadj writes
+# directly to the SMU registers via /dev/mem, so the change is immediate
+# but VOLATILE — every C6 deep-idle entry, sleep/resume, and some kernel
+# power-state transitions can reset the limits back to the BIOS default.
+# Two systemd units cover this:
+#
+#   easyai-tdp.service  — Type=oneshot, runs ryzenadj with the configured
+#                         caps. Fires at boot and is also the ExecStart
+#                         the timer triggers.
+#   easyai-tdp.timer    — OnBootSec=10s OnUnitActiveSec=60s, so the service
+#                         re-fires every minute. ryzenadj is cheap (~5 ms
+#                         wall time) so the overhead is negligible.
+#
+# No apt package ships ryzenadj on Ubuntu — we build it from source
+# (FlyGoat/RyzenAdj on GitHub) and drop the binary at /usr/local/bin.
+# Build is small (~5 s on the AI box) and deps (libpci-dev/cmake/g++)
+# are minimal. Idempotent: rebuilt only if /usr/local/bin/ryzenadj is
+# missing OR --force is set.
+#
+# Gating:
+#   do_tdp_unlock=0           → skip
+#   CPU vendor != AuthenticAMD → skip (ryzenadj fails on Intel anyway)
+#   /sys/firmware/efi missing  → skip on bare-metal-non-EFI weirdness
+#
+# Safety: 54 W on a chassis with bad cooling will just throttle (no
+# silicon damage — Tctl=95 is the chip's own thermal cap, ryzenadj does
+# not raise that). Operator should run `sensors` under load; if Tctl
+# spends >50 % of inference time at 95 °C, lower --tdp-watts to 45 (the
+# safer default for tighter enclosures).
+if [[ $do_tdp_unlock -eq 1 ]]; then
+    cpu_vendor_tdp="$(awk -F: '/vendor_id/{gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+
+    if [[ "$cpu_vendor_tdp" != "AuthenticAMD" ]]; then
+        log "TDP unlock: CPU vendor '$cpu_vendor_tdp' is not AMD; skipping ryzenadj install."
+    else
+        log "TDP unlock: building + installing ryzenadj, dropping easyai-tdp.{service,timer}"
+        log "  cap=${tdp_watts}W (stapm=fast=slow), Tctl=${tdp_tctl}°C"
+
+        # ---- build ryzenadj from source if not already on PATH -----------
+        if ! command -v ryzenadj >/dev/null 2>&1; then
+            log "  ryzenadj not found — building from FlyGoat/RyzenAdj"
+            sudo apt-get install -y --no-install-recommends \
+                libpci-dev cmake g++ git
+            ryzenadj_src="$src_root/RyzenAdj"
+            if [[ ! -d "$ryzenadj_src/.git" ]]; then
+                git clone --depth 1 https://github.com/FlyGoat/RyzenAdj.git "$ryzenadj_src"
+            else
+                git -C "$ryzenadj_src" pull --ff-only || true
+            fi
+            cmake -S "$ryzenadj_src" -B "$ryzenadj_src/build" \
+                  -DCMAKE_BUILD_TYPE=Release
+            cmake --build "$ryzenadj_src/build" -j "$jobs"
+            sudo install -m 0755 "$ryzenadj_src/build/ryzenadj" /usr/local/bin/ryzenadj
+            log "  installed: $(/usr/local/bin/ryzenadj --version 2>&1 | head -1)"
+        else
+            log "  ryzenadj already on PATH at $(command -v ryzenadj); skipping build"
+        fi
+
+        # ---- compute mW values for ryzenadj ------------------------------
+        # ryzenadj wants milliwatts on all three power limits. Multiply once
+        # here so the unit + timer keep using a single constant.
+        tdp_mw=$(( tdp_watts * 1000 ))
+
+        # ---- systemd oneshot service -------------------------------------
+        # Type=oneshot + RemainAfterExit=yes so systemctl shows "active
+        # (exited)" instead of "inactive (dead)" after each fire — easier
+        # to spot at-a-glance than a transient unit. ExecStart is a single
+        # ryzenadj call; we pass --stapm/slow/fast all equal to cap so the
+        # SMU collapses the PPT staircase to a single rail (predictable
+        # under sustained load — matters more than peak boost for LLM
+        # decode where we want stable bandwidth, not bursty).
+        log "  writing /etc/systemd/system/easyai-tdp.service"
+        sudo tee /etc/systemd/system/easyai-tdp.service >/dev/null <<TDP_SVC
+[Unit]
+Description=easyai: unlock Ryzen TDP for sustained iGPU+NPU performance
+Documentation=https://github.com/FlyGoat/RyzenAdj
+After=multi-user.target
+ConditionPathExists=/usr/local/bin/ryzenadj
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Single ryzenadj invocation. Failure is non-fatal (ExecStart=- prefix
+# would swallow it; we don't — we want journalctl to record drift so the
+# operator notices if a kernel upgrade breaks the SMU path).
+ExecStart=/usr/local/bin/ryzenadj \\
+    --stapm-limit=${tdp_mw} \\
+    --fast-limit=${tdp_mw} \\
+    --slow-limit=${tdp_mw} \\
+    --tctl-temp=${tdp_tctl}
+
+[Install]
+WantedBy=multi-user.target
+TDP_SVC
+
+        # ---- systemd timer (60 s reapply) --------------------------------
+        # OnBootSec=10s waits past the early-boot dust (let the kernel and
+        # smu driver settle). OnUnitActiveSec=60s reapplies on a sliding
+        # window — `Active` here means "the service last ran", so each
+        # firing schedules the next 60 s later (not 60 s wall-clock from
+        # boot). Persistent=true so a missed firing during suspend gets
+        # caught immediately on resume.
+        log "  writing /etc/systemd/system/easyai-tdp.timer"
+        sudo tee /etc/systemd/system/easyai-tdp.timer >/dev/null <<'TDP_TIMER'
+[Unit]
+Description=easyai: reapply Ryzen TDP unlock every 60 s (defeats C6/sleep drift)
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=60s
+Persistent=true
+Unit=easyai-tdp.service
+
+[Install]
+WantedBy=timers.target
+TDP_TIMER
+
+        # ---- enable + start ---------------------------------------------
+        # Apply once immediately so the operator doesn't need to reboot
+        # to feel the unlock. The timer then keeps it pinned.
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now easyai-tdp.timer
+        sudo systemctl start easyai-tdp.service
+
+        log "  TDP unlock active: cap=${tdp_watts}W tctl=${tdp_tctl}°C, reapplied every 60s"
+        log "  verify:    sudo ryzenadj -i      # current SMU rails"
+        log "  thermals:  sensors               # watch Tctl under load"
+        log "  disable:   sudo systemctl disable --now easyai-tdp.timer easyai-tdp.service"
+    fi
+fi
+
 # ---------- Lemonade Server (NPU sidecar, manual start) --------------------
 # Installs AMD's Lemonade Server alongside easyai-server so the box has a
 # second LLM runtime that can target the XDNA2 NPU (Ryzen AI). Per the
@@ -1870,5 +2241,13 @@ if [[ $do_lemonade -eq 1 ]] && command -v lemonade-server >/dev/null 2>&1; then
     printf '              start by hand:  lemonade-server serve --no-tray --port 13305\n'
     printf '              web UI:         http://localhost:13305/\n'
     printf '              flip to auto-start later: sudo systemctl enable --now lemonade-server\n'
+    echo
+fi
+if [[ $do_tdp_unlock -eq 1 ]] && systemctl list-unit-files 2>/dev/null | grep -q '^easyai-tdp\.timer'; then
+    printf '  tdp unlock: %sW cap, Tctl=%s°C, reapplied every 60s via easyai-tdp.timer\n' \
+        "$tdp_watts" "$tdp_tctl"
+    printf '              verify:   sudo ryzenadj -i\n'
+    printf '              thermals: sensors      # watch Tctl under load (target <%s°C)\n' "$tdp_tctl"
+    printf '              disable:  sudo systemctl disable --now easyai-tdp.timer easyai-tdp.service\n'
     echo
 fi
