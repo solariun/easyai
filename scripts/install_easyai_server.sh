@@ -1996,9 +1996,17 @@ fi
 #   easyai-tdp.service  — Type=oneshot, runs ryzenadj with the configured
 #                         caps. Fires at boot and is also the ExecStart
 #                         the timer triggers.
-#   easyai-tdp.timer    — OnBootSec=10s OnUnitActiveSec=60s, so the service
-#                         re-fires every minute. ryzenadj is cheap (~5 ms
-#                         wall time) so the overhead is negligible.
+#   easyai-tdp.timer    — OnBootSec=10s OnUnitInactiveSec=60s, so the
+#                         service re-fires 60 s after it last exits. We use
+#                         OnUnitInactiveSec (not OnUnitActiveSec) because
+#                         OnUnitActiveSec only schedules from the activation
+#                         instant, which on a oneshot service is one-shot
+#                         even when paired with a timer — first fire happens,
+#                         then no further schedule is queued. Pairing with
+#                         OnUnitInactiveSec loops naturally: fire → run →
+#                         exit → inactive → 60 s → fire again. ryzenadj is
+#                         cheap (~5 ms wall time) so the overhead is
+#                         negligible.
 #
 # No apt package ships ryzenadj on Ubuntu — we build it from source
 # (FlyGoat/RyzenAdj on GitHub) and drop the binary at /usr/local/bin.
@@ -2051,13 +2059,16 @@ if [[ $do_tdp_unlock -eq 1 ]]; then
         tdp_mw=$(( tdp_watts * 1000 ))
 
         # ---- systemd oneshot service -------------------------------------
-        # Type=oneshot + RemainAfterExit=yes so systemctl shows "active
-        # (exited)" instead of "inactive (dead)" after each fire — easier
-        # to spot at-a-glance than a transient unit. ExecStart is a single
-        # ryzenadj call; we pass --stapm/slow/fast all equal to cap so the
-        # SMU collapses the PPT staircase to a single rail (predictable
-        # under sustained load — matters more than peak boost for LLM
-        # decode where we want stable bandwidth, not bursty).
+        # Type=oneshot, NO RemainAfterExit — the service has to actually go
+        # "inactive (dead)" after each fire so the .timer's
+        # OnUnitInactiveSec=60s clock can tick. With RemainAfterExit=yes
+        # the unit stays "active (exited)" forever and the timer never
+        # gets a re-fire signal (silent break — looks "fine" in status but
+        # the SMU drifts back). ExecStart is a single ryzenadj call; we
+        # pass --stapm/slow/fast all equal to cap so the SMU collapses
+        # the PPT staircase to a single rail (predictable under sustained
+        # load — matters more than peak boost for LLM decode where we
+        # want stable bandwidth, not bursty).
         log "  writing /etc/systemd/system/easyai-tdp.service"
         sudo tee /etc/systemd/system/easyai-tdp.service >/dev/null <<TDP_SVC
 [Unit]
@@ -2068,10 +2079,10 @@ ConditionPathExists=/usr/local/bin/ryzenadj
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
-# Single ryzenadj invocation. Failure is non-fatal (ExecStart=- prefix
-# would swallow it; we don't — we want journalctl to record drift so the
-# operator notices if a kernel upgrade breaks the SMU path).
+# No RemainAfterExit — must go inactive so .timer OnUnitInactiveSec ticks.
+# Single ryzenadj invocation. Failure is non-fatal in effect (the timer
+# retries 60 s later anyway), but we let it bubble up so journalctl
+# records drift if a kernel upgrade breaks the SMU path.
 ExecStart=/usr/local/bin/ryzenadj \\
     --stapm-limit=${tdp_mw} \\
     --fast-limit=${tdp_mw} \\
@@ -2083,11 +2094,11 @@ WantedBy=multi-user.target
 TDP_SVC
 
         # ---- systemd timer (60 s reapply) --------------------------------
-        # OnBootSec=10s waits past the early-boot dust (let the kernel and
-        # smu driver settle). OnUnitActiveSec=60s reapplies on a sliding
-        # window — `Active` here means "the service last ran", so each
-        # firing schedules the next 60 s later (not 60 s wall-clock from
-        # boot). Persistent=true so a missed firing during suspend gets
+        # OnBootSec=10s waits past the early-boot dust (let the kernel +
+        # smu driver settle). OnUnitInactiveSec=60s reapplies 60 s AFTER
+        # the service exits — pairs with the service's lack of
+        # RemainAfterExit so the loop is fire → run → inactive → 60 s →
+        # fire. Persistent=true so a missed firing during suspend gets
         # caught immediately on resume.
         log "  writing /etc/systemd/system/easyai-tdp.timer"
         sudo tee /etc/systemd/system/easyai-tdp.timer >/dev/null <<'TDP_TIMER'
@@ -2096,7 +2107,7 @@ Description=easyai: reapply Ryzen TDP unlock every 60 s (defeats C6/sleep drift)
 
 [Timer]
 OnBootSec=10s
-OnUnitActiveSec=60s
+OnUnitInactiveSec=60s
 Persistent=true
 Unit=easyai-tdp.service
 
