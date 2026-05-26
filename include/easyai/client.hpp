@@ -67,6 +67,17 @@ public:
     Client & timeout_seconds (int  s);                      // connect+read; default 86400 (24h)
     Client & verbose         (bool v);                      // log SSE lines to stderr
 
+    // Per-batch easyai.prompt_progress SSE events (mirrors the
+    // llama-server `prompt_progress` field). Default ON. Set false
+    // to ask easyai-server to skip the per-batch events entirely —
+    // request body carries `stream_options.easyai_prompt_progress
+    // = false`, the server inspects it and doesn't wire the
+    // callback. Trades the live spinner percentage for less SSE
+    // wire chatter; the final `easyai.prompt_eval` summary still
+    // fires either way. Older servers ignore the flag and keep
+    // emitting; the client ignores the events on its side too.
+    Client & send_prompt_progress (bool v);
+
     // Number of EXTRA attempts on transport failures (connect refused,
     // read timeout, 5xx with no streamed bytes yet). 0 disables retries
     // entirely; default is 5.  Each retry logs via easyai::log::error so

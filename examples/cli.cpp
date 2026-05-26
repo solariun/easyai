@@ -578,6 +578,12 @@ struct Options {
     bool        verbose          = false;
     bool        quiet            = false;  // --quiet/-q: disable spinner + ctx-% gauge
                                             // (batch / scripted / service usage)
+    // --no-prompt-progress / [cli] prompt_progress = off — when off,
+    // tell easyai-server to skip per-batch prompt_progress SSE events
+    // (final prompt_eval summary still fires either way). Trades live
+    // "thinking N%" gauge for less wire chatter and a quieter log.
+    bool        prompt_progress  = true;
+    bool        prompt_progress_cli_set = false;
     std::string log_file_path;             // explicit --log-file override
 
     // Session persistence — drop a `.easyai_session` in cwd updated after
@@ -857,9 +863,19 @@ void usage(const char * argv0) {
 "    --retry-on-incomplete      legacy alias for the now-default behaviour;\n"
 "                                kept for backwards compatibility, no-op.\n"
 "    --verbose                  log HTTP+SSE traffic to stderr (timestamps +\n"
-"                                per-piece diagnostics).  Stderr-only;\n"
-"                                does NOT create a /tmp log file (use\n"
-"                                --log-file PATH for that).\n"
+"                                per-piece diagnostics).  Also logs every\n"
+"                                per-batch prompt_progress event with full\n"
+"                                metrics.  Stderr-only; does NOT create a\n"
+"                                /tmp log file (use --log-file PATH for\n"
+"                                that).\n"
+"    --no-prompt-progress       tell the server to skip per-batch\n"
+"                                easyai.prompt_progress SSE events. The\n"
+"                                spinner loses its live `thinking N%%` gauge;\n"
+"                                in return the wire goes quiet during prompt\n"
+"                                eval. The final `easyai.prompt_eval` summary\n"
+"                                still fires and is always logged (incl.\n"
+"                                without --verbose). INI: [cli] prompt_progress\n"
+"                                = on|off.\n"
 "    -q, --quiet                disable the spinner glyph + context-fill\n"
 "                                gauge (e.g. |45%%).  Use for batch / scripted\n"
 "                                runs where stdout is captured.  Streamed\n"
@@ -1095,6 +1111,8 @@ bool parse_args(int argc, char ** argv, Options & o) {
         else if (a == "--no-retry-on-incomplete") { o.retry_on_incomplete = false; o.retry_on_incomplete_cli_set = true; }
         else if (a == "--verbose" || a == "-v") { o.verbose = true; o.verbose_cli_set = true; }
         else if (a == "--quiet"   || a == "-q") { o.quiet   = true; o.quiet_cli_set   = true; }
+        else if (a == "--no-prompt-progress") { o.prompt_progress = false; o.prompt_progress_cli_set = true; }
+        else if (a == "--prompt-progress")    { o.prompt_progress = true;  o.prompt_progress_cli_set = true; }
         else if (a == "--log-file") {
             o.log_file_path = need(i, "--log-file");
             o.log_file_path_cli_set = true;
@@ -1406,6 +1424,7 @@ bool parse_args(int argc, char ** argv, Options & o) {
 
         // ----- Display / logging --------------------------------------
         load_bool_flag ("verbose",        o.verbose,        o.verbose_cli_set);
+        load_bool_flag ("prompt_progress", o.prompt_progress, o.prompt_progress_cli_set);
         load_bool_flag ("quiet",          o.quiet,          o.quiet_cli_set);
         load_bool_flag ("auto_log",       o.auto_log,       /*cli_set=*/false);
         load_str_flag  ("log_file",       o.log_file_path,  o.log_file_path_cli_set);
@@ -1859,31 +1878,12 @@ int run_one(easyai::Client & cli, easyai::Plan & plan,
     // moment generation begins.  We also flip it off explicitly after
     // chat() returns to cover the no-output / error / cancel paths.
     spinner.set_thinking(true);
-    // Real prompt-eval progress wired from the server's per-batch
-    // easyai.prompt_progress events (mirrors llama-server's
-    // `prompt_progress` shape). Without this the shimmer's "xx%"
-    // would either be absent or fall back to stale ctx_pct from the
-    // previous turn — neither of which tells the operator how far
-    // through the prompt the model actually is.
-    //
-    // set_thinking(true) here is the multi-hop hook: in agentic flows
-    // the server runs a fresh prompt-eval pass after every tool
-    // dispatch (system + user + ... + tool_result + assistant primer
-    // → llama_decode), and emits easyai.prompt_progress for each.
-    // Without this re-entry the shimmer would only show on the very
-    // first hop; subsequent "model digesting tool result" windows
-    // would silently fall back to the rotating |/- glyph and the
-    // operator would have no visual cue that real work is happening.
-    // Idempotent on hop 0 (already in thinking mode from the
-    // explicit set_thinking(true) above); the next on_token /
-    // on_reason / on_tool from Streaming flips it back off as soon
-    // as generation begins for that hop.
-    cli.on_prompt_progress(
-        [&spinner](int processed, int total, int /*cached*/, double /*ms*/) {
-            if (total <= 0) return;
-            spinner.set_thinking(true);
-            spinner.set_thinking_pct((int)(100.0 * processed / total));
-        });
+    // The on_prompt_progress wiring moved into `Streaming::attach`
+    // (see src/cli_client.cpp). That version computes the LIVE ctx-%
+    // alongside the thinking-%, logs per-batch metrics under
+    // --verbose, and always logs the final summary — none of which
+    // was reachable when the handler lived here without Client
+    // internals access.
 
     // Mark in-flight: the signal handler reads this to decide between
     // graceful (mid-chat) and prompt-level (between turns) handling.
@@ -2647,6 +2647,7 @@ int main(int argc, char ** argv) {
     if (!o.stop_sequences.empty())     cli.stop(o.stop_sequences);
     if (!o.extra_body.empty())         cli.extra_body_json(o.extra_body);
     if (o.verbose)                     cli.verbose(true);
+    if (!o.prompt_progress)            cli.send_prompt_progress(false);
     if (o.tls_insecure)                cli.tls_insecure(true);
     if (!o.tls_ca_path.empty())        cli.ca_cert_path(o.tls_ca_path);
     if (o.max_reasoning   > 0)         cli.max_reasoning_chars(o.max_reasoning);

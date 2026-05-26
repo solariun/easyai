@@ -3,6 +3,7 @@
 #include "easyai/backend.hpp"
 #include "easyai/cli.hpp"
 #include "easyai/client.hpp"
+#include "easyai/log.hpp"
 #include "easyai/presets.hpp"
 #include "easyai/tool.hpp"
 #include "easyai/ui.hpp"
@@ -142,23 +143,100 @@ Streaming & Streaming::attach(Client & client) {
         this->on_tool_(c, r);
         refresh_pct();
     });
+    // Per-batch prompt-eval progress. Two jobs:
+    //   1. Drive the spinner's "thinking N% · ctx M%" suffix — both
+    //      values update live as the prompt-eval llama_decode loop
+    //      ticks. The ctx-% is the LIVE value: where the KV cache
+    //      will be when this pass finishes (cached + processed) /
+    //      n_ctx, not stale data from the prior turn.
+    //   2. When verbose_ is on, log a structured per-batch line via
+    //      easyai::log::write so the operator can see the full
+    //      timeline in stderr + the --log-file file.
+    client.on_prompt_progress(
+        [this, pcli](int processed, int total, int cached, double ms) {
+            if (total <= 0) return;
+            const int think_pct = (int)(100.0 * processed / total);
+            spinner_.set_thinking(true);
+            spinner_.set_thinking_pct(think_pct);
+
+            const int n_ctx = pcli->last_n_ctx();
+            int ctx_used = -1;
+            int ctx_pct  = -1;
+            if (n_ctx > 0) {
+                ctx_used = cached + processed;
+                ctx_pct  = (int)(100LL * ctx_used / n_ctx);
+                if (ctx_pct > 100) ctx_pct = 100;
+                spinner_.set_context_pct(ctx_pct);
+                spinner_.set_context_tokens(ctx_used, n_ctx);
+            }
+
+            if (verbose_) {
+                if (ctx_pct >= 0) {
+                    easyai::log::write(
+                        "[prompt_progress] %d/%d (%d cached) %.0f ms "
+                        "→ thinking %d%% · ctx %d%% (%d/%d tok)\n",
+                        processed, total, cached, ms,
+                        think_pct, ctx_pct, ctx_used, n_ctx);
+                } else {
+                    easyai::log::write(
+                        "[prompt_progress] %d/%d (%d cached) %.0f ms "
+                        "→ thinking %d%%\n",
+                        processed, total, cached, ms, think_pct);
+                }
+            }
+        });
+
+    // Final summary: fires once per agentic hop after the prompt-
+    // eval llama_decode loop completes. Two outputs:
+    //   * Visible: a green "● prompt eval: …" line via spinner_.write
+    //     so the operator sees it on stdout above the spinner.
+    //   * Logged: same data + ctx-% via easyai::log::write so it
+    //     lands in stderr + the --log-file regardless of --verbose.
+    //     This is the "final metrics always logged" contract.
     client.on_prompt_eval(
-        [this, pcli](int n_tokens, int /*n_cached*/, double prompt_ms, double tps) {
+        [this, pcli](int n_tokens, int n_cached, double prompt_ms, double tps) {
             if (n_tokens <= 0) return;
             int used  = pcli->last_ctx_used();
             int total = pcli->last_n_ctx();
             if (used < 0) used = n_tokens;
+            int ctx_pct = -1;
             if (used >= 0 && total > 0) {
-                spinner_.set_context_pct((int)(100LL * used / total));
+                ctx_pct = (int)(100LL * used / total);
+                spinner_.set_context_pct(ctx_pct);
                 spinner_.set_context_tokens(used, total);
             } else if (used >= 0) {
                 spinner_.set_context_tokens(used, -1);
             }
-            char buf[160];
-            std::snprintf(buf, sizeof(buf),
-                "\n%s● prompt eval: %d tok · %.0f ms · %.1f t/s%s\n",
-                style_.green(), n_tokens, prompt_ms, tps, style_.reset());
+            char buf[200];
+            if (ctx_pct >= 0) {
+                std::snprintf(buf, sizeof(buf),
+                    "\n%s● prompt eval: %d tok (%d cached) · %.0f ms · "
+                    "%.1f t/s · ctx %d%% (%d/%d)%s\n",
+                    style_.green(), n_tokens, n_cached, prompt_ms, tps,
+                    ctx_pct, used, total, style_.reset());
+            } else {
+                std::snprintf(buf, sizeof(buf),
+                    "\n%s● prompt eval: %d tok (%d cached) · %.0f ms · "
+                    "%.1f t/s%s\n",
+                    style_.green(), n_tokens, n_cached, prompt_ms, tps,
+                    style_.reset());
+            }
             spinner_.write(std::string(buf));
+
+            // Always log the final summary — operator wants it in the
+            // log file even when --verbose is off.
+            if (ctx_pct >= 0) {
+                easyai::log::write(
+                    "[prompt_eval] %d tok (%d cached) · %.0f ms · "
+                    "%.1f t/s · ctx %d%% (%d/%d)\n",
+                    n_tokens, n_cached, prompt_ms, tps,
+                    ctx_pct, used, total);
+            } else {
+                easyai::log::write(
+                    "[prompt_eval] %d tok (%d cached) · %.0f ms · "
+                    "%.1f t/s\n",
+                    n_tokens, n_cached, prompt_ms, tps);
+            }
         });
     return *this;
 }

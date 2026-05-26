@@ -416,6 +416,33 @@ Header values: `off` (skip preamble for this request only), `on`
 (force injection on this request even when the server was launched
 with `--inject-datetime off`), or absent (defer to the server flag).
 
+### `stream_options.easyai_prompt_progress: false` to skip per-batch progress events
+
+easyai extension on top of OpenAI's `stream_options` envelope. When
+the request body contains:
+
+```json
+{
+  "model": "EasyAi",
+  "messages": [...],
+  "stream": true,
+  "stream_options": { "easyai_prompt_progress": false }
+}
+```
+
+…the server skips wiring the per-batch `easyai.prompt_progress` SSE
+events for that request. The final `easyai.prompt_eval` summary
+still fires. Trades the client's live "thinking N%" spinner for
+less SSE wire chatter and lower per-batch llama_decode callback
+overhead — useful for batched / scripted callers that don't render
+a live gauge anyway.
+
+Unknown keys inside `stream_options` are ignored, so older clients
+that don't set this flag continue to receive per-batch events.
+
+The `easyai-cli` client exposes this via `--no-prompt-progress` /
+`[cli] prompt_progress = off`.
+
 ### `POST /mcp` — Model Context Protocol
 
 JSON-RPC 2.0 over a single endpoint. Methods: `initialize`,

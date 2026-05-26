@@ -270,6 +270,14 @@ struct Client::Impl {
     // timeout only fires on TRUE silence — every SSE delta resets it.
     int         timeout_seconds = 86400;
     bool        verbose         = false;
+    // Per-batch easyai.prompt_progress SSE events. When false the
+    // client sends stream_options.easyai_prompt_progress=false in
+    // the request body; easyai-server inspects that and skips
+    // wiring the per-batch progress callback entirely (no SSE
+    // traffic, no spinner percentage, just the final easyai.prompt
+    // _eval summary). Trades the live "thinking N%" gauge for
+    // less wire chatter and a quieter operator log under --verbose.
+    bool        send_prompt_progress = true;
     bool        tls_insecure    = false;   // skip peer cert verification
     std::string tls_ca_path;                // PEM bundle for custom CAs
     int         max_reasoning_chars = 0;    // 0 = unlimited; >0 aborts SSE on overflow
@@ -462,6 +470,19 @@ struct Client::Impl {
             for (const auto & t : tools) tarr.push_back(tool_to_json(t));
             body["tools"]       = std::move(tarr);
             body["tool_choice"] = "auto";
+        }
+        // easyai extension on top of OpenAI's stream_options envelope:
+        // when send_prompt_progress is false, tell the server to skip
+        // the per-batch easyai.prompt_progress SSE events. The server
+        // still emits the final easyai.prompt_eval summary. Older
+        // servers that don't understand the flag are unaffected
+        // (unknown stream_options keys are ignored upstream).
+        if (!send_prompt_progress) {
+            ordered_json so = body.contains("stream_options")
+                                  ? body["stream_options"]
+                                  : ordered_json::object();
+            so["easyai_prompt_progress"] = false;
+            body["stream_options"] = std::move(so);
         }
         // Merge user-supplied extras last so they can override anything above.
         if (!extra_body_raw.empty()) {
@@ -1203,6 +1224,7 @@ Client & Client::timeout_seconds (int s) {
     return *this;
 }
 Client & Client::verbose         (bool v)          { p_->verbose         = v;   return *this; }
+Client & Client::send_prompt_progress(bool v)      { p_->send_prompt_progress = v; return *this; }
 Client & Client::http_retries    (int  n)          { p_->http_retries    = n < 0 ? 0 : n; return *this; }
 Client & Client::log_file        (std::FILE * fp)  { p_->log_fp          = fp;  return *this; }
 Client & Client::tls_insecure(bool v) {

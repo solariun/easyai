@@ -113,6 +113,38 @@ Emitted on:
 
 Not emitted when `token_speed_ < 0.1` (no meaningful generation occurred).
 
+## Prompt-eval progress + final summary
+
+### Spinner suffix during prompt eval
+
+The shimmer's suffix shows BOTH the live prompt-eval percentage AND the running context-fill percentage:
+
+```
+thinking <N>% · ctx <M>%
+```
+
+| Element | Source |
+|---|---|
+| `<N>%` | `processed / total` from the server's `easyai.prompt_progress` SSE event (one tick per `n_batch` tokens decoded). |
+| `<M>%` | LIVE ctx-%: `(cached + processed) / n_ctx`. Reflects where the KV cache will be when this prompt-eval pass finishes — not stale data from the prior turn. |
+
+When `n_ctx` is unknown (first turn before the server reports it), only the `<N>%` part renders.
+
+### `--no-prompt-progress`
+
+CLI flag + INI key `[cli] prompt_progress = on|off`. When off, the cli sends `stream_options.easyai_prompt_progress = false` in the request body. The server inspects this and skips wiring the per-batch `on_prompt_progress` callback for that request — no `easyai.prompt_progress` SSE events fire. The final `easyai.prompt_eval` summary still fires either way.
+
+| State | `--verbose` | Per-batch SSE | Spinner % during eval | Per-batch log lines | Final summary on screen | Final summary in log |
+|---|---|---|---|---|---|---|
+| default | OFF | yes | `thinking N% · ctx M%` | none | `● prompt eval: N tok · ms · t/s · ctx M%` | yes |
+| default | ON | yes | same | per batch via `easyai::log::write` | same | yes |
+| `--no-prompt-progress` | OFF | NO | static "thinking" | none | same | yes |
+| `--no-prompt-progress` | ON | NO | static "thinking" | none (no events to log) | same | yes |
+
+### "Final metrics always logged"
+
+`on_prompt_eval` (the final summary, fires once per agentic hop) always calls `easyai::log::write` with the structured line `[prompt_eval] N tok (M cached) · X ms · Y t/s · ctx Z% (used/total)`. `log::write` tees stderr + the `--log-file` file (if set), so the final metrics land in the log regardless of `--verbose`.
+
 ## fs_read Tool Behavior
 
 Output always prefixes every line with `<n>| ` (line numbers on by default in both modes). Reports total line count for files ≤ 8 MiB. Description tells the model to read before `fs_edit` for accurate line references.

@@ -293,13 +293,26 @@ void Spinner::draw_thinking_locked_() {
     // showing it would mislead the operator into thinking the prompt
     // is mostly processed when only ctx fill is high.  No suffix is
     // honest until the first progress tick arrives.
-    char suffix[12] = {0};
+    // Suffix shapes (since 2026-05-26):
+    //   thinking_pct only            → " <N>%"
+    //   thinking_pct + context_pct   → " <N>% · ctx <M>%"
+    //   neither                      → ""
+    // ctx-% during thinking is the LIVE value — the caller computes it
+    // as (cached + processed) / n_ctx in the on_prompt_progress
+    // handler, so it reflects where the KV cache will land at the end
+    // of this prompt-eval pass, not stale data from the prior turn.
+    char suffix[40] = {0};
     int  suffix_len = 0;
-    if (thinking_pct_ >= 0) {
+    if (thinking_pct_ >= 0 && context_pct_ >= 0) {
+        suffix_len = std::snprintf(suffix, sizeof(suffix),
+                                   " %d%% · ctx %d%%",
+                                   thinking_pct_, context_pct_);
+    } else if (thinking_pct_ >= 0) {
         suffix_len = std::snprintf(suffix, sizeof(suffix),
                                    " %d%%", thinking_pct_);
-        if (suffix_len < 0) suffix_len = 0;
     }
+    if (suffix_len < 0) suffix_len = 0;
+    if (suffix_len >= (int) sizeof(suffix)) suffix_len = sizeof(suffix) - 1;
     static const char kWord[] = "thinking";
     static constexpr int kWordLen = sizeof(kWord) - 1;
     const int text_len = kWordLen + suffix_len;

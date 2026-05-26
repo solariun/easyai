@@ -1514,6 +1514,13 @@ struct ChatRequest {
     // a real safety net (the model will start hallucinating "today"
     // and post-cutoff facts without it).
     std::string                                       inject_override;
+    // easyai extension on top of OpenAI's stream_options envelope:
+    // when stream_options.easyai_prompt_progress is false, the server
+    // skips wiring the per-batch on_prompt_progress callback for this
+    // request — no easyai.prompt_progress SSE events fire. The final
+    // easyai.prompt_eval summary still fires. Defaults true (legacy
+    // clients keep getting per-batch updates).
+    bool                                              emit_prompt_progress = true;
 };
 
 // Returns false on bad request (and writes the error to `res`).
@@ -1679,6 +1686,21 @@ static bool parse_chat_request(const httplib::Request & req,
     out.top_p_override = get_num("top_p",       -1.0);
     out.top_k_override = get_num("top_k",       -1.0);
     out.stream         = body.value("stream", false);
+
+    // stream_options.easyai_prompt_progress (easyai extension on top
+    // of OpenAI's stream_options). When explicitly false, skip the
+    // per-batch easyai.prompt_progress SSE events. Missing key /
+    // missing object → default true (every legacy client keeps its
+    // live "thinking N%" gauge).
+    if (body.contains("stream_options")
+            && body["stream_options"].is_object()) {
+        const auto & so = body["stream_options"];
+        if (so.contains("easyai_prompt_progress")
+                && so["easyai_prompt_progress"].is_boolean()
+                && so["easyai_prompt_progress"].get<bool>() == false) {
+            out.emit_prompt_progress = false;
+        }
+    }
 
     // Inline preset prefix in the last user message ("creative 0.9 …").
     out.preset_inline = easyai::parse_preset(out.last_user);
@@ -2316,6 +2338,20 @@ static void handle_chat_stream(ServerCtx & ctx,
             // the final tick (always emitted).
             auto last_emit_ms  = std::make_shared<double>(-1.0);
             auto last_emit_pct = std::make_shared<int>(-1);
+
+            // Per-request opt-out: when the client sent
+            // stream_options.easyai_prompt_progress=false, skip wiring
+            // the per-batch callback entirely. Saves the throttled
+            // SSE traffic AND the per-batch llama_decode loop's
+            // callback overhead. The final easyai.prompt_eval
+            // summary (on_prompt_eval) still fires below. Setting
+            // the callback to an empty std::function clears whatever
+            // the previous request on the same shared engine wired
+            // (engine.cpp gates on `if (cb)` before invoking).
+            if (!req_state->emit_prompt_progress) {
+                ctx.engine.on_prompt_progress(
+                    easyai::PromptProgressCallback{});
+            } else {
             ctx.engine.on_prompt_progress(
                 [&, last_emit_ms, last_emit_pct]
                 (const easyai::PromptProgressReport & r) {
@@ -2344,6 +2380,7 @@ static void handle_chat_stream(ServerCtx & ctx,
                     evt["pct"]       = pct;   // convenience for clients
                     emit_event("easyai.prompt_progress", safe_dump(evt));
                 });
+            }   // end "else" — emit_prompt_progress is true
 
             // Engine fires this once per generate() AFTER the prompt-
             // eval llama_decode loop completes and BEFORE the first
