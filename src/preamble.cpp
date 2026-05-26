@@ -435,6 +435,51 @@ std::string tools_block(const ToolsetView & view) {
     // hardcoded trigger lines so a partially-populated view still
     // renders something useful (mostly relevant to easyai-cli before
     // it has its server-fetched catalogue).
+    // Write/edit policy is emitted BEFORE the active-tools list on
+    // purpose: a model reading the catalogue must see the rule first
+    // so the rule frames the trigger lines that follow. Putting the
+    // policy AFTER the bullet list left the model picking python3
+    // for file writes (strong training prior) before it ever read
+    // the "python3 is read-only" rule.
+    if (view.python_on) {
+        s << "## Write/edit policy (AUTHORITATIVE)\n"
+             "`python3` is for COMPUTE and ALGORITHM TESTING ONLY. "
+             "NEVER use `python3` to create, write, modify, append, or "
+             "delete files on disk — every write-mode `open(...)` is "
+             "rejected by the sandbox, even inside the sandbox root.\n"
+             "\n"
+             "All disk writes/edits go through your filesystem "
+             "write/edit tool";
+        if (view.bash_on) {
+            s << " or, when shell features are needed (redirects, "
+                 "`sed -i`, `mkdir`, `cat <<EOF`), through `bash`";
+        }
+        s << ". On the first `PermissionError` from `python3`, switch "
+             "to the filesystem tool";
+        if (view.bash_on) s << " or `bash`";
+        s << " — do not retry the python call. The exact callable "
+             "name(s) are in your AVAILABLE TOOLS list below.\n\n";
+    } else if (view.fs_on || view.bash_on) {
+        // No python registered: still useful to spell out which tools
+        // can write, so the model doesn't reach for a hallucinated
+        // `python`/`code_interpreter` call.
+        s << "## Write/edit policy\n"
+             "Disk writes/edits go through ";
+        if (view.fs_on && view.bash_on) {
+            s << "your filesystem write/edit tool (preferred) or "
+                 "`bash` (for shell features fs can't do).";
+        } else if (view.fs_on) {
+            s << "your filesystem write/edit tool — the only "
+                 "write surface registered this session.";
+        } else {
+            s << "`bash` (the only write tool registered this session).";
+        }
+        s << " Do not call any other name for disk work — there is "
+             "no `python3`, `code_interpreter`, `write_file`, etc. "
+             "wired up this turn. The exact callable name(s) are in "
+             "your AVAILABLE TOOLS list below.\n\n";
+    }
+
     if (!view.active_tools.empty()) {
         s << "Active tools this session:\n";
         std::size_t n = 0;
@@ -471,17 +516,17 @@ std::string tools_block(const ToolsetView & view) {
                  "(action=search|load|append|save|list|delete|keywords). "
                  "Search BEFORE answering from knowledge.\n";
         if (view.fs_on)
-            s << "  - fs — filesystem: read/write/edit/list/glob/grep "
-                 "inside the sandbox. The ONLY tool that writes files. "
-                 "Paths are relative.\n";
+            s << "  - fs — filesystem: read/write/edit/list/glob/grep/"
+                 "cwd/sandbox in sandbox. Batch with action=\"ops\". "
+                 "The ONLY write tool besides bash.\n";
         if (view.bash_on)
             s << "  - bash — run a shell command (`/bin/sh -c`). "
                  "Allowed to write files (redirects, sed -i, mkdir). "
                  "Use for pipes/build/git/sed/awk.\n";
         if (view.python_on)
-            s << "  - python3 — run a Python 3 snippet for COMPUTE / "
-                 "algorithm testing only. READ-ONLY disk. "
-                 "Writes/edits go through fs or bash.\n";
+            s << "  - python3 — COMPUTE-ONLY Python 3 sandbox. CANNOT "
+                 "write/create/delete files — use fs or bash for that. "
+                 "Stdlib only.\n";
         if (view.tool_lookup_on)
             s << "  - tool_lookup — list or inspect registered tools. "
                  "Call when in doubt about a name or its full manual.\n";
@@ -490,48 +535,6 @@ std::string tools_block(const ToolsetView & view) {
         s << "NO TOOLS ARE REGISTERED THIS SESSION. Do not call any "
              "tool — answer from your own knowledge. If you cannot, "
              "say so directly.\n\n";
-    }
-
-    // Write/edit policy — emitted unconditionally whenever python3 is
-    // on, since the policy is *about* python3.  When python3 is off,
-    // the rule is moot.
-    if (view.python_on) {
-        s << "## Write/edit policy (AUTHORITATIVE)\n"
-             "`python3` is for COMPUTE and ALGORITHM TESTING ONLY. "
-             "NEVER use `python3` to create, write, modify, append, or "
-             "delete files on disk — every write-mode `open(...)` is "
-             "rejected by the sandbox, even inside the sandbox root.\n"
-             "\n"
-             "All disk writes/edits go through your filesystem "
-             "write/edit tool";
-        if (view.bash_on) {
-            s << " or, when shell features are needed (redirects, "
-                 "`sed -i`, `mkdir`, `cat <<EOF`), through `bash`";
-        }
-        s << ". On the first `PermissionError` from `python3`, switch "
-             "to the filesystem tool";
-        if (view.bash_on) s << " or `bash`";
-        s << " — do not retry the python call. The exact callable "
-             "name(s) are in your AVAILABLE TOOLS list.\n\n";
-    } else if (view.fs_on || view.bash_on) {
-        // No python registered: there's still value in stating which
-        // tools can write, so the model doesn't try a hallucinated
-        // `python`/`code_interpreter` call.
-        s << "## Write/edit policy\n"
-             "Disk writes/edits go through ";
-        if (view.fs_on && view.bash_on) {
-            s << "your filesystem write/edit tool (preferred) or "
-                 "`bash` (for shell features fs can't do).";
-        } else if (view.fs_on) {
-            s << "your filesystem write/edit tool — the only "
-                 "write surface registered this session.";
-        } else {
-            s << "`bash` (the only write tool registered this session).";
-        }
-        s << " Do not call any other name for disk work — there is "
-             "no `python3`, `code_interpreter`, `write_file`, etc. "
-             "wired up this turn. The exact callable name(s) are in "
-             "your AVAILABLE TOOLS list.\n\n";
     }
 
     return s.str();

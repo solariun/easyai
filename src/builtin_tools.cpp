@@ -3140,8 +3140,8 @@ Tool fs(std::string root) {
 
     return Tool::builder("fs")
         .short_describe(
-            "Filesystem: read/write/edit/list/glob/grep in sandbox. "
-            "Batch with action=\"ops\" (50 ops / 20 files). Writes only via fs/bash.")
+            "Filesystem: read/write/edit/list/glob/grep/cwd/sandbox in "
+            "sandbox. Batch with action=\"ops\". The ONLY write tool besides bash.")
         .describe(
             "Filesystem — one tool, ten actions + batch mode.\n"
             "\n"
@@ -4175,8 +4175,8 @@ Tool python3(std::string root, bool show_output) {
     auto sb = std::make_shared<Sandbox>(std::move(root));
     return Tool::builder("python3")
         .short_describe(
-            "Run a Python 3 snippet for COMPUTE / algorithm testing "
-            "only. READ-ONLY disk. Writes/edits go through fs or bash.")
+            "COMPUTE-ONLY Python 3 sandbox. CANNOT write/create/delete "
+            "files — use fs or bash for that. Stdlib only.")
         .describe(
             "Run a Python 3 snippet via `python3 -I -S -E -c <code>`. "
             "Captured stdout+stderr is the tool output.\n"
