@@ -2302,7 +2302,7 @@ ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
             return ToolResult::error(std::string("cannot open for edit: ")
                                      + sb->virtual_path(p)
                                      + " (" + std::strerror(errno) + ")."
-                                     + " Use fs(action=\"write\") to create.");
+                                     + " Use a write action to create the file first.");
         }
         std::string body;
         {
@@ -3141,7 +3141,7 @@ Tool fs(std::string root) {
     return Tool::builder("fs")
         .short_describe(
             "Filesystem: read/write/edit/list/glob/grep/cwd/sandbox in "
-            "sandbox. Batch with action=\"ops\". The ONLY write tool besides bash.")
+            "sandbox. Batch with action=\"ops\" (50 ops / 20 files per call).")
         .describe(
             "Filesystem — one tool, ten actions + batch mode.\n"
             "\n"
@@ -4031,13 +4031,17 @@ Tool bash(std::string root, bool show_output) {
             "are merged. cwd is pinned to the sandbox root; use "
             "RELATIVE paths.\n"
             "\n"
-            "Use bash ONLY for shell features fs/python3 can't do:\n"
+            "Use bash ONLY for shell features other registered tools "
+            "can't do:\n"
             "  - pipelines (`grep | xargs`, `find -exec`)\n"
             "  - build runners (make, cmake, cargo, npm)\n"
             "  - git, package managers, sed/awk in-place edits\n"
             "\n"
-            "For file work use fs (no `cat > file`, `cat <<EOF`, "
-            "`echo >`, `mkdir`). For compute use python3.\n"
+            "For plain file work prefer the filesystem write tool "
+            "(no `cat > file`, `cat <<EOF`, `echo >`, `mkdir`). For "
+            "pure compute prefer the compute tool if one is "
+            "registered. The exact callable names for both are in "
+            "your AVAILABLE TOOLS list.\n"
             "\n"
             "NOT a hardened sandbox — runs with caller's full uid/gid. "
             "Output capped at 32 KB; SIGTERM/SIGKILL deadline "
@@ -4136,26 +4140,28 @@ static const char * const kPythonSandboxPreamble =
     "                'easyai sandbox: disk access to ' + repr(s) +\n"
     "                ' denied (resolves to ' + repr(a) + ', outside sandbox '\n"
     "                'root ' + repr(_e_root) + '). The python3 tool is for '\n"
-    "                'compute / network / data only — use fs(action=...) for '\n"
-    "                'disk work.')\n"
+    "                'compute / network / data only. Use the filesystem '\n"
+    "                'write tool registered this session (see the '\n"
+    "                \"Write/edit policy block of your system prompt).\")\n"
     "    def _e_chk_mode(mode):\n"
     "        if not isinstance(mode, str): return\n"
     "        for ch in mode:\n"
     "            if ch in 'waWAxX+':\n"
     "                raise PermissionError(\n"
     "                    'easyai sandbox: write-mode open(' + repr(mode) +\n"
-    "                    \") denied. python3 is READ-ONLY on disk — use \"\n"
-    "                    \"fs(action='write'|'edit'|'append') or bash for \"\n"
-    "                    'writes.')\n"
+    "                    ') denied. python3 is READ-ONLY on disk. Use the '\n"
+    "                    'filesystem write tool registered this session '\n"
+    "                    \"(see the Write/edit policy block of your system \"\n"
+    "                    \"prompt).\")\n"
     "    def _e_chk_flags(flags):\n"
     "        try: f = int(flags)\n"
     "        except (TypeError, ValueError): return\n"
     "        if f & _e_wmask:\n"
     "            raise PermissionError(\n"
     "                'easyai sandbox: os.open with write flags denied. '\n"
-    "                \"python3 is READ-ONLY on disk — use \"\n"
-    "                \"fs(action='write'|'edit'|'append') or bash for \"\n"
-    "                'writes.')\n"
+    "                'python3 is READ-ONLY on disk. Use the filesystem '\n"
+    "                'write tool registered this session (see the '\n"
+    "                \"Write/edit policy block of your system prompt).\")\n"
     "    def _e_open(f, mode='r', *a, **k):\n"
     "        _e_chk_path(f); _e_chk_mode(mode)\n"
     "        return _e_open_orig(f, mode, *a, **k)\n"
@@ -4176,7 +4182,7 @@ Tool python3(std::string root, bool show_output) {
     return Tool::builder("python3")
         .short_describe(
             "COMPUTE-ONLY Python 3 sandbox. CANNOT write/create/delete "
-            "files — use fs or bash for that. Stdlib only.")
+            "files. Stdlib only. See Write/edit policy for the write tool.")
         .describe(
             "Run a Python 3 snippet via `python3 -I -S -E -c <code>`. "
             "Captured stdout+stderr is the tool output.\n"
@@ -4184,10 +4190,12 @@ Tool python3(std::string root, bool show_output) {
             "COMPUTE & ALGORITHM TESTING ONLY. NEVER use this tool to "
             "create, write, modify, append, or delete files — every "
             "write-mode open() is rejected even inside the sandbox. "
-            "For any disk write/edit use `fs(action=\"write\"|\"edit\"|"
-            "\"append\")`; for shell-level edits use `bash`. Read-only "
-            "open() works inside the sandbox so you can still load a "
-            "CSV/JSON, compute, and print the result.\n"
+            "For any disk write/edit, dispatch the filesystem write "
+            "tool registered this session (see the Write/edit policy "
+            "block of your system prompt for its exact name and any "
+            "shell-level alternative). Read-only open() works inside "
+            "the sandbox so you can still load a CSV/JSON, compute, "
+            "and print the result.\n"
             "\n"
             "STDLIB ONLY — no third-party packages, no PYTHON* env, "
             "no cwd on sys.path. Available: json, re, statistics, "
@@ -4198,7 +4206,7 @@ Tool python3(std::string root, bool show_output) {
             "Use for: arithmetic, JSON/CSV wrangling, regex, date "
             "math, hashing, HTTP fetches (urllib.request), socket "
             "probes, sanity-checking an algorithm before you put it "
-            "into source via fs/bash.\n"
+            "into source via the filesystem write tool.\n"
             "\n"
             "ALWAYS print() what you want returned. Snippets that "
             "don't print come back with just `exit=0`.\n"

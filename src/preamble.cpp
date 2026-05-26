@@ -517,16 +517,16 @@ std::string tools_block(const ToolsetView & view) {
                  "Search BEFORE answering from knowledge.\n";
         if (view.fs_on)
             s << "  - fs — filesystem: read/write/edit/list/glob/grep/"
-                 "cwd/sandbox in sandbox. Batch with action=\"ops\". "
-                 "The ONLY write tool besides bash.\n";
+                 "cwd/sandbox in sandbox. Batch with action=\"ops\" "
+                 "(50 ops / 20 files per call).\n";
         if (view.bash_on)
             s << "  - bash — run a shell command (`/bin/sh -c`). "
                  "Allowed to write files (redirects, sed -i, mkdir). "
                  "Use for pipes/build/git/sed/awk.\n";
         if (view.python_on)
             s << "  - python3 — COMPUTE-ONLY Python 3 sandbox. CANNOT "
-                 "write/create/delete files — use fs or bash for that. "
-                 "Stdlib only.\n";
+                 "write/create/delete files. Stdlib only. See "
+                 "Write/edit policy above for the write tool.\n";
         if (view.tool_lookup_on)
             s << "  - tool_lookup — list or inspect registered tools. "
                  "Call when in doubt about a name or its full manual.\n";
