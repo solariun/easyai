@@ -2433,5 +2433,85 @@ needed defense.
 when adding a new tool, a new HTTP boundary, or a new prompt-render
 codepath.*
 
+---
 
+## 24. NINTH PASS — 2026-05-26 (`python3` → `evaluate` model-facing rename)
 
+A behavioural reinforcement pass, not a vulnerability fix. Tracked
+here because it touches every tool-name surface the audit cares
+about (dispatch lookup, MCP `tools/list`, runtime PermissionError
+text, system-prompt enumeration).
+
+### 24.1 INFO — model-facing tool rename `python3` → `evaluate`
+
+**Files:** `src/builtin_tools.cpp` (Tool name + descriptions +
+`kPythonSandboxPreamble` error text), `include/easyai/tool.hpp`
+(`canonical_tool_name` alias), `src/preamble.cpp`
+(`build_builtin_system_prompt` text), `src/mcp.cpp`
+(`build_instructions` text + tool-name detection).
+
+**Observation.** Five sessions in a row, multiple distinct models
+(Qwen3-Coder-Next, GLM-4, others) called `python3` to write source
+files even though:
+
+- the system prompt's Write/edit policy block explicitly forbade it,
+- the tool description led with "COMPUTE-ONLY ... CANNOT write/create/
+  delete files",
+- the runtime sandbox raised `PermissionError` on the write attempt,
+- the previous `python3` short_description had been re-led with
+  "CANNOT" (the A/B/C fix in the §23-companion changes).
+
+The shared cause was the **tool name itself**. Every modern code-
+trained model has seen 10⁶+ training examples of `python` =
+"open(f, 'w'); subprocess.run(...); urllib.request.urlopen(...)"
+that the four prompt-side mitigations could not override. The
+PermissionError fix took the failure rate down, but it cost one
+wasted turn per session as the model discovered the limit at
+runtime.
+
+**Fix.** Rename the **model-facing** dispatch name from `python3`
+→ `evaluate`. The **operator-facing** surface (CLI flag
+`--no-python`, INI key `allow_python`, runtime binary
+`/usr/bin/python3`, the `kPythonSandboxPreamble` preamble) is
+unchanged. The split is deliberate: operators reason about the
+runtime; models reason about the affordance.
+
+| Surface | Old | New |
+|---|---|---|
+| Tool name in `<tools>` block, `tools/list`, system-prompt enumeration | `python3` | **`evaluate`** |
+| Tool short_description | "COMPUTE-ONLY Python 3 sandbox..." | "Evaluate Python 3 code for compute / algorithm prototyping. FORBIDDEN: filesystem, subprocess, network, ctypes. Stdlib compute only." |
+| `kPythonSandboxPreamble` PermissionError text | "python3 is READ-ONLY on disk..." | "`evaluate` is READ-ONLY on disk..." |
+| `canonical_tool_name("python3")` | (identity) | `"evaluate"` |
+| CLI flag | `--no-python` | (unchanged) |
+| INI key | `allow_python` | (unchanged) |
+
+**Back-compat.** `canonical_tool_name("python3")` returns
+`"evaluate"`, so:
+
+- Resumed chat sessions that have `python3` in the assistant's prior
+  tool calls keep dispatching correctly.
+- External-tools manifests whose reservation lists include `python3`
+  as a forbidden name still collide-detect against the renamed tool.
+- Any embedder calling `Engine::dispatch_tool("python3", ...)` lands
+  on the same handler.
+
+**Security claim unchanged.** The runtime sandbox enforces the same
+contract (read-only disk, sandbox containment, isolated interpreter,
+output cap, timeout, process-group teardown, `PR_SET_PDEATHSIG`).
+Adversarial bypass classes from §22.7 / §23.2 (`ctypes`,
+`subprocess`, `_io.FileIO`, `__closure__` introspection) remain.
+The rename is a prompt-positional change to defeat a training
+prior; it does not introduce new attack surface or remove existing
+defences.
+
+**Verification.** `tools/list` against `easyai-mcp-server`
+returns `evaluate`, not `python3`. `tools/call` with
+`name="python3"` resolves through `canonical_tool_name` and runs
+the renamed handler (back-compat smoke test passed: legacy name
+returned `42` for `print(40+2)`). `initialize.instructions`
+text now uses `evaluate` throughout. System-prompt
+`--show-system-prompt` output shows the renamed bullet line and
+the renamed Write/edit policy section.
+
+*Last reviewed against commit landing the rename. Re-run when
+adding a new tool or a new HTTP boundary.*

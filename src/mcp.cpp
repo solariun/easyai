@@ -120,51 +120,59 @@ json tool_descriptor(const Tool & t) {
 // prompt, so it's the right place to assert the same write/edit
 // policy the local-model path enforces via preamble::tools_block:
 //
-//   - python3 is COMPUTE-only, never disk writes/edits.
-//   - fs and bash are the write-authorised tools.
+//   - `evaluate` is COMPUTE-only (Python 3 sandbox under the hood);
+//     no filesystem, no subprocess, no network.
+//   - Filesystem and shell tools (whatever names tools/list shows
+//     for them) are the write-authorised path.
 //   - closed-set rule: only the tools advertised by tools/list exist.
 //
 // The block is keyed off the active tool set so we don't tell the
-// client "use bash for writes" when bash isn't registered.
+// client "use bash for writes" when bash isn't registered. Tool
+// names (`fs` / `fs_write` / `bash`) are detected by family, not
+// hardcoded, so split-mode (`fs_write` / `fs_edit` / ...) and
+// unified-mode (`fs(action=...)`) both work without drift.
 std::string build_instructions(const std::vector<Tool> & tools) {
-    bool has_python  = false;
-    bool has_fs      = false;
-    bool has_bash    = false;
+    bool has_evaluate = false;       // model-facing compute tool (Python 3 runtime)
+    bool has_fs       = false;       // any fs surface — unified `fs` OR split `fs_*`
+    bool has_bash     = false;
     for (const auto & t : tools) {
-        if      (t.name == "python3") has_python = true;
-        else if (t.name == "fs")      has_fs     = true;
-        else if (t.name == "bash")    has_bash   = true;
+        if (t.name == "evaluate" || t.name == "python3") has_evaluate = true;
+        if (t.name == "fs")                              has_fs       = true;
+        if (t.name.rfind("fs_", 0) == 0)                 has_fs       = true;
+        if (t.name == "bash")                            has_bash     = true;
     }
 
     std::string s;
     s += "easyai MCP server. Call ONLY tools listed in tools/list — no "
-         "paraphrases (`read_file` is not `fs`; `shell` is not `bash`). "
-         "If a name isn't in tools/list, it does NOT exist on this "
-         "server; do not invent calls.\n";
-    if (has_python || has_fs || has_bash) {
+         "paraphrases (`read_file` is not the filesystem tool; `shell` "
+         "is not `bash`). If a name isn't in tools/list, it does NOT "
+         "exist on this server; do not invent calls.\n";
+    if (has_evaluate || has_fs || has_bash) {
         s += "\nWrite/edit policy:\n";
-        if (has_python) {
-            s += "  - `python3` is for COMPUTE / algorithm testing only "
-                 "— READ-ONLY on disk. Every write-mode open() is "
+        if (has_evaluate) {
+            s += "  - `evaluate` is for COMPUTE / algorithm prototyping "
+                 "ONLY. It runs Python 3 in a sandbox; FORBIDDEN to "
+                 "use it for filesystem writes, subprocess launches, "
+                 "network I/O, or ctypes. Every write-mode open() is "
                  "rejected even inside the sandbox.\n";
         }
         if (has_fs) {
-            s += "  - `fs(action=\"write\"|\"edit\"|\"append\")` is the "
-                 "authoritative tool for file creation, modification, "
-                 "and deletion.\n";
+            s += "  - The filesystem tool(s) listed in tools/list are "
+                 "the authoritative path for file creation, "
+                 "modification, and deletion.\n";
         }
         if (has_bash) {
             s += "  - `bash` is allowed to write files (redirects, "
-                 "`sed -i`, `mkdir`); use it for shell features `fs` "
-                 "can't do.\n";
+                 "`sed -i`, `mkdir`); use it for shell features the "
+                 "filesystem tool can't do.\n";
         }
-        if (has_python && (has_fs || has_bash)) {
-            s += "  - On the first PermissionError from `python3`, "
+        if (has_evaluate && (has_fs || has_bash)) {
+            s += "  - On the first PermissionError from `evaluate`, "
                  "switch to ";
-            if (has_fs && has_bash) s += "`fs` or `bash`";
-            else if (has_fs)        s += "`fs`";
+            if (has_fs && has_bash) s += "the filesystem tool or `bash`";
+            else if (has_fs)        s += "the filesystem tool";
             else                    s += "`bash`";
-            s += " — do not retry the python call.\n";
+            s += " — do not retry the evaluate call.\n";
         }
     }
     return s;

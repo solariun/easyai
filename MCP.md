@@ -152,7 +152,7 @@ Expected:
     "protocolVersion": "2024-11-05",
     "capabilities": { "tools": { "listChanged": false } },
     "serverInfo": { "name": "easyai-server", "version": "0.1.0" },
-    "instructions": "easyai MCP server. Call ONLY tools listed in tools/list — no paraphrases (`read_file` is not `fs`; `shell` is not `bash`). If a name isn't in tools/list, it does NOT exist on this server; do not invent calls.\n\nWrite/edit policy:\n  - `python3` is for COMPUTE / algorithm testing only — READ-ONLY on disk. Every write-mode open() is rejected even inside the sandbox.\n  - `fs(action=\"write\"|\"edit\"|\"append\")` is the authoritative tool for file creation, modification, and deletion.\n  - `bash` is allowed to write files (redirects, `sed -i`, `mkdir`); use it for shell features `fs` can't do.\n  - On the first PermissionError from `python3`, switch to `fs` or `bash` — do not retry the python call.\n"
+    "instructions": "easyai MCP server. Call ONLY tools listed in tools/list — no paraphrases (`read_file` is not the filesystem tool; `shell` is not `bash`). If a name isn't in tools/list, it does NOT exist on this server; do not invent calls.\n\nWrite/edit policy:\n  - `evaluate` is for COMPUTE / algorithm prototyping ONLY. It runs Python 3 in a sandbox; FORBIDDEN to use it for filesystem writes, subprocess launches, network I/O, or ctypes. Every write-mode open() is rejected even inside the sandbox.\n  - The filesystem tool(s) listed in tools/list are the authoritative path for file creation, modification, and deletion.\n  - `bash` is allowed to write files (redirects, `sed -i`, `mkdir`); use it for shell features the filesystem tool can't do.\n  - On the first PermissionError from `evaluate`, switch to the filesystem tool or `bash` — do not retry the evaluate call.\n"
   }
 }
 ```
@@ -168,18 +168,24 @@ it with:
    is not `bash`)".
 2. The **write/edit policy**, keyed off which write/exec tools the
    server actually registered:
-   - `python3` is COMPUTE-only, READ-ONLY on disk (sandbox preamble
-     rejects write-mode `open()` regardless of path).
-   - `fs(action="write"|"edit"|"append")` is the authoritative writer.
+   - `evaluate` (Python 3 sandbox under the hood) is COMPUTE-only,
+     READ-ONLY on disk, FORBIDDEN to use for subprocess / network /
+     ctypes. The runtime sandbox rejects write-mode `open()`
+     regardless of path.
+   - The filesystem tool(s) named in `tools/list` are the
+     authoritative writer — names differ by mode (`fs(action=...)`
+     in Unified mode, the `fs_write` / `fs_edit` / ... family in
+     Split mode).
    - `bash` is allowed to write files (redirects, `sed -i`, `mkdir`).
 3. The **recovery rule** — "on the first `PermissionError` from
-   `python3`, switch to `fs`/`bash`; do not retry the python call".
+   `evaluate`, switch to the filesystem tool / `bash`; do not retry
+   the evaluate call".
 
 Well-behaved MCP clients (Claude Desktop, Cursor) inject this text
 into their model's system prompt automatically. Non-conforming
 clients ignore it harmlessly — the policy still holds at the tool
-level (python3 raises PermissionError regardless of what the model
-was told).
+level (the `evaluate` sandbox raises PermissionError regardless of
+what the model was told).
 
 The text reshapes itself based on the live toolset: with
 `--no-python` the python paragraph drops out, with `--allow-bash`

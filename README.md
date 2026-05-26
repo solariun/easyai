@@ -43,7 +43,40 @@ A running log of user-facing changes. Latest first — keep this list
 current as features land so anyone returning to the repo (or
 landing on it for the first time) sees what shipped recently.
 
-### 2026-05-26 — Shape-C tools wire shape, python3 read-only, `fs.ops` 50/20, unified by default
+### 2026-05-26 — `python3` model-facing rename to `evaluate` (back-compat alias)
+
+Final fix to a stubborn failure mode: models with a strong "Python
+writes files / runs subprocesses / fetches URLs" training prior were
+reaching for the `python3` tool to do exactly those system-side
+things even when the system prompt, the tool description, and the
+sandbox PermissionError all said *don't*. The lighter fixes (Shape-C
+short triggers, write/edit policy block, runtime sandbox enforcement)
+took the failure rate down but didn't kill it.
+
+**The rename:** the **model-facing** tool name changed from
+`python3` → `evaluate`. The runtime is still Python 3 (operators
+still see `--no-python`, `[SERVER] allow_python`, the Python sandbox
+preamble, etc.). The split is deliberate:
+
+| Surface | Name |
+|---|---|
+| Tool name in `<tools>` / `tools/list` / what the model dispatches | `evaluate` |
+| Tool short description | `"Evaluate Python 3 code for compute / algorithm prototyping. FORBIDDEN: filesystem, subprocess, network, ctypes. Stdlib compute only."` |
+| Operator CLI flag | `--no-python` (unchanged) |
+| Operator INI key | `[SERVER] allow_python` (unchanged) |
+
+`canonical_tool_name("python3")` returns `"evaluate"` so resumed chat
+sessions, external-tools manifest reservation lists, and any caller
+that dispatches `python3` by name still work — the dispatcher routes
+the legacy name to the new tool, no second schema shipped.
+
+Reframing: model now sees an "evaluate" affordance with an explicit
+**FORBIDDEN: filesystem, subprocess, network, ctypes** list, not a
+"python3" affordance with a "don't write files" caveat. The first
+non-generic word the model parses on the bullet line is "evaluate" —
+no "python = open(f, 'w')" training prior to override.
+
+### 2026-05-26 — Shape-C tools wire shape, `evaluate` read-only, `fs.ops` 50/20
 
 Five linked changes refactor how tools reach the model:
 
@@ -60,14 +93,15 @@ Five linked changes refactor how tools reach the model:
   returns the FULL description for every match. The model uses
   the index to scan and drills in only when it needs the manual.
 
-* **`python3` is now read-only on disk.** `kPythonSandboxPreamble`
-  rejects any write-mode `open()` (mode `'w'/'a'/'x'/'+'` or
-  `os.open` with `O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND`)
-  regardless of path. Read-only opens inside the sandbox still
-  work. `PermissionError` names the right alternative
-  (`fs(action="write"|"edit"|"append")` or `bash`). Defense-in-depth
-  — adversarial bypasses (`ctypes`, `subprocess`, `_io.FileIO`,
-  closure-cell introspection) are documented residuals.
+* **`evaluate` (formerly `python3`) is now read-only on disk.**
+  `kPythonSandboxPreamble` rejects any write-mode `open()` (mode
+  `'w'/'a'/'x'/'+'` or `os.open` with
+  `O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND`) regardless of path.
+  Read-only opens inside the sandbox still work. `PermissionError`
+  points the model at the filesystem write tool registered this
+  session. Defense-in-depth — adversarial bypasses (`ctypes`,
+  `subprocess`, `_io.FileIO`, closure-cell introspection) are
+  documented residuals.
 
 * **`fs(action="ops")` batch caps raised to 50 ops / 20 files.**
   One call can land up to 50 file operations across up to 20

@@ -438,15 +438,16 @@ std::string tools_block(const ToolsetView & view) {
     // Write/edit policy is emitted BEFORE the active-tools list on
     // purpose: a model reading the catalogue must see the rule first
     // so the rule frames the trigger lines that follow. Putting the
-    // policy AFTER the bullet list left the model picking python3
-    // for file writes (strong training prior) before it ever read
-    // the "python3 is read-only" rule.
+    // policy AFTER the bullet list left the model picking the compute
+    // tool for file writes (strong training prior on "python = write
+    // files") before it ever read the "compute is read-only" rule.
     if (view.python_on) {
         s << "## Write/edit policy (AUTHORITATIVE)\n"
-             "`python3` is for COMPUTE and ALGORITHM TESTING ONLY. "
-             "NEVER use `python3` to create, write, modify, append, or "
-             "delete files on disk — every write-mode `open(...)` is "
-             "rejected by the sandbox, even inside the sandbox root.\n"
+             "`evaluate` is for COMPUTE and ALGORITHM PROTOTYPING ONLY "
+             "(it runs Python 3 code in a sandbox). FORBIDDEN: "
+             "filesystem writes, subprocess launches, network I/O, "
+             "ctypes. Every write-mode `open(...)` is rejected by the "
+             "sandbox, even inside the sandbox root.\n"
              "\n"
              "All disk writes/edits go through your filesystem "
              "write/edit tool";
@@ -454,15 +455,15 @@ std::string tools_block(const ToolsetView & view) {
             s << " or, when shell features are needed (redirects, "
                  "`sed -i`, `mkdir`, `cat <<EOF`), through `bash`";
         }
-        s << ". On the first `PermissionError` from `python3`, switch "
+        s << ". On the first `PermissionError` from `evaluate`, switch "
              "to the filesystem tool";
         if (view.bash_on) s << " or `bash`";
-        s << " — do not retry the python call. The exact callable "
+        s << " — do not retry the evaluate call. The exact callable "
              "name(s) are in your AVAILABLE TOOLS list below.\n\n";
     } else if (view.fs_on || view.bash_on) {
-        // No python registered: still useful to spell out which tools
-        // can write, so the model doesn't reach for a hallucinated
-        // `python`/`code_interpreter` call.
+        // No evaluate registered: still useful to spell out which
+        // tools can write, so the model doesn't reach for a
+        // hallucinated `python` / `code_interpreter` / `evaluate` call.
         s << "## Write/edit policy\n"
              "Disk writes/edits go through ";
         if (view.fs_on && view.bash_on) {
@@ -475,9 +476,10 @@ std::string tools_block(const ToolsetView & view) {
             s << "`bash` (the only write tool registered this session).";
         }
         s << " Do not call any other name for disk work — there is "
-             "no `python3`, `code_interpreter`, `write_file`, etc. "
-             "wired up this turn. The exact callable name(s) are in "
-             "your AVAILABLE TOOLS list below.\n\n";
+             "no `evaluate`, `python`, `python3`, `code_interpreter`, "
+             "`write_file`, etc. wired up this turn. The exact "
+             "callable name(s) are in your AVAILABLE TOOLS list "
+             "below.\n\n";
     }
 
     if (!view.active_tools.empty()) {
@@ -524,9 +526,9 @@ std::string tools_block(const ToolsetView & view) {
                  "Allowed to write files (redirects, sed -i, mkdir). "
                  "Use for pipes/build/git/sed/awk.\n";
         if (view.python_on)
-            s << "  - python3 — COMPUTE-ONLY Python 3 sandbox. CANNOT "
-                 "write/create/delete files. Stdlib only. See "
-                 "Write/edit policy above for the write tool.\n";
+            s << "  - evaluate — evaluate Python 3 code for compute / "
+                 "algorithm prototyping. FORBIDDEN: filesystem, "
+                 "subprocess, network, ctypes. Stdlib compute only.\n";
         if (view.tool_lookup_on)
             s << "  - tool_lookup — list or inspect registered tools. "
                  "Call when in doubt about a name or its full manual.\n";

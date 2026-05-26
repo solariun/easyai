@@ -110,12 +110,19 @@ struct Tool {
     static Builder builder(std::string name) { return Builder(std::move(name)); }
 };
 
-// Back-compat tool-name aliases. The `memory` tool was formerly called
-// `rag`; a model (or a resumed pre-rename session) emitting `rag` is
-// routed to `memory` at dispatch time so no second schema is shipped.
+// Back-compat tool-name aliases.
+//
+//   * `rag` → `memory` (renamed 2026-04-?)
+//   * `python3` → `evaluate` (renamed 2026-05-26 — the underlying
+//     runtime is still python3 but the model-facing dispatch name
+//     changed to defeat the "python = write files" training prior;
+//     legacy chat sessions, manifest-reservation lists, and any
+//     external code that types `python3` route through here).
+//
 // Single source of truth — every tool-name lookup runs through this.
 inline std::string canonical_tool_name(const std::string & name) {
-    if (name == "rag") return "memory";
+    if (name == "rag")     return "memory";
+    if (name == "python3") return "evaluate";
     return name;
 }
 

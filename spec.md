@@ -88,7 +88,7 @@ command is running and resumes `waitpid` on EINTR.
 | web | always (runtime check for libcurl) |
 | fs (split/unified) | `--sandbox DIR` |
 | bash | `--allow-bash` or `--shell` |
-| python3 | `--sandbox` and not `--no-python` |
+| evaluate (formerly python3; runtime is Python 3) | `--sandbox` and not `--no-python` |
 
 ## REPL Prompt
 
@@ -195,11 +195,19 @@ Authoring rule: every tool sets both `.short_describe(...)` and `.describe(...)`
 |---|---|---|
 | `fs` (or split `fs_*`) | yes | **YES — primary** |
 | `bash` | yes | **YES — for shell features fs can't do** |
-| `python3` | yes (read-only) | **NO** — sandbox preamble rejects any write-mode `open()`, even inside the sandbox root |
+| `evaluate` (legacy alias `python3`; runtime is Python 3) | yes (read-only) | **NO** — sandbox preamble rejects any write-mode `open()`, even inside the sandbox root |
 
 Code enforcement: `kPythonSandboxPreamble` (src/builtin_tools.cpp) wraps `builtins.open`, `io.open`, and `os.open` to raise `PermissionError` on any `w/a/x/+` mode or `O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND` flag. Read-only `r`, `rb`, default-mode open continue to work inside the sandbox.
 
-Prompt enforcement: `easyai::preamble::tools_block(view)` emits the `## Write/edit policy (AUTHORITATIVE)` section whenever `python3` is registered. MCP servers inject the same policy via `initialize.result.instructions` so MCP clients' models see it too.
+Prompt enforcement: `easyai::preamble::tools_block(view)` emits the `## Write/edit policy (AUTHORITATIVE)` section whenever `evaluate` is registered. MCP servers inject the same policy via `initialize.result.instructions` so MCP clients' models see it too.
+
+### Model-facing rename — `python3` → `evaluate` (2026-05-26)
+
+To defeat the model's strong "python = write files / call subprocess / fetch URL" training prior, the **model-facing** tool name was renamed from `python3` to `evaluate`. The **operator-facing** surface (CLI flag `--no-python`, INI key `allow_python`, the runtime binary `python3 -I -S -E -c`) is unchanged.
+
+`canonical_tool_name("python3")` returns `"evaluate"` so resumed chat sessions, hardcoded manifest reservations, and any legacy caller that dispatches by the old name still work — the dispatcher routes the legacy name to the new tool, no second schema shipped.
+
+The model's short trigger is now: `"Evaluate Python 3 code for compute / algorithm prototyping. FORBIDDEN: filesystem, subprocess, network, ctypes. Stdlib compute only."` — the first non-generic word is `evaluate`, framing the affordance as expression evaluation, not file authoring.
 
 ### Per-turn KV-cache friendliness
 
@@ -217,13 +225,13 @@ Prompt enforcement: `easyai::preamble::tools_block(view)` emits the `## Write/ed
 
 `easyai::preamble::tools_block` runs `t.name` and `t.wire_description()` through `sanitize_for_prompt(s, cap)` before emitting the active-tools bullet list. C0 control bytes (`0x00`–`0x1f`) and `DEL` (`0x7f`) collapse to a single space; UTF-8 multi-byte (`0x80+`) passes through. Caps: 64 chars (name), 200 chars (description). Closes the structural-corruption prompt-injection vector when `active_tools` is populated from a less-trusted source (e.g. cli's `/v1/tools` runtime fetch). See SECURITY_AUDIT §23.1.
 
-### python3 disk enforcement
+### `evaluate` disk enforcement (Python 3 sandbox preamble)
 
-The `kPythonSandboxPreamble` injected before every `python3` snippet enforces TWO invariants:
+The `kPythonSandboxPreamble` injected before every `evaluate` snippet enforces TWO invariants:
 
 1. **Sandbox containment** — open() / io.open() / os.open() reject paths resolving outside the cwd (sandbox root).
 2. **Read-only** — write-mode `open(...)` rejected regardless of path. Mode chars `w/a/x/+` (any case) on `builtins.open` / `io.open`; flags `O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND` on `os.open`.
 
-PermissionError messages name the right alternative (`fs(action="write"|"edit"|"append")` or `bash`). Read-only opens inside the sandbox continue to work (legitimate "load CSV, compute, print result" flows are unaffected).
+PermissionError messages point the model at the filesystem write tool registered this session (the exact callable name is read from the model's AVAILABLE TOOLS list — that way the error message stays correct whether the operator chose Split mode `fs_write` or Unified mode `fs(action="write")`). Read-only opens inside the sandbox continue to work (legitimate "load CSV, compute, print result" flows are unaffected).
 
 **Documented residual:** Python's `__closure__` introspection on `builtins.open` recovers the unwrapped open from the closure cell, bypassing both checks. Same class as the existing `ctypes` / `_io.FileIO` / `subprocess` bypasses — adversarial intent is out of scope; defense is against accident. See SECURITY_AUDIT §23.2.
