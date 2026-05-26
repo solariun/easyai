@@ -91,7 +91,7 @@ The HTTP layer, paths, tool gating, concurrency, MCP auth.
 | `sandbox` | path | `--sandbox` | (none) | Root directory for `bash` / the unified `fs` tool / external-tools `$SANDBOX` placeholder. The binary `chdir`s into `<dir>` at startup so the model's relative paths land there. |
 | `allow_fs` | bool | `--allow-fs` | `off` | Register the unified `fs` tool (action=`read` / `write` / `list` / `glob` / `grep` / `check_path` / `cwd` / `sandbox`), scoped to the sandbox. |
 | `allow_bash` | bool | `--allow-bash` | `off` | Register the `bash` tool. **Not** a hardened sandbox — runs with this process's user privileges. Per-call timeouts + output cap remain. |
-| `allow_python` | bool | (no `--allow-python`; `--no-python` flips off) | `on` | Register the `python3` tool — runs snippets via `python3 -I -S -E -c <code>`. **Defaults ON**, auto-registers when `--sandbox` is set or `--allow-bash` is on. Isolated stdlib-only interpreter (no PYTHON* env, no site-packages, no cwd on `sys.path`). **Disk access auto-restricted to the sandbox root** via a Python preamble. Defense-in-depth, **not** a hardened sandbox — `import os` / `import socket` / `import subprocess` / `import ctypes` all still work. Same per-call timeout + output cap as bash. Pass `--no-python` (or `[SERVER] allow_python = off`) to skip registration. |
+| `allow_python` | bool | (no `--allow-python`; `--no-python` flips off) | `on` | Register the `python3` tool — runs snippets via `python3 -I -S -E -c <code>`. **Defaults ON**, auto-registers when `--sandbox` is set or `--allow-bash` is on. Isolated stdlib-only interpreter (no PYTHON* env, no site-packages, no cwd on `sys.path`). **READ-ONLY disk surface (2026-05-26)**: the Python preamble rejects any path outside the sandbox AND any write-mode `open()` regardless of path (mode `'w'/'a'/'x'/'+'` or `O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND` flags). The same policy is echoed in the `initialize.instructions` response field so MCP clients can surface it to their model. Defense-in-depth, **not** a hardened sandbox — `import os` / `import socket` / `import subprocess` / `import ctypes` all still work. Same per-call timeout + output cap as bash. Pass `--no-python` (or `[SERVER] allow_python = off`) to skip registration. |
 | `load_tools` | bool | `--no-tools` (negative) | `on` | Master switch for the built-in toolbelt. Set `off` to register zero default tools and rely on `external_tools` + `memory` only. |
 | `external_tools` | path | `--external-tools` | (none) | Directory of `EASYAI-*.tools` manifests. Per-file fault isolation. See [`EXTERNAL_TOOLS.md`](EXTERNAL_TOOLS.md). |
 | `memory` | path | `--memory` | (none) | Directory of `memory`-tool entries — enables the unified `memory(action=...)` tool (a passive RAG technique). The legacy key `rag` (CLI `--RAG`) is still read for back-compat. See [`RAG.md`](RAG.md). |
@@ -214,14 +214,16 @@ No required arguments. Pass `--help` for the live list.
 | --- | --- | --- | --- |
 | GET | `/health` | (open) | `{status, server, tools, mcp_auth, compat:{...}, concurrency:{in_flight, max_concurrent_calls}, counters:{requests, tool_calls, errors, rejected}}`. Always open so liveness probes work without credentials. |
 | GET | `/metrics` | api_key | Prometheus exposition (only when `--metrics` is on). Counters: `easyai_mcp_requests_total`, `easyai_mcp_tool_calls_total`, `easyai_mcp_errors_total`, `easyai_mcp_rejected_total`; gauges: `easyai_mcp_in_flight`, `easyai_mcp_max_concurrent_calls`, `easyai_mcp_tools_registered`. |
-| GET | `/v1/tools` | api_key | Tool catalogue (`{name, description}` pairs) for diagnostics. Useful when wiring up a new client. |
+| GET | `/v1/tools` | api_key | Tool catalogue. Each entry: `{name, description, short_description}` — `description` is the full manual (also surfaced via MCP `tools/list`), `short_description` is the one-line trigger used by `easyai-cli` for its prompt prefix. Pre-Shape-C clients see only `description` — backward compatible. |
 | POST | `/mcp` | `[MCP_USER]` | JSON-RPC 2.0 dispatcher. Methods: `initialize`, `tools/list`, `tools/call`, `ping`, `notifications/*`. |
 | GET | `/mcp` | (open) | `405 Method Not Allowed`. Reserved for a future SSE notification stream. |
 
 ### `POST /mcp` example
 
 ```sh
-# initialize
+# initialize  (the response includes an `instructions` free-text
+# field carrying the closed-set rule + write/edit policy — well-
+# behaved MCP clients inject this into their model's system prompt)
 curl -fsS http://localhost:8089/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"my-app","version":"0.1"}}}'
@@ -239,6 +241,27 @@ curl -fsS http://localhost:8089/mcp \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
        "params":{"name":"memory","arguments":{"action":"search","keywords":["user-prefs"]}}}'
 ```
+
+### `initialize.instructions` — closed-set + write/edit policy
+
+The MCP `initialize` response includes a free-text `instructions`
+field (spec-defined hint to the client's model). easyai-mcp-server
+populates it with:
+
+1. The **closed-set rule**: "Call ONLY tools listed in `tools/list`.
+   Do NOT invent paraphrases (`read_file` is not `fs`; `shell` is
+   not `bash`)."
+2. The **write/edit policy**, keyed off which tools are registered:
+   - `python3` is COMPUTE-only, READ-ONLY on disk.
+   - `fs(action="write"|"edit"|"append")` is the authoritative writer.
+   - `bash` is allowed to write files (redirects, `sed -i`, `mkdir`).
+3. The recovery rule: "On the first `PermissionError` from `python3`,
+   switch to `fs`/`bash` — do not retry the python call."
+
+Well-behaved MCP clients (Claude Desktop, Cursor) inject this text
+into the client model's system prompt; non-conforming clients ignore
+it harmlessly. The text changes shape automatically when the tool set
+changes (e.g. with `--no-python` the python paragraph is omitted).
 
 Per-client connection guides for Claude Desktop / Cursor / Continue
 are identical to the chat server's — see [`MCP.md`](MCP.md) §4–7;

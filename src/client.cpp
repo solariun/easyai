@@ -88,9 +88,12 @@ ParsedUrl parse_url(const std::string & url) {
 // Tool → JSON (OpenAI tool spec shape)
 // ---------------------------------------------------------------------------
 ordered_json tool_to_json(const Tool & t) {
+    // OpenAI-compatible tools array — ship the SHORT trigger description
+    // (Tool::wire_description), not the full manual. Full description is
+    // returned by `tool_lookup` if the model needs it.
     ordered_json fn;
     fn["name"]        = t.name;
-    fn["description"] = t.description;
+    fn["description"] = t.wire_description();
     auto empty_schema = []() {
         ordered_json e;
         e["type"]       = "object";
@@ -1401,8 +1404,14 @@ bool Client::list_remote_tools(std::vector<RemoteTool> & out) {
         if (!j.contains("data") || !j["data"].is_array()) return true;
         for (const auto & e : j["data"]) {
             RemoteTool t;
-            t.name        = e.value("name", "");
-            t.description = e.value("description", "");
+            t.name              = e.value("name", "");
+            t.description       = e.value("description", "");
+            t.short_description = e.value("short_description", "");
+            // Pre-Shape-C servers don't ship short_description; fall
+            // back to the full body so callers always see something.
+            if (t.short_description.empty()) {
+                t.short_description = t.description;
+            }
             out.push_back(std::move(t));
         }
         return true;

@@ -126,10 +126,10 @@ bool LocalBackend::init(std::string & err) {
     // possible) are still visible.
     if (cfg.load_tools) {
         engine.add_tool(tools::tool_lookup([&engine]() {
-            std::vector<std::pair<std::string, std::string>> v;
+            tools::ToolCatalog v;
             v.reserve(engine.tools().size());
             for (const auto & t : engine.tools()) {
-                v.emplace_back(t.name, t.description);
+                v.push_back({ t.name, t.wire_description(), t.description });
             }
             return v;
         }));

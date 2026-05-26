@@ -873,10 +873,15 @@ struct Engine::Impl {
     llama_context * ctx()   const { return init ? init->context() : nullptr; }
 
     std::vector<common_chat_tool> chat_tools() const {
+        // Wire description = the SHORT trigger string (cf.
+        // Tool::wire_description). The full multi-line manual stays
+        // server-side and is only surfaced when the model calls
+        // `tool_lookup`. Trades ~2 000 tokens of system-message bulk
+        // for one lazy lookup hop when the model needs detail.
         std::vector<common_chat_tool> out;
         out.reserve(tools.size());
         for (const auto & t : tools) {
-            out.push_back({ t.name, t.description, t.parameters_json });
+            out.push_back({ t.name, t.wire_description(), t.parameters_json });
         }
         return out;
     }

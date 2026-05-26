@@ -44,21 +44,44 @@ using ToolHandler = std::function<ToolResult(const ToolCall &)>;
 //   2. Tool::builder("name").describe("desc")
 //                           .param("query", "string", "what to search", true)
 //                           .handle([](const ToolCall & c){ ... }).build();
+// Tools carry TWO descriptions:
+//   * short_description — one-line trigger (≤ ~80 chars). This is what
+//     ships in the per-turn `<tools>` block sent to the model. Cheap on
+//     tokens; gives the model just enough to know WHEN to reach for the
+//     tool. Always omits schema detail — the JSON schema already
+//     advertises the parameters.
+//   * description — the full multi-line manual: rules, examples, edge
+//     cases. NEVER sent in the per-turn tools block. Returned by the
+//     `tool_lookup` tool on demand, and exposed unchanged on the MCP
+//     `tools/list` endpoint (MCP clients drive their own context budget,
+//     so we hand them the full text).
+//
+// If a tool sets only `description` (legacy), the wire serialiser falls
+// back to the first sentence/line of the long form so existing callers
+// keep working until they migrate.
 struct Tool {
     std::string name;
     std::string description;
+    std::string short_description;
     std::string parameters_json;   // JSON schema (object)
     ToolHandler handler;
 
+    // Resolve the trigger string that should be sent in the per-turn
+    // tools block. Falls back to the first non-empty line of `description`
+    // if `short_description` is empty, capped at ~120 chars so we don't
+    // accidentally ship the whole manual.
+    std::string wire_description() const;
+
     static Tool make(std::string n, std::string d, std::string p, ToolHandler h) {
-        return Tool{ std::move(n), std::move(d), std::move(p), std::move(h) };
+        return Tool{ std::move(n), std::move(d), std::string(), std::move(p), std::move(h) };
     }
 
     class Builder {
        public:
         explicit Builder(std::string name) : name_(std::move(name)) {}
 
-        Builder & describe(std::string d) { desc_ = std::move(d); return *this; }
+        Builder & describe      (std::string d) { desc_ = std::move(d); return *this; }
+        Builder & short_describe(std::string d) { short_ = std::move(d); return *this; }
 
         // Add a typed parameter to the JSON schema.
         // type: "string" | "integer" | "number" | "boolean" | "array" | "object"
@@ -79,6 +102,7 @@ struct Tool {
         struct P { std::string name, type, description; bool required; };
         std::string    name_;
         std::string    desc_;
+        std::string    short_;
         std::vector<P> params_;
         ToolHandler    handler_;
     };

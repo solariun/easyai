@@ -140,10 +140,10 @@ int main(int argc, char ** argv) {
               // Last-registered: snapshot includes today_is, weather,
               // and tool_lookup itself.  Lets the model verify what's
               // wired up before guessing tool names.
-              std::vector<std::pair<std::string, std::string>> v;
+              easyai::tools::ToolCatalog v;
               v.reserve(engine.tools().size());
               for (const auto & t : engine.tools()) {
-                  v.emplace_back(t.name, t.description);
+                  v.push_back({ t.name, t.wire_description(), t.description });
               }
               return v;
           }))

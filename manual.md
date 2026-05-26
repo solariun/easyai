@@ -61,7 +61,10 @@ the weather in Lisbon?".
 
 ```cpp
 auto weather = easyai::Tool::builder("get_weather")
-    .describe("Return the current weather for a city, in metric units.")
+    .short_describe("Current weather for a city (metric units).")
+    .describe("Return the current weather for a city, in metric "
+              "units. Caches per-city for 5 minutes. Returns "
+              "'<temp>°C, <conditions>' or an error.")
     .param("city", "string", "City name, e.g. 'Lisbon'", /*required=*/true)
     .handle([](const easyai::ToolCall & c) -> easyai::ToolResult {
         std::string city = easyai::args::get_string_or(c.arguments_json, "city", "");
@@ -74,9 +77,20 @@ engine.add_tool(weather);
 engine.chat("what's the weather in Lisbon?");
 ```
 
-The `Tool` is four fields: `name`, `description`, `parameters_json`
-(a JSON schema), `handler`.  At this point easyai does nothing
-except remember the tool — no prompt has been built yet.
+The `Tool` carries five fields: `name`, `description` (the full
+manual), `short_description` (one-line trigger), `parameters_json`
+(JSON schema), `handler`.
+
+> **Shape-C wire shape (since 2026-05-26).** Per-turn `<tools>`
+> blocks ship `name + short_description + schema` (~2 000 tokens
+> saved vs. the full description). Models reach for `tool_lookup
+> (name="get_weather")` to pull the full multi-line body when they
+> need it. Builders that set only `.describe(...)` keep working —
+> `wire_description()` falls back to the first 120 chars of the
+> full description.
+
+At this point easyai does nothing except remember the tool — no
+prompt has been built yet.
 
 ### Step 2 — easyai builds the chat-template inputs
 
@@ -2500,13 +2514,15 @@ Best practices:
 
 When the model emits `write(file_path=…)` and gets `unknown tool:
 write` back, the rest of the turn is usually wasted retrying the
-hallucinated name. `tool_lookup` is the read-only escape hatch:
+hallucinated name. `tool_lookup` is the read-only escape hatch
+PLUS the on-demand "full manual" lookup (since 2026-05-26 it ships
+with TWO modes):
 
 ```cpp
 engine.add_tool(easyai::tools::tool_lookup([&engine]() {
-    std::vector<std::pair<std::string, std::string>> v;
+    easyai::tools::ToolCatalog v;
     for (const auto & t : engine.tools()) {
-        v.emplace_back(t.name, t.description);
+        v.push_back({ t.name, t.wire_description(), t.description });
     }
     return v;
 }));
@@ -2517,25 +2533,39 @@ else. The lambda re-reads `engine.tools()` at every call, so even
 tools added dynamically after `tool_lookup` show up. (`Client` has
 the same `tools()` accessor, so the wiring is identical.)
 
-What the model sees:
+**Two modes:**
 
-```
-1. datetime: Return the current wall-clock time. ...
-2. web_search: Search the web (DuckDuckGo). ...
-3. tool_lookup: Return the catalogue of tools currently available ...
-```
+* **No arguments → INDEX view.** Numbered list of `name: short
+  trigger` — one line per tool. Cheap, scannable. What the model
+  sees:
 
-`name="<substring>"` filters by partial, case-insensitive name
-match. `name=""` (or omitted) means "list everything." A no-match
+  ```
+  1. datetime: Return the current UTC and local date/time. Call for 'now'/'today'/'latest'…
+  2. web: Search the web and fetch URLs. action=search|fetch. Reply MUST end with a `Sources:` block…
+  3. fs: Filesystem: read/write/edit/list/glob/grep in sandbox. Batch with action="ops"…
+  4. tool_lookup: List or inspect tools registered this session. No args → index; name="<substring>" → full manual…
+  ```
+
+* **`name="<substring>"` → MANUAL view.** Full multi-line
+  description (rules, examples, edge cases) for every tool whose
+  name matches the substring. This is the **expanded help text**
+  the model drills into when the index trigger isn't enough.
+
+The split is what makes the Shape-C wire format work end-to-end:
+the per-turn `<tools>` block ships the short trigger only (saves
+~2 000 tokens), and `tool_lookup(name="fs")` returns the full
+manual on demand. See AI_TOOLS.md "Shape-C wire shape" for the
+wire-side picture.
+
+`name="<substring>"` is case-insensitive partial match. A no-match
 result returns a clear "(no tools match: …)" string rather than an
 empty list, so the model never confuses an empty filter with an
 empty catalogue.
 
-The companion is the `[tools]` system-prompt block — see the
-`kBuiltinSystem` strings in `examples/server.cpp` and
-`examples/local.cpp`, or the inline `[tools]` injection in
-`examples/cli.cpp::register_tools`. Together they take the model
-from "guess and retry" to "verify first."
+The companion is the system-prompt tools block — `easyai::preamble::
+tools_block(view)` lives in libeasyai and is shared by server,
+local, and cli. Together they take the model from "guess and retry"
+to "verify first."
 
 ### 5.5 Sandboxing
 

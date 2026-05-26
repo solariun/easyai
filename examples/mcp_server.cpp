@@ -925,10 +925,10 @@ int main(int argc, char ** argv) {
         auto * tools_ptr = &ctx->default_tools;
         ctx->default_tools.push_back(easyai::tools::tool_lookup(
             [tools_ptr]() {
-                std::vector<std::pair<std::string, std::string>> v;
+                easyai::tools::ToolCatalog v;
                 v.reserve(tools_ptr->size());
                 for (const auto & t : *tools_ptr) {
-                    v.emplace_back(t.name, t.description);
+                    v.push_back({ t.name, t.wire_description(), t.description });
                 }
                 return v;
             }));

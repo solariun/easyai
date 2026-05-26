@@ -1618,10 +1618,10 @@ void register_tools(easyai::Client & cli,
     // dynamically (e.g. webui-side runtime additions) show up.
     if (wants("tool_lookup")) {
         cli.add_tool(easyai::tools::tool_lookup([&cli]() {
-            std::vector<std::pair<std::string, std::string>> v;
+            easyai::tools::ToolCatalog v;
             v.reserve(cli.tools().size());
             for (const auto & t : cli.tools()) {
-                v.emplace_back(t.name, t.description);
+                v.push_back({ t.name, t.wire_description(), t.description });
             }
             return v;
         }));
@@ -2475,12 +2475,15 @@ int main(int argc, char ** argv) {
         const bool any_fs_like = o.allow_bash || !o.sandbox.empty();
         const bool any_prefix  = any_fs_like || !o.no_plan || o.unattended;
         std::string prefix;
-        // [tool-discipline] — first because hallucinated tool calls are
-        // the most expensive failure mode (every "unknown tool" reply
-        // wastes a turn). Only emitted when we already have a reason to
-        // inject *some* prefix block — without one, no system message
-        // is sent to the server and its built-in prompt (which carries
-        // its own version of this rule) wins.
+
+        // [tool-discipline] — closed-set rule. The server's own system
+        // prompt carries the authoritative AVAILABLE TOOLS catalogue
+        // (rendered by `easyai::preamble::build_session_info(tools)`
+        // server-side); we just state the rule here so the cli's
+        // injected prefix doesn't lose it when --system overrides the
+        // server default. Deliberately doesn't re-enumerate tools —
+        // duplicating the server's session-info block would waste
+        // tokens and risk drift.
         if (any_prefix) {
             prefix +=
                 "[tool-discipline]\n"
@@ -2523,33 +2526,10 @@ int main(int argc, char ** argv) {
                 "the ceiling, not a starting point — they steer, you "
                 "implement what they pick.\n";
         }
-        // [tools] — authoritative tool-discipline block. Always emitted
-        // (independent of fs_* / plan registration), because the
-        // hallucinated-tool failure mode is universal: a model with
-        // ONLY datetime + web_* still tries to call `write` and lands
-        // an "unknown tool" error mid-task. Pointing the model at
-        // tool_lookup gives it a one-hop verify path, and the
-        // imperative "do not invent names" closes the rest.
-        if (!prefix.empty()) prefix += "\n";
-        prefix +=
-            "[tools]\n"
-            "Only call tools that are actually registered in this "
-            "session. NEVER invent a tool name. NEVER assume a tool "
-            "exists because it would be useful. NEVER call a tool you "
-            "have not seen in the registered tool catalogue this "
-            "session.\n"
-            "\n"
-            "If you are unsure whether a specific tool is wired up, "
-            "call `tool_lookup` first. With no argument it returns the "
-            "complete numbered catalogue; with `name=\"<substring>\"` "
-            "it filters by partial name match. Use it BEFORE the call "
-            "you're about to make, not after a failure.\n"
-            "\n"
-            "If the affordance you need is genuinely missing, say so "
-            "in your reply and propose a path forward (write the code "
-            "as a response, ask the user to enable a tool, etc.). Do "
-            "not retry an unknown-tool call hoping for a different "
-            "outcome — the registry will not change mid-turn.\n";
+        // The old [tools] section lived here.  Its content — closed-set
+        // rule + `tool_lookup` guidance — is now in
+        // preamble::tools_block() emitted at the top of this prefix,
+        // so the hand-rolled version is gone.
         // [unattended] — emitted on --unattended OR any one-shot mode
         // (--prompt / positional / piped stdin). Overrides the "ask
         // the user" parts of [guidance]: there's no REPL on the other

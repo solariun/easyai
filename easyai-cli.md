@@ -211,7 +211,7 @@ prepended (see [§7](#7-system-prompt--injected-blocks)).
 | `--tools LIST` | Comma list, overrides the default catalog. See [§6](#6-tool-registration) for valid names. |
 | `--sandbox DIR` | Working root for `fs` / `bash` / `python3`. **Auto-registers the unified `fs` tool** (action=read / write / list / glob / grep / check_path / cwd / sandbox). `bash` and `python3` still require their respective `--allow-*` flags. |
 | `--allow-bash` | Register `bash`. **Implies `fs`** (bash subsumes it). cwd = `--sandbox` if given, else the binary's CWD. WARNING: not a hardened sandbox. |
-| `--no-python` | Drop the auto-registered `python3` tool. By default `python3` is **ON** whenever `--sandbox` or `--allow-bash` is set. Stdlib-only interpreter (no PYTHON* env, no site-packages, no cwd on `sys.path`); disk access auto-restricted to the sandbox root via a Python preamble. WARNING: defense-in-depth, not a hardened sandbox — `import os` / `import socket` / `import subprocess` still work. |
+| `--no-python` | Drop the auto-registered `python3` tool. By default `python3` is **ON** whenever `--sandbox` or `--allow-bash` is set. Stdlib-only interpreter (no PYTHON* env, no site-packages, no cwd on `sys.path`). **READ-ONLY disk surface (2026-05-26)**: any path outside the sandbox AND any write-mode `open()` regardless of path is rejected. Writes/edits go through `fs(action="write"\|"edit"\|"append")` or `bash`. WARNING: defense-in-depth, not a hardened sandbox — `import os` / `import socket` / `import subprocess` / `import ctypes` still work (closure-cell introspection also bypasses — SECURITY_AUDIT §23.2). |
 | `--use-google` | Enable `engine="google"` inside the unified `web` tool (Google Custom Search JSON API), and let the default `engine="auto"` cascade try google as its first hop. Requires `GOOGLE_API_KEY` and `GOOGLE_CSE_ID` env vars. Without this flag (or env vars), the auto cascade silently falls through to brave → ddg-lite → bing → ddg. |
 | `--memory DIR` | Enable persistent memory rooted at DIR — a passive RAG technique. Registers ONE `memory(action=...)` tool, AND appends a compact `# MEMORY VOCABULARY` block to the system prompt prefix so the remote model sees the current keyword index without having to call `memory(action="keywords")`. `--RAG` is still accepted as a back-compat alias. See `RAG.md` §5 "Automatic vocabulary injection". |
 | `--external-tools DIR` | Load every `EASYAI-*.tools` manifest in DIR. See `EXTERNAL_TOOLS.md`. |
@@ -230,7 +230,7 @@ prepended (see [§7](#7-system-prompt--injected-blocks)).
 | `--verbose`, `-v` | Log HTTP+SSE diagnostics to stderr (timestamps + per-piece traces). Stderr-only — does NOT create a /tmp log file (use `--log-file` for that). |
 | `-q`, `--quiet` | Disable the spinner glyph + context-fill gauge. Use for batch / scripted runs. **Also changes `Ctrl-C` / `SIGTERM` semantics**: first signal hard-cancels and exits (`rc=130`). See [Ctrl-C and SIGTERM](#ctrl-c-and-sigterm). |
 | `--log-file PATH` | Opt in to a raw transaction log at PATH (request body + every SSE chunk + every tool dispatch input/output, mode 0600). Default OFF — no log file is written without this flag. Implies `--verbose`. |
-| `--tools-mode MODE` | How `fs` / `web` / `memory` are exposed to the model. **MODE** is one of `split` (default since 2026-05-15 — one focused tool per action: `fs_read`, `fs_edit`, …, `memory_save`, …, `web_search`, `web_fetch`), `unified` (legacy single dispatcher per family with `action=`), or `both` (register both surfaces side-by-side). Same handlers under the hood; only the registration shape differs. INI: `[cli] tools_mode = unified\|split\|both`. |
+| `--tools-mode MODE` | How `fs` / `web` are exposed to the model. **MODE** is one of `split` (**default** — one focused tool per action: `fs_read`, `fs_edit`, `web_search`, `web_fetch`, …; small models dispatch more reliably here), `unified` (single dispatcher per family with `action=`; this is where the `fs(action="ops")` batch lives — up to 50 ops / 20 files per call), or `both` (register both surfaces side-by-side). Same handlers under the hood; only the registration shape differs. INI: `[cli] tools_mode = unified\|split\|both`. |
 | `--continue` | Load `.easyai_session` from cwd before the first prompt. **Default OFF** (since 2026-05-13) — any existing session file is ignored and overwritten on the first turn unless this flag is set. INI: `[cli] auto_continue = true\|false`. See [§11](#11-session-persistence). |
 | `--no-continue` | Explicit form of the default — ignore any existing `.easyai_session` and overwrite on the first turn. Useful to override `[cli] auto_continue = on` set in INI. |
 | `--compress` | After loading, ask the model for one lossless recap of the conversation and replace the history with that recap. Also reachable mid-REPL via `/compress`. No-op without `--continue` (nothing in memory to recap). INI: `[cli] auto_compress = true\|false`. |
@@ -790,8 +790,8 @@ flag `--RAG` is still accepted as a back-compat alias.
 
 **Vocabulary auto-injection.** `--memory` also appends a compact
 `# MEMORY VOCABULARY` block to the system prompt prefix (the same
-prefix that already carries `[tool-discipline]`, `[environment]`,
-`[guidance]`, `[tools]`). The block lists every distinct keyword
+prefix that carries `[environment]`, `[guidance]`, the tools_block,
+and the cite-sources rule). The block lists every distinct keyword
 in the store + its count, sorted count desc / name asc, capped at
 top 40. The remote model now sees what it has tagged on every
 turn — `memory(action="search", keywords=[...])` becomes
@@ -801,6 +801,15 @@ Empty store → block omitted, no wasted tokens.
 The builder is shared with `easyai-server` and `easyai-local`
 (see `easyai::preamble::build` in `include/easyai/preamble.hpp`);
 change the renderer once and every binary updates.
+
+**Tools discipline rule (2026-05-26).** The cli's prefix carries a
+`[tool-discipline]` paragraph stating the closed-set rule and
+pointing at the server's AVAILABLE TOOLS block as the authoritative
+catalogue. It deliberately does NOT re-enumerate the tools — the
+server's own system prompt (rendered by
+`easyai::preamble::build_session_info(tools)` server-side) already
+lists them, and duplicating that catalogue in the cli prefix would
+waste tokens and risk drift.
 
 Memories whose title starts with `fix-easyai-` are immutable: save /
 append / delete refuse them. Pass `fix=true` (sub-action `save`) to

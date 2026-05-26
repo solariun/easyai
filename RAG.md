@@ -678,6 +678,30 @@ The block is built by `easyai::preamble::build()` (see
 `easyai::tools::render_memory_vocabulary()`. Both are public APIs
 so third-party hosts of libeasyai get the same behaviour.
 
+**Block position — tail (2026-05-26).** The vocab block lands AT
+THE END of the preamble suffix, after AUTHORITATIVE DATE/TIME,
+KNOWLEDGE CUTOFF, KNOWLEDGE LOOP, and CITE SOURCES. Reason:
+prompt-eval KV cache. The vocab is the only block that mutates
+between requests (any `memory(action="save"|"append"|"delete")`
+shifts the keyword count map). Putting it last means a memory
+write only invalidates the SUFFIX of the cache — the stable
+date/cutoff/rules prefix stays warm.
+
+**Render cache (2026-05-26).** `render_memory_vocabulary` caches
+the rendered string keyed on `(root_dir, directory mtime, file
+count)`. Hot path is now one `stat(2)` per request instead of an
+O(N) directory walk every chat. Memory writes go through
+`rename(2)` which bumps the directory mtime — cache invalidates
+automatically with no explicit signalling.
+
+| Edge case | Behaviour |
+|---|---|
+| Two `memory(action="save")` calls within one second on a second-resolution filesystem (HFS+, some NFS) | Up to one second of stale vocab can be served if the file-count delta is also zero. Acceptable — the vocab is advisory; the actual `memory(action="search")` always hits the live, write-locked index. |
+| Directory disappears | `stat(2)` fails, cache returns the last good string; next successful scan refreshes. |
+| First-ever call | Cache miss → full directory walk + cache populate; one `stat(2)` thereafter. |
+
+See SECURITY_AUDIT §23.3 for the formal residual.
+
 ---
 
 ## 6. Workflows

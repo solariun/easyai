@@ -58,7 +58,44 @@ Tool Tool::Builder::build() const {
     }
     js << "]}";
 
-    return Tool::make(name_, desc_, js.str(), handler_);
+    return Tool{ name_, desc_, short_, js.str(), handler_ };
+}
+
+// Resolve the description that should ship in the per-turn `<tools>`
+// block (or in the OpenAI tools array on /v1/chat/completions). Order:
+//
+//   1. `short_description` if the tool set one — the canonical path.
+//   2. otherwise, the first non-empty line of `description`, capped at
+//      120 chars. Lets pre-existing tools work without their authors
+//      having migrated yet; they just lose the "single sentence"
+//      curation until they call `.short_describe(...)` themselves.
+//   3. otherwise, empty.
+std::string Tool::wire_description() const {
+    if (!short_description.empty()) return short_description;
+    if (description.empty())        return std::string();
+
+    constexpr std::size_t kCap = 120;
+    std::size_t i = 0;
+    while (i < description.size() && (description[i] == ' '  ||
+                                       description[i] == '\t' ||
+                                       description[i] == '\n' ||
+                                       description[i] == '\r')) ++i;
+    std::size_t start = i;
+    while (i < description.size() && description[i] != '\n' && (i - start) < kCap) ++i;
+    std::size_t end = i;
+    while (end > start && (description[end - 1] == ' '  ||
+                            description[end - 1] == '\t' ||
+                            description[end - 1] == '\r')) --end;
+    if (end == start) return std::string();
+    std::string out = description.substr(start, end - start);
+    if (end == start + kCap && end < description.size()
+        && description[end] != '\n' && description[end] != '\0') {
+        // Mid-word truncation — back off to the last word boundary.
+        std::size_t last_sp = out.find_last_of(" \t");
+        if (last_sp != std::string::npos && last_sp > 0) out.resize(last_sp);
+        out += "…";
+    }
+    return out;
 }
 
 // --------------------------------------------------------------------------

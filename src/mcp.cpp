@@ -98,16 +98,82 @@ json tool_input_schema(const Tool & t) {
 
 // Render one tool as an MCP tool descriptor (the per-entry shape
 // of the array `tools/list` returns).
+//
+// Unlike the per-turn `<tools>` block sent to a local model (where we
+// ship Tool::wire_description to save context tokens), MCP clients own
+// their own model and context budget. The full multi-line description
+// is the right thing to hand them — they can decide whether to truncate
+// it for their model. If a tool only set `short_description`, we fall
+// back to that so we always emit *something* the client can show.
 json tool_descriptor(const Tool & t) {
     json e;
     e["name"]        = t.name;
-    e["description"] = t.description;
+    e["description"] = !t.description.empty() ? t.description
+                                              : t.wire_description();
     e["inputSchema"] = tool_input_schema(t);
     return e;
 }
 
-// `initialize`: advertise capabilities + serverInfo.
-json handle_initialize(const json & /*params*/, const ServerInfo & info) {
+// MCP `initialize.result.instructions` — a free-text block the MCP
+// spec lets servers surface to the client's model.  Well-behaved
+// clients (Claude Desktop, Cursor) inject this into their own system
+// prompt, so it's the right place to assert the same write/edit
+// policy the local-model path enforces via preamble::tools_block:
+//
+//   - python3 is COMPUTE-only, never disk writes/edits.
+//   - fs and bash are the write-authorised tools.
+//   - closed-set rule: only the tools advertised by tools/list exist.
+//
+// The block is keyed off the active tool set so we don't tell the
+// client "use bash for writes" when bash isn't registered.
+std::string build_instructions(const std::vector<Tool> & tools) {
+    bool has_python  = false;
+    bool has_fs      = false;
+    bool has_bash    = false;
+    for (const auto & t : tools) {
+        if      (t.name == "python3") has_python = true;
+        else if (t.name == "fs")      has_fs     = true;
+        else if (t.name == "bash")    has_bash   = true;
+    }
+
+    std::string s;
+    s += "easyai MCP server. Call ONLY tools listed in tools/list — no "
+         "paraphrases (`read_file` is not `fs`; `shell` is not `bash`). "
+         "If a name isn't in tools/list, it does NOT exist on this "
+         "server; do not invent calls.\n";
+    if (has_python || has_fs || has_bash) {
+        s += "\nWrite/edit policy:\n";
+        if (has_python) {
+            s += "  - `python3` is for COMPUTE / algorithm testing only "
+                 "— READ-ONLY on disk. Every write-mode open() is "
+                 "rejected even inside the sandbox.\n";
+        }
+        if (has_fs) {
+            s += "  - `fs(action=\"write\"|\"edit\"|\"append\")` is the "
+                 "authoritative tool for file creation, modification, "
+                 "and deletion.\n";
+        }
+        if (has_bash) {
+            s += "  - `bash` is allowed to write files (redirects, "
+                 "`sed -i`, `mkdir`); use it for shell features `fs` "
+                 "can't do.\n";
+        }
+        if (has_python && (has_fs || has_bash)) {
+            s += "  - On the first PermissionError from `python3`, "
+                 "switch to ";
+            if (has_fs && has_bash) s += "`fs` or `bash`";
+            else if (has_fs)        s += "`fs`";
+            else                    s += "`bash`";
+            s += " — do not retry the python call.\n";
+        }
+    }
+    return s;
+}
+
+// `initialize`: advertise capabilities + serverInfo + free-text
+// instructions for the client's model.
+json handle_initialize(const json & /*params*/, const ServerInfo & info,
+                       const std::vector<Tool> & tools) {
     json caps;
     json tools_cap;
     tools_cap["listChanged"] = false;   // no hot-reload notifications
@@ -123,6 +189,9 @@ json handle_initialize(const json & /*params*/, const ServerInfo & info) {
     result["protocolVersion"] = info.protocol_version;
     result["capabilities"]    = std::move(caps);
     result["serverInfo"]      = std::move(server_info);
+
+    std::string instructions = build_instructions(tools);
+    if (!instructions.empty()) result["instructions"] = std::move(instructions);
     return result;
 }
 
@@ -332,7 +401,7 @@ std::string handle_request(const std::string &       request_body,
     // ----- methods that produce results -----
     try {
         if (method == "initialize") {
-            return make_result(id, handle_initialize(params, info)).dump();
+            return make_result(id, handle_initialize(params, info, tools)).dump();
         }
         if (method == "tools/list") {
             return make_result(id, handle_tools_list(params, tools)).dump();

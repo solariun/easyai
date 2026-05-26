@@ -18,6 +18,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -628,6 +629,9 @@ static bool http_post_form(const std::string & url,
 // ============================================================================
 Tool datetime() {
     return Tool::builder("datetime")
+        .short_describe(
+            "Return the current UTC and local date/time. Call for "
+            "'now'/'today'/'latest' or before date math.")
         .describe(
             "Current date and time. No parameters.\n"
             "\n"
@@ -1566,6 +1570,9 @@ std::vector<Tool> web_split(bool google_enabled) {
     out.reserve(2);
 
     out.push_back(Tool::builder("web_search")
+        .short_describe(
+            "Search the web — returns title/url/snippet list. Fetch "
+            "the top 1-3 URLs after. Reply MUST cite Sources.")
         .describe(
             "Search the web. Returns a numbered title/url/snippet "
             "list. After searching, fetch the top 1-3 URLs — "
@@ -1597,6 +1604,9 @@ std::vector<Tool> web_split(bool google_enabled) {
         .build());
 
     out.push_back(Tool::builder("web_fetch")
+        .short_describe(
+            "Fetch one URL — returns its stripped text. Cite the URL "
+            "in your reply's `Sources:` block.")
         .describe(
             "Fetch a URL and return its text (HTML stripped by "
             "default). When the response is truncated the marker "
@@ -1628,6 +1638,9 @@ std::vector<Tool> web_split(bool google_enabled) {
 
 Tool web(bool google_enabled) {
     return Tool::builder("web")
+        .short_describe(
+            "Search the web and fetch URLs. action=search|fetch. "
+            "Reply MUST end with a `Sources:` block listing URLs used.")
         .describe(
             "Web search and fetch — pick an action.\n"
             "Arguments are PLAIN JSON — no XML tags, no markup.\n"
@@ -3126,6 +3139,9 @@ Tool fs(std::string root) {
         };
 
     return Tool::builder("fs")
+        .short_describe(
+            "Filesystem: read/write/edit/list/glob/grep in sandbox. "
+            "Batch with action=\"ops\" (50 ops / 20 files). Writes only via fs/bash.")
         .describe(
             "Filesystem — one tool, ten actions + batch mode.\n"
             "\n"
@@ -3183,11 +3199,31 @@ Tool fs(std::string root) {
             "only for user-facing paths or external commands; for "
             "fs/bash work pass RELATIVE paths.\n"
             "\n"
-            "BATCH: pass `ops` (array of 1..20 op objects, each with "
-            "`action` plus its params) instead of `action`. Same-path "
-            "edits auto-reorder bottom-up so line numbers stay "
-            "consistent. Pass continue_on_error=true to keep going "
-            "after a failed op."
+            "BATCH: pass `ops` (array of 1..50 op objects, each with "
+            "`action` plus its params) instead of `action`. Hard "
+            "caps per call: 50 ops total AND 20 distinct file paths "
+            "(only ops that name a `path` count — `cwd`/`sandbox`/"
+            "`glob`/`grep`/`list` are free). Same-path edits "
+            "auto-reorder bottom-up so each `start_line` refers to "
+            "the file's ORIGINAL line numbers (no manual offset math). "
+            "Pass continue_on_error=true to keep going after a failed "
+            "op; default is stop-on-first.\n"
+            "\n"
+            "BATCH EXAMPLE — three edits to one file plus a write:\n"
+            "  {\"ops\":[\n"
+            "    {\"action\":\"edit\",\"path\":\"a.c\",\"start_line\":5,\"end_line\":5,\"content\":\"  int x = 0;\\n\"},\n"
+            "    {\"action\":\"edit\",\"path\":\"a.c\",\"start_line\":20,\"end_line\":25,\"content\":\"\"},\n"
+            "    {\"action\":\"edit\",\"path\":\"a.c\",\"start_line\":42,\"end_line\":42,\"content\":\"// done\\n\"},\n"
+            "    {\"action\":\"write\",\"path\":\"NOTES.md\",\"content\":\"refactor pass 1\\n\"}\n"
+            "  ]}\n"
+            "\n"
+            "BATCH RESPONSE: header line names the touched files; each "
+            "op gets one report line `[i/N] ok|err action path: …`. "
+            "Successful reads are clipped to 2 KiB per op (re-issue a "
+            "single read for full content). Failed ops show the full "
+            "error so you can self-correct without re-running. "
+            "Hitting the 50-op or 20-file cap → split into multiple "
+            "batches (e.g. one batch per file, or chunks of 25)."
         )
         .param("action",            "string",
                "Required unless `ops` is set. One of: \"read\", "
@@ -3195,9 +3231,10 @@ Tool fs(std::string root) {
                "\"grep\", \"check_path\", \"cwd\", \"sandbox\".",
                false)
         .param("ops",               "array",
-               "Batch mode: 1..20 op objects, each with `action` plus "
-               "its params. Set `ops` OR `action`, not both. Same-"
-               "path edits auto-reorder bottom-up.", false)
+               "Batch mode: 1..50 op objects, each with `action` plus "
+               "its params. Set `ops` OR `action`, not both. Hard "
+               "caps: 50 ops AND 20 distinct file paths per call. "
+               "Same-path edits auto-reorder bottom-up.", false)
         .param("continue_on_error", "boolean",
                "Batch only. Keep running after a failed op. Default "
                "false.", false)
@@ -3286,11 +3323,21 @@ Tool fs(std::string root) {
             if (ops_arr.empty()) {
                 return ToolResult::error("ops array is empty");
             }
-            if (ops_arr.size() > 20) {
+            // Per-call hard caps. Raised from 20→50 ops on 2026-05-26
+            // and a NEW 20-distinct-files cap added so a runaway model
+            // can't blast 50 different files in one call by accident.
+            // The file cap is computed only over ops that actually
+            // name a `path` — cwd / sandbox / glob / grep / list are
+            // "free" (they don't bind to a single file).
+            constexpr size_t kMaxBatch         = 50;
+            constexpr size_t kMaxDistinctFiles = 20;
+            if (ops_arr.size() > kMaxBatch) {
                 return ToolResult::error(
                     "ops array has " + std::to_string(ops_arr.size())
-                    + " items; cap is 20 per call. Split into multiple "
-                    "calls.");
+                    + " items; cap is " + std::to_string(kMaxBatch)
+                    + " per call. Split into multiple calls "
+                    "(e.g. one per file, or chunks of "
+                    + std::to_string(kMaxBatch / 2) + ").");
             }
             const bool continue_on_error =
                 parsed.contains("continue_on_error")
@@ -3300,7 +3347,11 @@ Tool fs(std::string root) {
             // Pre-validate every op so we can surface schema errors
             // up front (no half-batched state from a 5th malformed op).
             // Each op must be an object with a string `action` field.
+            // Also collect the set of distinct paths so the file-cap
+            // and the batch-header summary share one walk of the array.
             const size_t N = ops_arr.size();
+            std::vector<std::string> file_order;     // insertion order
+            std::set<std::string>    file_seen;
             for (size_t i = 0; i < N; ++i) {
                 if (!ops_arr[i].is_object()) {
                     return ToolResult::error(
@@ -3313,6 +3364,21 @@ Tool fs(std::string root) {
                         "ops[" + std::to_string(i)
                         + "] is missing string field \"action\"");
                 }
+                if (ops_arr[i].contains("path")
+                        && ops_arr[i]["path"].is_string()) {
+                    const std::string p = ops_arr[i]["path"].get<std::string>();
+                    if (!p.empty() && file_seen.insert(p).second) {
+                        file_order.push_back(p);
+                    }
+                }
+            }
+            if (file_order.size() > kMaxDistinctFiles) {
+                return ToolResult::error(
+                    "ops touches " + std::to_string(file_order.size())
+                    + " distinct files; cap is "
+                    + std::to_string(kMaxDistinctFiles)
+                    + " per call. Split into multiple calls — group "
+                    "ops by file so each batch stays under the cap.");
             }
 
             // Compute execute order. Same-path edits are reordered
@@ -3355,6 +3421,35 @@ Tool fs(std::string root) {
 
             // Run.
             std::ostringstream out;
+
+            // Batch header — names the touched files in insertion
+            // order so the model can verify it dispatched against the
+            // right set before reading per-op statuses. Listing 1..20
+            // file names is bounded so we render them all.
+            out << "batch: " << N << " op" << (N == 1 ? "" : "s")
+                << " across " << file_order.size()
+                << " file" << (file_order.size() == 1 ? "" : "s");
+            if (!file_order.empty()) {
+                out << " (";
+                for (size_t i = 0; i < file_order.size(); ++i) {
+                    if (i) out << ", ";
+                    out << file_order[i];
+                }
+                out << ")";
+            }
+            out << "\n";
+
+            // Per-op output rules:
+            //   * Successful read in a batch is clipped at 2 KiB so a
+            //     50-op batch of reads can't blow up to multi-MB; the
+            //     model re-issues a standalone read for full content.
+            //   * Failed ops show the full error body (small models
+            //     can self-correct without re-running).
+            //   * All other ok bodies fit in a few hundred bytes
+            //     naturally (write returns "wrote N bytes", edit
+            //     returns "replaced lines …"), no clipping needed.
+            constexpr std::size_t kBatchReadClip = 2048;
+
             int ok_count = 0;
             int err_count = 0;
             size_t ran = 0;
@@ -3388,11 +3483,21 @@ Tool fs(std::string root) {
                 }
                 out << ": ";
 
+                // Apply per-op clipping rules.
+                std::string body = r.content;
+                bool clipped = false;
+                if (!r.is_error && action == "read"
+                        && body.size() > kBatchReadClip) {
+                    body.resize(kBatchReadClip);
+                    clipped = true;
+                }
+
                 // First line of the op's body — keep the per-op line
                 // tight; the model sees the full op content via the
                 // continuation block below for edits / read /
-                // check_path that produce multi-line output.
-                std::string body = r.content;
+                // check_path that produce multi-line output. Errors
+                // ALWAYS show the full body (the model needs the
+                // diagnostic to self-correct on the next call).
                 size_t nl = body.find('\n');
                 if (nl == std::string::npos) {
                     out << body << "\n";
@@ -3424,6 +3529,12 @@ Tool fs(std::string root) {
                             out << "\n";
                         }
                     }
+                }
+                if (clipped) {
+                    out << "    [read clipped at "
+                        << kBatchReadClip
+                        << " bytes; re-issue a standalone read for "
+                        "full content]\n";
                 }
 
                 ++ran;
@@ -3912,6 +4023,9 @@ ToolResult run_capped_subprocess(
 Tool bash(std::string root, bool show_output) {
     auto sb = std::make_shared<Sandbox>(std::move(root));
     return Tool::builder("bash")
+        .short_describe(
+            "Run a shell command (`/bin/sh -c`). Allowed to write files "
+            "(redirects, sed -i, mkdir). Use for pipes/build/git/sed/awk.")
         .describe(
             "Run a shell command via `/bin/sh -c`. stdout and stderr "
             "are merged. cwd is pinned to the sandbox root; use "
@@ -3978,29 +4092,38 @@ Tool bash(std::string root, bool show_output) {
 // generated code fails loudly instead of silently leaking host data.
 // ============================================================================
 
-// Python preamble auto-prepended to every snippet. Locks open()/os.open()
-// to the sandbox root (cwd at exec time). Identifiers are `_e_*`-prefixed
-// to avoid colliding with any reasonable user code.
+// Python preamble auto-prepended to every snippet.  Enforces two
+// invariants:
 //
-// All references to the raw original open() functions AND the sandbox
-// root path are captured as parameters of `_e_make_wrappers`, then bound
-// into the closure cells of `_e_open` / `_e_os_open`. Module-scope names
-// (`_e_root`, `_e_open_orig`, `_e_os_open_orig`, `_e_chk`) are deleted
-// after wiring so a snippet cannot reach them by name to bypass the
-// check (`open` is also straightforward — but `_e_open_orig` used to be
-// trivially callable from user code at module scope, undoing the
-// protection).
+//   1. SANDBOX ROOT — open() / io.open() / os.open() reject any path
+//      that resolves outside the sandbox root (the cwd Python is chdir'd
+//      into before exec).
+//
+//   2. READ-ONLY — even inside the sandbox, any write-mode open is
+//      rejected.  builtins.open / io.open: any mode containing `w`,
+//      `a`, `x`, or `+`.  os.open: any flags with O_WRONLY, O_RDWR,
+//      O_CREAT, O_TRUNC, or O_APPEND set.  The python3 tool is for
+//      COMPUTE and ALGORITHM TESTING only; disk writes/edits flow
+//      through fs(action=...) or bash.
+//
+// Identifiers are `_e_*`-prefixed to avoid colliding with reasonable
+// user code.  Module-scope helpers (`_e_root`, `_e_open_orig`,
+// `_e_os_open_orig`, `_e_make_wrappers`) are deleted after wiring so
+// a snippet cannot reach them by name to bypass the check.
 //
 // This is still NOT a hardened sandbox: a determined snippet can bypass
 // via `import ctypes; ctypes.CDLL("libc.so.6").open(...)`, `os.system`,
-// `subprocess`, `_io.FileIO("/etc/passwd")`, or by re-importing modules
-// and mutating their internals. The preamble defends against ACCIDENT
-// (a stray `open("/etc/hosts")` in generated code) and against the
-// trivial discoverable-by-name bypass — not against adversarial intent.
+// `subprocess`, `_io.FileIO("/etc/passwd", "wb")`, or by re-importing
+// modules and mutating their internals.  The preamble defends against
+// ACCIDENT (a stray `open("out.txt", "w")` in generated code) and
+// against the trivial discoverable-by-name bypass — not against
+// adversarial intent.
 static const char * const kPythonSandboxPreamble =
     "import os as _e_os, builtins as _e_b, io as _e_io\n"
     "def _e_make_wrappers(_e_root, _e_open_orig, _e_os_open_orig):\n"
-    "    def _e_chk(p):\n"
+    "    _e_wmask = (_e_os.O_WRONLY | _e_os.O_RDWR | _e_os.O_CREAT |\n"
+    "                _e_os.O_TRUNC  | _e_os.O_APPEND)\n"
+    "    def _e_chk_path(p):\n"
     "        if isinstance(p, int): return\n"
     "        try: s = _e_os.fspath(p)\n"
     "        except TypeError: return\n"
@@ -4015,10 +4138,30 @@ static const char * const kPythonSandboxPreamble =
     "                'root ' + repr(_e_root) + '). The python3 tool is for '\n"
     "                'compute / network / data only — use fs(action=...) for '\n"
     "                'disk work.')\n"
-    "    def _e_open(f, *a, **k):\n"
-    "        _e_chk(f); return _e_open_orig(f, *a, **k)\n"
-    "    def _e_os_open(p, *a, **k):\n"
-    "        _e_chk(p); return _e_os_open_orig(p, *a, **k)\n"
+    "    def _e_chk_mode(mode):\n"
+    "        if not isinstance(mode, str): return\n"
+    "        for ch in mode:\n"
+    "            if ch in 'waWAxX+':\n"
+    "                raise PermissionError(\n"
+    "                    'easyai sandbox: write-mode open(' + repr(mode) +\n"
+    "                    \") denied. python3 is READ-ONLY on disk — use \"\n"
+    "                    \"fs(action='write'|'edit'|'append') or bash for \"\n"
+    "                    'writes.')\n"
+    "    def _e_chk_flags(flags):\n"
+    "        try: f = int(flags)\n"
+    "        except (TypeError, ValueError): return\n"
+    "        if f & _e_wmask:\n"
+    "            raise PermissionError(\n"
+    "                'easyai sandbox: os.open with write flags denied. '\n"
+    "                \"python3 is READ-ONLY on disk — use \"\n"
+    "                \"fs(action='write'|'edit'|'append') or bash for \"\n"
+    "                'writes.')\n"
+    "    def _e_open(f, mode='r', *a, **k):\n"
+    "        _e_chk_path(f); _e_chk_mode(mode)\n"
+    "        return _e_open_orig(f, mode, *a, **k)\n"
+    "    def _e_os_open(p, flags, *a, **k):\n"
+    "        _e_chk_path(p); _e_chk_flags(flags)\n"
+    "        return _e_os_open_orig(p, flags, *a, **k)\n"
     "    return _e_open, _e_os_open\n"
     "_e_o, _e_oo = _e_make_wrappers(\n"
     "    _e_os.path.realpath(_e_os.getcwd()), _e_b.open, _e_os.open)\n"
@@ -4031,9 +4174,20 @@ static const char * const kPythonSandboxPreamble =
 Tool python3(std::string root, bool show_output) {
     auto sb = std::make_shared<Sandbox>(std::move(root));
     return Tool::builder("python3")
+        .short_describe(
+            "Run a Python 3 snippet for COMPUTE / algorithm testing "
+            "only. READ-ONLY disk. Writes/edits go through fs or bash.")
         .describe(
             "Run a Python 3 snippet via `python3 -I -S -E -c <code>`. "
             "Captured stdout+stderr is the tool output.\n"
+            "\n"
+            "COMPUTE & ALGORITHM TESTING ONLY. NEVER use this tool to "
+            "create, write, modify, append, or delete files — every "
+            "write-mode open() is rejected even inside the sandbox. "
+            "For any disk write/edit use `fs(action=\"write\"|\"edit\"|"
+            "\"append\")`; for shell-level edits use `bash`. Read-only "
+            "open() works inside the sandbox so you can still load a "
+            "CSV/JSON, compute, and print the result.\n"
             "\n"
             "STDLIB ONLY — no third-party packages, no PYTHON* env, "
             "no cwd on sys.path. Available: json, re, statistics, "
@@ -4043,11 +4197,8 @@ Tool python3(std::string root, bool show_output) {
             "\n"
             "Use for: arithmetic, JSON/CSV wrangling, regex, date "
             "math, hashing, HTTP fetches (urllib.request), socket "
-            "probes — anything painful in shell.\n"
-            "\n"
-            "NOT for disk — use fs(action=...) instead. open() / "
-            "io.open() / os.open() are locked to the sandbox root and "
-            "raise PermissionError for paths outside it.\n"
+            "probes, sanity-checking an algorithm before you put it "
+            "into source via fs/bash.\n"
             "\n"
             "ALWAYS print() what you want returned. Snippets that "
             "don't print come back with just `exit=0`.\n"
@@ -4164,13 +4315,23 @@ Tool tool_lookup(ToolListGetter get_tools) {
             .build();
     }
     return Tool::builder("tool_lookup")
+        .short_describe(
+            "List or inspect tools registered this session. No args → "
+            "index; name=\"<substring>\" → full manual for matches.")
         .describe(
-            "List every tool wired up in THIS session. The single "
-            "source of truth for what you can call.\n"
+            "List or inspect every tool wired up in THIS session. The "
+            "single source of truth for what you can call AND what each "
+            "tool actually does.\n"
             "\n"
-            "No arguments → full catalogue (numbered, one line each).\n"
-            "name=\"<substring>\" → filter by tool name "
-            "(case-insensitive, partial).\n"
+            "Two modes:\n"
+            "  - No arguments → INDEX: numbered list of `name: short "
+            "description` (one line per tool). Cheap, scannable.\n"
+            "  - name=\"<substring>\" → MANUAL: full multi-line "
+            "description for every tool whose name matches the "
+            "substring (case-insensitive, partial). This is the "
+            "expanded help text — schema rules, examples, edge cases. "
+            "Use this when the short description in the tools block "
+            "isn't enough to call confidently.\n"
             "\n"
             "If a name is NOT in this list, IT DOES NOT EXIST here — "
             "no fallback, no implicit import. Calling an unlisted "
@@ -4185,7 +4346,7 @@ Tool tool_lookup(ToolListGetter get_tools) {
         )
         .param("name", "string",
                "Substring filter over tool names (case-insensitive). "
-               "Omit or pass \"\" for the full catalogue.",
+               "Omit or pass \"\" for the index view.",
                false)
         .handle([get_tools](const ToolCall & c) -> ToolResult {
             std::string filter = args::get_string_or(c.arguments_json, "name", "");
@@ -4214,38 +4375,55 @@ Tool tool_lookup(ToolListGetter get_tools) {
                 return ToolResult::ok("(no tools registered in this session)");
             }
 
+            // Pick the description style based on the call shape:
+            //   * No filter → INDEX view (short trigger, one line each).
+            //   * With filter → MANUAL view (full multi-line description
+            //     for every match). Falls back to short_description when
+            //     a tool didn't author a full one.
+            const bool manual_view = !flt.empty();
+
             std::ostringstream out;
             int n = 0;
-            for (const auto & [name, desc] : catalog) {
-                if (!flt.empty() && lower(name).find(flt) == std::string::npos) {
+            for (const auto & e : catalog) {
+                if (manual_view && lower(e.name).find(flt) == std::string::npos) {
                     continue;
                 }
                 ++n;
-                // Compress the description's first paragraph so the
-                // output stays scannable when listing all tools.  Models
-                // that need the full description can call the tool again
-                // (and we can revisit if "summary mode by default" hurts
-                // recall), but in practice the first line is what they
-                // need to decide whether to dispatch.
-                std::string summary = desc;
-                size_t nl = summary.find('\n');
-                if (nl != std::string::npos) summary.erase(nl);
-                summary = trim(summary);
-                if (summary.empty()) summary = "(no description)";
-
-                out << n << ". " << name << ": " << summary << '\n';
+                if (manual_view) {
+                    const std::string & body =
+                        !e.full_description.empty() ? e.full_description
+                                                    : e.short_description;
+                    out << "## " << e.name << "\n";
+                    if (body.empty()) out << "(no description)\n";
+                    else {
+                        out << body;
+                        if (body.back() != '\n') out << '\n';
+                    }
+                    out << '\n';
+                } else {
+                    std::string summary = e.short_description;
+                    if (summary.empty()) {
+                        // Pre-Shape-C tool — synthesise a one-liner
+                        // from the full description so the index
+                        // still renders meaningfully.
+                        summary = e.full_description;
+                        std::size_t nl = summary.find('\n');
+                        if (nl != std::string::npos) summary.erase(nl);
+                        summary = trim(summary);
+                    }
+                    if (summary.empty()) summary = "(no description)";
+                    out << n << ". " << e.name << ": " << summary << '\n';
+                }
             }
 
             if (n == 0) {
                 return ToolResult::ok(
                     "(no tools match: \"" + filter + "\")\n"
-                    "(call tool_lookup with no `name` to see everything available)");
+                    "(call tool_lookup with no `name` to see the index)");
             }
-            // Trailing context line so the model never confuses
-            // "filtered subset" with "complete list".
-            if (!flt.empty()) {
-                out << "\n(filtered by name=\"" << filter << "\"; "
-                    << "call tool_lookup with no `name` to see everything)";
+            if (manual_view) {
+                out << "(manual view for name=\"" << filter << "\"; "
+                    << "call tool_lookup with no `name` for the full index)";
             }
             return ToolResult::ok(out.str());
         })

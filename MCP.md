@@ -104,7 +104,7 @@ Methods we currently implement:
 
 | Method | What it does |
 | --- | --- |
-| `initialize` | Handshake. Server returns `capabilities`, `serverInfo`, and the protocol version it supports (`2024-11-05`). |
+| `initialize` | Handshake. Server returns `capabilities`, `serverInfo`, the protocol version it supports (`2024-11-05`), and (since 2026-05-26) a free-text `instructions` field carrying the closed-set rule + write/edit policy (see §2a below). |
 | `tools/list` | Enumerate every registered tool as `{ name, description, inputSchema }`. |
 | `tools/call` | Dispatch a tool by name with `arguments` (object). Returns `{ content: [{type:"text", text}], isError }`. |
 | `ping` | Cheap round-trip to confirm reachability. |
@@ -151,10 +151,39 @@ Expected:
   "result": {
     "protocolVersion": "2024-11-05",
     "capabilities": { "tools": { "listChanged": false } },
-    "serverInfo": { "name": "easyai-server", "version": "0.1.0" }
+    "serverInfo": { "name": "easyai-server", "version": "0.1.0" },
+    "instructions": "easyai MCP server. Call ONLY tools listed in tools/list — no paraphrases (`read_file` is not `fs`; `shell` is not `bash`). If a name isn't in tools/list, it does NOT exist on this server; do not invent calls.\n\nWrite/edit policy:\n  - `python3` is for COMPUTE / algorithm testing only — READ-ONLY on disk. Every write-mode open() is rejected even inside the sandbox.\n  - `fs(action=\"write\"|\"edit\"|\"append\")` is the authoritative tool for file creation, modification, and deletion.\n  - `bash` is allowed to write files (redirects, `sed -i`, `mkdir`); use it for shell features `fs` can't do.\n  - On the first PermissionError from `python3`, switch to `fs` or `bash` — do not retry the python call.\n"
   }
 }
 ```
+
+### 2a. `initialize.instructions` — the closed-set + write/edit policy
+
+The MCP spec defines `result.instructions` as a free-text hint a
+server may surface to the client's model. easyai-server populates
+it with:
+
+1. The **closed-set rule** — "call ONLY tools listed in
+   `tools/list`; no paraphrases (`read_file` is not `fs`; `shell`
+   is not `bash`)".
+2. The **write/edit policy**, keyed off which write/exec tools the
+   server actually registered:
+   - `python3` is COMPUTE-only, READ-ONLY on disk (sandbox preamble
+     rejects write-mode `open()` regardless of path).
+   - `fs(action="write"|"edit"|"append")` is the authoritative writer.
+   - `bash` is allowed to write files (redirects, `sed -i`, `mkdir`).
+3. The **recovery rule** — "on the first `PermissionError` from
+   `python3`, switch to `fs`/`bash`; do not retry the python call".
+
+Well-behaved MCP clients (Claude Desktop, Cursor) inject this text
+into their model's system prompt automatically. Non-conforming
+clients ignore it harmlessly — the policy still holds at the tool
+level (python3 raises PermissionError regardless of what the model
+was told).
+
+The text reshapes itself based on the live toolset: with
+`--no-python` the python paragraph drops out, with `--allow-bash`
+off the bash paragraph drops out, and so on.
 
 ### List tools
 

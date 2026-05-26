@@ -602,32 +602,38 @@ information `get_current_dir` and `get_sandbox_path` used to as
 standalone tools — `cwd` is the process's live working directory (can
 drift), `sandbox` is the configured root pinned at registration.
 
-### Why the closed-set rule is in three places
+### Closed-set rule + tools block: consolidated in libeasyai (2026-05-26)
 
-The `[tool-discipline]` rule appears in three independent prompt
-builders, which looks like duplication but is deliberate:
+The `[tool-discipline]` rule and the active-tools enumeration both
+moved into libeasyai as `easyai::preamble::tools_block(view)`.
+`easyai::preamble::build_builtin_system_prompt(view)` calls it
+inline so server and local stay byte-identical without
+hand-syncing two 180-line copies of the same prompt. `easyai-cli`
+calls `tools_block(view)` directly from its prefix builder,
+populating `view.active_tools` from a live `/v1/tools` fetch
+against the configured server.
 
-1. **`build_builtin_system_prompt` (server.cpp + local.cpp)** —
-   carries the rule when the operator hasn't supplied a custom
-   prompt. The rule lives ABOVE the gated `Tool notes:` section,
-   so it applies whether or not any tools are registered.
-2. **`easyai-cli` prefix injection** — when the cli sends its
-   own system message (because `[environment]` / `[guidance]` /
-   `[unattended]` fired), it REPLACES whatever the server would
-   have used.  Without `[tool-discipline]` riding along, the
-   model stops seeing the rule and the failure mode returns.
+So the rule lives in **one** place in the source — multiple
+emitters render it at the right boundary:
+
+1. **`preamble::build_builtin_system_prompt(view)`** — the server
+   and local binaries' wrapper builders just construct a
+   `ToolsetView` from their argument structs and delegate.
+2. **`easyai-cli` prefix injection** — calls `tools_block(view)`
+   directly; the view's `active_tools` carries the server's
+   actual catalogue so the bullet list isn't a guess.
 3. **`scripts/install_easyai_server.sh` system.txt template** —
-   when the operator un-comments `[SERVER] system_file` to take
-   over the persona, the operator's file replaces the binary's
-   built-in.  Shipping the rule in the template keeps that
-   take-over path safe.
+   the operator's take-over path retains a small inline copy of
+   the closed-set rule so it stays present when the builtin
+   prompt is replaced. (This is the one residual duplication;
+   accepted because the installer template is operator-facing
+   and benefits from being self-contained.)
 
-There's no shared file because the three surfaces have different
-formatting needs (C++ string-literal newlines vs heredoc), and
-the rule is short enough that drift cost is low.  If the rule
-ever grows, the right move is a shared `.txt` resource in
-`include/easyai/prompts/` consumed by all three — but until that
-pressure surfaces, three copies is cheaper than the abstraction.
+Active-tools enumeration is sanitized at render time
+(`sanitize_for_prompt(s, cap)` strips C0+DEL, length-caps name 64
+chars / description 200 chars) so an untrusted `/v1/tools`
+response cannot inject fake authoritative sections via embedded
+newlines. See SECURITY_AUDIT §23.1.
 
 ### Tolerance shims — when the model goes off-spec anyway
 
@@ -878,14 +884,23 @@ namespace easyai::preamble {
         bool        inject_datetime  = true;
         std::string knowledge_cutoff = "2024-10";
         std::string memory_root;        // empty → vocab block omitted
+        bool        cite_sources     = false;
     };
     std::string build(const Options & opt);
+
+    // ToolsetView + the two new builders (2026-05-26) — render the
+    // closed-set rule, the active-tools enumeration, and the
+    // canonical "default" system prompt from a single source of truth.
+    struct ToolsetView { /* booleans + vector<Tool> active_tools */ };
+    std::string tools_block(const ToolsetView & view);
+    std::string build_builtin_system_prompt(const ToolsetView & view);
 }
 ```
 
 `easyai-server`, `easyai-local`, and `easyai-cli` all call the same
-function; the binary picks which blocks make sense for its
-deployment by toggling the option fields.
+helpers; the binary picks which blocks make sense for its
+deployment by toggling the option fields and the `ToolsetView`
+booleans.
 
 **What gets injected.** `easyai::preamble::build()` produces a
 system-prompt suffix with up to three blocks, freshly stamped on
@@ -919,6 +934,23 @@ Each block is conditional:
 * Memory vocabulary renders only when `memory_root` is set AND the
   store has at least one tagged entry. Empty store → no block, no
   wasted tokens.
+
+**Block ordering (2026-05-26).** The vocab block is positioned at
+the **tail** of the preamble, AFTER the KNOWLEDGE LOOP and CITE
+SOURCES rules. The vocab is the only block that mutates between
+requests (a `memory(action="save")` shifts the keyword count map),
+so putting it last means a memory write only invalidates the
+SUFFIX of the prompt-eval KV cache. The stable date/cutoff/rules
+prefix stays warm across writes.
+
+`render_memory_vocabulary` itself caches the rendered string by
+`(root_dir, directory mtime, file count)` — warm-path cost is one
+`stat(2)` per request, not a full directory walk. Edge case:
+filesystems with second-resolution mtime can serve up to one
+second of stale vocab on rapid same-second writes that net to
+zero file-count change — accepted because vocab is advisory; the
+actual `memory(action="search")` always hits the live index. See
+SECURITY_AUDIT §23.3.
 
 Cutoff date comes from `--knowledge-cutoff YYYY-MM` (default
 `2024-10`); date format is `strftime("%Y-%m-%d %H:%M:%S %z (%Z)")`.

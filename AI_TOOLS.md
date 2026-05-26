@@ -308,25 +308,35 @@ That is what the model sees. There is no separate "tool channel". The list of to
 A real C++ runtime, internally, prepares the tool list like this before invoking the Jinja engine:
 
 ```cpp
-// engine.cpp:614
+// src/engine.cpp — Pimpl::chat_tools()
 std::vector<common_chat_tool> chat_tools() const {
     std::vector<common_chat_tool> out;
-    for (const auto & t : tools_) {
-        out.push_back({ t.name, t.description, t.parameters_json });
+    for (const auto & t : tools) {
+        // Ships the SHORT trigger (Tool::wire_description) — the long
+        // description stays server-side and is only surfaced when the
+        // model calls `tool_lookup`.  Saves ~2 000 tokens per session
+        // on a typical 7-tool catalogue, no behavioural change.
+        out.push_back({ t.name, t.wire_description(), t.parameters_json });
     }
     return out;
 }
 
-// engine.cpp:626 — called once per generation
-in.messages         = history;
-in.tools            = chat_tools();
-in.tool_choice      = ...;
+// called once per generation
+in.messages            = history;
+in.tools               = chat_tools();
+in.tool_choice         = ...;
 in.parallel_tool_calls = true;
-in.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
+in.reasoning_format    = COMMON_REASONING_FORMAT_AUTO;
 auto rendered = common_chat_templates_apply(templates.get(), in);
 ```
 
-The struct `common_chat_tool` carries the name, description, and JSON schema. The renderer feeds them into the template's `tools` variable. The Jinja code then advertises them. None of this requires anything fancier than a list of plain structs.
+The struct `common_chat_tool` carries the name, *short* description, and JSON schema. The renderer feeds them into the template's `tools` variable; the Jinja code advertises them.
+
+> **Shape-C wire shape.** easyai's `Tool` struct carries TWO description fields:
+> * `short_description` — one-line trigger (≤ 80 chars). Ships in `<tools>` every turn.
+> * `description` — full manual: rules, examples, edge cases. Stays in libeasyai and is returned by `tool_lookup(name="<x>")` when the model needs detail.
+>
+> A tool that doesn't set `short_description` keeps working — `wire_description()` falls back to the first 120 chars of `description`.  Builders use `.short_describe("…")` alongside `.describe("…")`.
 
 ## Chapter 12 — Encoding A Tool Call
 

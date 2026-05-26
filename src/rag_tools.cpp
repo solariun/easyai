@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
@@ -1684,6 +1685,10 @@ Tool make_rag_tool(std::string root_dir) {
     auto h_keywords = make_keywords_handler(store);
 
     return Tool::builder("memory")
+        .short_describe(
+            "Private memory store. action=search|load|append|save|"
+            "list|delete|keywords. Search BEFORE answering from "
+            "knowledge.")
         .describe(
             "Your private memory — one tool, seven actions.\n"
             "Arguments are PLAIN JSON — no XML tags, no markup.\n"
@@ -2054,12 +2059,23 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
 // ---------------------------------------------------------------------------
 // Compact vocabulary snapshot for per-prompt injection.
 //
-// Reuses build_rag_store to load the keyword index off disk on every
-// call (no persistent state held by this function — callers that
-// already have a live RagStore via make_rag_tool pay the duplication
-// in exchange for the simpler API). Fine for the hot path since the
-// directory scan is O(N files) at ~10-50ms for typical stores, while
-// the inference that follows takes seconds.
+// Hot path on `easyai-server`: re-rendered for EVERY chat request so
+// the model always sees the current keyword index.  A naïve impl
+// re-scans the directory each call (~10-50ms on typical stores, more
+// on large ones — measurable next to inference start).
+//
+// Cache strategy: keyed on (root_dir, directory mtime, file count).
+// The mtime of the memory root tracks atomic save/append/delete
+// because those all rename(2) a file into the directory, which bumps
+// the dir's mtime.  File count catches the edge case where two saves
+// in the same second cancel out the mtime change.  On a hit we return
+// the cached string with no disk traversal — cost drops to one
+// stat(2) per request.
+//
+// Cache shape: at most one entry per unique root_dir (the binaries
+// only configure one).  Bounded; no eviction policy needed.  Mutex
+// guards the map; the rendered string is shared by value so callers
+// observe their own copy.
 //
 // Empty store → empty string; the caller decides whether to inject.
 // Caps at the top kCap keywords (currently 40) so token cost stays
@@ -2068,6 +2084,47 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
 // so the model sees a familiar ranking.
 std::string render_memory_vocabulary(const std::string & root_dir) {
     if (root_dir.empty()) return std::string();
+
+    namespace fs = std::filesystem;
+
+    // Probe the directory once.  Both signals come from one stat-like
+    // syscall path (filesystem::last_write_time + directory_iterator
+    // for the count); on a miss we'd do the directory walk anyway, so
+    // this stays cheap on the warm path.
+    std::int64_t dir_mtime_ns = 0;
+    std::size_t  file_count   = 0;
+    {
+        std::error_code ec;
+        auto wt = fs::last_write_time(root_dir, ec);
+        if (!ec) {
+            dir_mtime_ns = wt.time_since_epoch().count();
+        }
+        for (auto it = fs::directory_iterator(root_dir, ec);
+             !ec && it != fs::directory_iterator{};
+             it.increment(ec)) {
+            ++file_count;
+        }
+    }
+
+    struct CacheEntry {
+        std::int64_t mtime_ns = 0;
+        std::size_t  count    = 0;
+        std::string  rendered;
+    };
+    static std::mutex                            cache_mu;
+    static std::map<std::string, CacheEntry>     cache;
+
+    {
+        std::lock_guard<std::mutex> g(cache_mu);
+        auto it = cache.find(root_dir);
+        if (it != cache.end()
+            && it->second.mtime_ns == dir_mtime_ns
+            && it->second.count    == file_count) {
+            return it->second.rendered;        // warm-path copy
+        }
+    }
+
+    // --- miss: do the full scan ---
 
     auto store = build_rag_store(root_dir);
 
@@ -2082,37 +2139,53 @@ std::string render_memory_vocabulary(const std::string & root_dir) {
             }
         }
     }
-    if (counts.empty()) return std::string();
 
-    struct Row { std::string keyword; std::size_t count; };
-    std::vector<Row> rows;
-    rows.reserve(counts.size());
-    for (const auto & [k, n] : counts) rows.push_back({k, n});
-    std::sort(rows.begin(), rows.end(), [](const Row & a, const Row & b) {
-        if (a.count != b.count) return a.count > b.count;
-        return a.keyword < b.keyword;
-    });
+    std::string rendered;
+    if (!counts.empty()) {
+        struct Row { std::string keyword; std::size_t count; };
+        std::vector<Row> rows;
+        rows.reserve(counts.size());
+        for (const auto & [k, n] : counts) rows.push_back({k, n});
+        std::sort(rows.begin(), rows.end(), [](const Row & a, const Row & b) {
+            if (a.count != b.count) return a.count > b.count;
+            return a.keyword < b.keyword;
+        });
 
-    constexpr std::size_t kCap = 40;
-    const std::size_t total_kw = rows.size();
-    const bool truncated = total_kw > kCap;
-    if (truncated) rows.resize(kCap);
+        constexpr std::size_t kCap = 40;
+        const std::size_t total_kw = rows.size();
+        const bool truncated = total_kw > kCap;
+        if (truncated) rows.resize(kCap);
 
-    std::ostringstream o;
-    o << total_entries << " entr"
-      << (total_entries == 1 ? "y" : "ies")
-      << " (most-common first; use your memory-search tool with these "
-      << "keywords to recall — the exact callable name is in your "
-      << "AVAILABLE TOOLS list):\n";
-    for (std::size_t i = 0; i < rows.size(); ++i) {
-        if (i) o << ' ';
-        o << rows[i].keyword << '(' << rows[i].count << ')';
+        // Tool-name-neutral wording: works whether the operator
+        // registered the unified `memory(action=...)` dispatcher or
+        // the split memory_search / memory_keywords / memory_load /
+        // ... family. The model has the exact callable name in its
+        // AVAILABLE TOOLS list.
+        std::ostringstream o;
+        o << total_entries << " entr"
+          << (total_entries == 1 ? "y" : "ies")
+          << " (most-common first; use your memory-search tool with "
+          << "these keywords to recall — the exact callable name is "
+          << "in your AVAILABLE TOOLS list):\n";
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            if (i) o << ' ';
+            o << rows[i].keyword << '(' << rows[i].count << ')';
+        }
+        if (truncated) {
+            o << " …(+" << (total_kw - kCap)
+              << " more; use the memory-keywords tool for the full list)";
+        }
+        rendered = o.str();
     }
-    if (truncated) {
-        o << " …(+" << (total_kw - kCap)
-          << " more; use the memory-keywords tool for the full list)";
+
+    {
+        std::lock_guard<std::mutex> g(cache_mu);
+        CacheEntry & e = cache[root_dir];
+        e.mtime_ns = dir_mtime_ns;
+        e.count    = file_count;
+        e.rendered = rendered;
     }
-    return o.str();
+    return rendered;
 }
 
 }  // namespace easyai::tools

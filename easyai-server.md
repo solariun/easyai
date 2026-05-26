@@ -109,7 +109,7 @@ The HTTP layer, paths, tool gating, MCP auth.
 | `metrics_interval` | int | `--metrics-interval` | `300` | Periodic METRICS log line every N seconds, **ALWAYS ON regardless of `verbose`** since 2026-05-09. Reports CPU%, iowait%, load avg, process RSS + peak, system mem, GPU GTT (Linux/AMD), HTTP in-flight + cumulative reqs / err / bytes, fd usage, AND TCP state breakdown with **explicit `TIME_WAIT N/M ephemeral ports (X.X% [elevated\|HIGH\|CRITICAL])`** so socket exhaustion shows up before connections fail. `0` disables. Default `300` (5 min) — low-overhead enough to leave on permanently; bump down (60, 30, 5) when actively troubleshooting. Lives outside Prometheus `/metrics` so you can tail it from journalctl. |
 | `allow_fs` | bool | `--allow-fs` | `off` | Register the unified `fs` tool (action=`read` / `write` / `list` / `glob` / `grep` / `check_path` / `cwd` / `sandbox`). **`--sandbox` ALONE no longer implies `--allow-fs`** (the sandbox is also the cwd / external-tools root / `fs(action="sandbox")` target — operators legitimately set it while keeping the `fs` tool off). Pass `--allow-fs` explicitly. `--allow-bash` still implies `fs` (bash strictly subsumes it). |
 | `allow_bash` | bool | `--allow-bash` | `off` | Register the `bash` tool. **Not** a hardened sandbox. Note: on the server, `--allow-bash` alone does NOT auto-register `fs` — pass `--allow-fs` alongside if you want both. (The cli / local helpers DO auto-register `fs` whenever `--allow-bash` or `--allow-python` is on, since they treat the operator's intent as "let the model touch files".) |
-| `allow_python` | bool | (no `--allow-python`; `--no-python` flips off) | `on` | Register the `python3` tool — runs snippets via `python3 -I -S -E -c <code>`. **Defaults ON**, auto-registered whenever `--sandbox` is set or `--allow-bash` is on (the embedded webui inherits this since the systemd unit ships with `--sandbox`). Isolated stdlib-only interpreter: no PYTHON* env, no site-packages, no cwd on `sys.path`; third-party imports fail with ModuleNotFoundError. **Disk access auto-restricted to the sandbox root** via a Python preamble that monkey-patches `builtins.open` / `io.open` / `os.open` — `open("/etc/passwd")` raises `PermissionError`. Defense-in-depth, not a hardened sandbox: `import os` / `import socket` / `import subprocess` / `import ctypes` all still work. Pass `--no-python` (or `[SERVER] allow_python = off`) to skip registration. |
+| `allow_python` | bool | (no `--allow-python`; `--no-python` flips off) | `on` | Register the `python3` tool — runs snippets via `python3 -I -S -E -c <code>`. **Defaults ON**, auto-registered whenever `--sandbox` is set or `--allow-bash` is on (the embedded webui inherits this since the systemd unit ships with `--sandbox`). Isolated stdlib-only interpreter: no PYTHON* env, no site-packages, no cwd on `sys.path`; third-party imports fail with ModuleNotFoundError. **READ-ONLY disk surface (2026-05-26)**: the Python preamble wraps `builtins.open` / `io.open` / `os.open` to reject (a) any path resolving outside the sandbox root AND (b) any write-mode call (`'w'/'a'/'x'/'+'` mode chars, or `O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND` flags) regardless of path. Both `open("/etc/passwd")` AND `open("inside-sandbox.txt", "w")` raise `PermissionError` naming the right alternative (`fs(action="write"\|"edit"\|"append")` or `bash`). Read-only opens inside the sandbox still work. Defense-in-depth, not a hardened sandbox: `import os` / `import socket` / `import subprocess` / `import ctypes` all still work (closure-cell introspection also bypasses — see SECURITY_AUDIT §23.2). Pass `--no-python` (or `[SERVER] allow_python = off`) to skip registration. |
 | `use_google` | bool | `--use-google` | `off` | Enable `engine="google"` inside the unified `web` tool (Google Custom Search JSON API), and let the default `engine="auto"` cascade try google as its first hop. Requires `GOOGLE_API_KEY` and `GOOGLE_CSE_ID` env vars. Counts against your Google quota (free tier: 100 queries/day per key). When either env var is missing the auto cascade silently skips google and falls through to brave → ddg-lite → bing → ddg, all four keyless. |
 | `mcp` | string | `--mcp` | (none — MCP client off) | URL of an upstream MCP server to connect to as a CLIENT. Format: `http(s)://host:port` (the `/mcp` endpoint is appended). Tools fetched from the upstream are merged into the local catalogue; local-tool names take precedence on collision. Failure at startup logs a warning and continues with whatever local / `memory` tools were registered. |
 | `mcp_token` | string | `--mcp-token` | (empty) | Bearer token sent on every request to the upstream `mcp` URL. Empty = no `Authorization` header — appropriate when the upstream is in open mode. Don't put a real token in the INI directly if you can help it; load it from a separate file (analogous to how `api_key` is wired through `${EASYAI_API_KEY}` in the systemd installer). |
@@ -378,7 +378,7 @@ unchanged.
 | GET | `/health` | easyai | (open) | `{model, backend, tools, preset, compat:{...}}` — liveness probe. |
 | GET | `/metrics` | easyai | api_key | Prometheus exposition (only when `--metrics` is on). |
 | GET | `/v1/models` | OpenAI | api_key | OpenAI-shape list-models. |
-| GET | `/v1/tools` | easyai | api_key | Tool catalogue for the webui popover. |
+| GET | `/v1/tools` | easyai | api_key | Tool catalogue. Each entry: `{name, description, short_description}`. `description` is the full multi-line manual; `short_description` is the one-line trigger shipped in the per-turn `<tools>` block. `easyai-cli` reads `short_description` to render its prompt prefix; the webui popover reads `description`. Pre-Shape-C consumers see only the `description` field — backward compatible. |
 | POST | `/v1/chat/completions` | OpenAI | api_key | The workhorse — streaming SSE, tools, sampling controls. |
 | POST | `/v1/preset` | easyai | api_key | Swap the ambient preset. |
 | GET | `/api/tags` | Ollama | api_key | Ollama-shape list-models (LobeChat, OpenWebUI in Ollama mode, etc.). |
@@ -820,16 +820,25 @@ Highlights of the work documented in [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md):
 - **`memory` entries written mode 0600** so the OS-level ACL is
   owner-only even if the operator's umask leaves a wider default.
 - **AUTHORITATIVE preamble** appended to whichever system message
-  reaches the model (server's default OR client-supplied). Up to
-  three blocks: `# AUTHORITATIVE DATE/TIME` (anchors "today" to the
-  real wall clock, suppresses post-cutoff hallucination), `# KNOWLEDGE
-  CUTOFF` (explicit rule to verify with a tool or state uncertainty
-  for facts beyond `--knowledge-cutoff`), and `# MEMORY VOCABULARY`
-  (top-40 keyword index when `--memory` is set, so the model can
-  dispatch `memory(action="search")` without first calling
-  `memory(action="keywords")`). Builder lives in libeasyai
-  (`easyai::preamble::build`) and is shared with `easyai-local` and
-  `easyai-cli`.
+  reaches the model (server's default OR client-supplied). Blocks in
+  order: `# AUTHORITATIVE DATE/TIME`, `# KNOWLEDGE CUTOFF`, `# KNOWLEDGE
+  LOOP` (when `--memory` is set), `# CITE SOURCES`, then **at the
+  tail** `# MEMORY VOCABULARY` (top-40 keyword index when `--memory`
+  is set). The vocab block is positioned LAST on purpose so a memory
+  save (which mutates the keyword index) only invalidates the suffix
+  of the prompt-eval KV cache — the stable rules above stay warm.
+  Builder lives in libeasyai (`easyai::preamble::build`) and is shared
+  with `easyai-local` and `easyai-cli`. The vocab itself is cached
+  by `(directory mtime, file count)` so repeat requests pay one
+  `stat(2)`, not a full directory walk.
+- **Default system prompt is also library-owned**:
+  `easyai::preamble::build_builtin_system_prompt(ToolsetView)` —
+  shared between server and local. Renders the "Active tools this
+  session" enumeration from the registry (ground truth, can't drift
+  from what was wired) plus the closed-set rule, the write/edit
+  policy, the information pipeline, and the cite-sources block. The
+  ~180-line copies that used to live in `examples/server.cpp` and
+  `examples/local.cpp` collapsed onto 15-line wrappers.
 - **Auto-generated transaction logs at `/tmp/easyai-<pid>-<epoch>.log`
   are created with `O_EXCL | O_NOFOLLOW | O_CLOEXEC` and mode `0600`.**
   `O_EXCL` makes the create atomic-or-fail so a local attacker can't

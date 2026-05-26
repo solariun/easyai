@@ -302,186 +302,23 @@ static CliArgs parse(int argc, char ** argv) {
 // tools will actually be registered. Naming an unregistered tool here
 // (e.g. bash with allow_bash=off) makes models try to call it.  Mirrors
 // the gating LocalBackend / cli::Toolbelt apply at registration time.
+// Thin wrapper around easyai::preamble::build_builtin_system_prompt.
+// The ~180-line builder this replaced moved into libeasyai so server,
+// local, and cli all stay in lockstep.
 static std::string build_builtin_system_prompt(const CliArgs & args) {
-    // LocalBackend doesn't expose allow_fs separately; cli::Toolbelt's
-    // predicate registers `fs` whenever sandbox is set OR a subprocess
-    // executor (allow_bash / allow_python) is on.
-    const bool fs_on       = !args.sandbox.empty() || args.allow_bash;
-    const bool bash_on     = args.allow_bash;
-    // python3 defaults ON; auto-on under same gate as `fs` (sandbox or
-    // allow_bash); --no-python flips allow_python false to opt out.
-    const bool python_on   = args.allow_python && fs_on;
-    const bool web_on      = true;            // datetime + web are default-on with --no-tools=false
-    const bool datetime_on = true;
-    const bool rag_on      = !args.rag_dir.empty();
+    // LocalBackend gating mirrors cli::Toolbelt::tools(): fs is on
+    // whenever sandbox is set OR a subprocess executor is on.
+    const bool fs_on   = !args.sandbox.empty() || args.allow_bash;
 
-    std::string s;
-    s.reserve(2048);
-
-    s +=
-        "You are a concise, honest assistant. Answer briefly; let the user "
-        "steer.\n"
-        "\n"
-        "Answer directly for greetings, chitchat, math, and anything you "
-        "already know — no tool needed.\n"
-        "\n"
-        "When a request truly needs work, run a tight loop:\n"
-        "  1. Plan ONE small concrete next step (not a roadmap).\n"
-        "  2. Act — call the tool in the same turn. Never announce a "
-        "tool call without making it (\"I'll search…\" without the call "
-        "is forbidden).\n"
-        "  3. Read the result, then finish or take ONE more step.\n"
-        "Stop as soon as you have something useful. Prefer a short answer "
-        "the user can refine over a long pre-committed plan.\n"
-        "\n"
-        "## Tools — closed set\n"
-        "Your tools are EXACTLY those listed in your tools schema for "
-        "this session. Do NOT invent tools. Anything you remember from "
-        "other AI systems or training that isn't in the schema is NOT "
-        "available — including paraphrases (`read_file` is not `fs`; "
-        "you must use `fs(action=\"read\")`; `shell` is not `bash`).\n"
-        "\n"
-        "Uncertain whether a name is registered? Call `tool_lookup` "
-        "first. With no argument it returns the full numbered "
-        "catalogue; with `name=\"<substring>\"` it confirms or denies a "
-        "specific name (case-insensitive partial match). A no-match "
-        "result is authoritative — do not retry with variations.\n"
-        "\n"
-        "If a request needs a capability with no matching tool, do the "
-        "work in your visible reply. Asked to write a file / save a "
-        "document / produce a manual and you have no write tool? Put "
-        "the content DIRECTLY in the chat response — never paste it "
-        "into a tool call that doesn't exist. Every hallucinated call "
-        "returns `unknown tool` and wastes the turn.\n"
-        "\n";
-
-    const bool any_tool_note = datetime_on || web_on || fs_on || bash_on
-                            || python_on || rag_on;
-    if (any_tool_note) {
-        // One-line trigger index. Each tool's full rules live in its
-        // own description — these lines are just "when to reach for it".
-        s += "Active tools (one-line triggers — see each tool's "
-             "description for details):\n";
-        if (datetime_on) {
-            s += "  - datetime: call for 'now' / 'today' / 'latest'.\n";
-        }
-        if (web_on) {
-            s += "  - web: search → fetch top 1-3 URLs → answer from "
-                 "fetched text. REPLY MUST END WITH `Sources:` block "
-                 "(see Cite sources rule below).\n";
-        }
-        if (rag_on) {
-            s += "  - memory: search first for STABLE facts (vocab "
-                 "appended below); save only DURABLE info, one "
-                 "comprehensive entry per topic. REPLY MUST END WITH "
-                 "`Sources:` block citing memory titles when you use "
-                 "retrieved content (see Cite sources rule below).\n";
-        }
-        if (fs_on) {
-            s += "  - fs: sandbox + check_path before any file work. "
-                 "RELATIVE paths only.\n";
-        }
-        if (bash_on) {
-            s += "  - bash: only for shell features fs/python can't "
-                 "do (pipes, build runners, git, sed/awk).\n";
-        }
-        if (python_on) {
-            s += "  - python3: stdlib-only; print() what you want "
-                 "returned.\n";
-        }
-        s += "\n";
-    }
-
-    s +=
-        "## Information pipeline (AUTHORITATIVE)\n"
-        "When the request needs facts you don't already know, "
-        "follow this order — strictly:\n"
-        "\n";
-    if (rag_on) {
-        s +=
-            "  1. MEMORY FIRST. memory(action=\"search\") with "
-            "keywords from the vocabulary appended below. If memory "
-            "returns enough to answer, SKIP the web and go straight "
-            "to step 3.\n"
-            "  2. WEB only if memory had nothing or was "
-            "insufficient. ONE web search, then web_fetch the top "
-            "1-3 URLs.\n"
-            "  3. ANSWER. As soon as steps 1-2 give you enough, "
-            "answer the user. Don't re-search memory, don't "
-            "re-search the web, don't save more memories first.\n";
-    } else {
-        s +=
-            "  1. WEB if you don't already know. ONE web search, "
-            "then web_fetch the top 1-3 URLs.\n"
-            "  2. ANSWER. As soon as the fetched text gives you "
-            "enough, answer. Don't re-search the same query.\n";
-    }
-    s +=
-        "\n"
-        "STOP SIGNAL. After each tool result, ask: do I have enough "
-        "now? Yes → answer immediately. No → ONE more focused tool "
-        "call, then re-check. Three or more tool calls in a row "
-        "without re-checking is a bug — you're exploring instead of "
-        "answering.\n"
-        "\n"
-        "BUGS TO AVOID:\n";
-    if (rag_on) {
-        s +=
-            "  - Skipping memory and going straight to web when "
-            "memory is enabled.\n"
-            "  - After a memory load returns a stable fact "
-            "(definition, syntax, architecture), re-verifying with "
-            "the web — only do this when the user asked for "
-            "\"latest\" / \"current\" / dated info.\n"
-            "  - After saving a memory, re-searching the web on the "
-            "same topic in the same turn — the save means you "
-            "already learned what you needed.\n";
-    }
-    s +=
-        "  - Looping verify → save → re-verify.\n"
-        "  - Running the same web query twice in a row.\n"
-        "\n"
-        "Saving new memories (when the info is durable — see the "
-        "memory tool's GUIDELINES) happens AFTER your reply is "
-        "written, as a final tool call. It's not another "
-        "verification step.\n"
-        "\n"
-        "## Stop when you have enough — the user can refine (AUTHORITATIVE)\n"
-        "Go only as far as the searches you need to give a useful "
-        "answer to THIS question. Not the perfect answer, not the "
-        "exhaustive one — a useful one.\n"
-        "\n"
-        "The user is on the other side of a chat box. They CAN send "
-        "you another message — refining the query, narrowing the "
-        "scope, asking for more depth on one point. They CANNOT "
-        "interrupt your tool loop or skim while you fetch URL #8. "
-        "Their cost of asking a follow-up is one sentence; your "
-        "cost of an extra round of searches is their wait time.\n"
-        "\n"
-        "Practical shape: 1-3 targeted searches, then answer with "
-        "what you have. If something's missing, name it in the "
-        "reply (\"I couldn't find X — want me to check Y instead?\"). "
-        "Let the user steer the next step.\n"
-        "\n"
-        "## Stay strictly in scope (AUTHORITATIVE)\n"
-        "Do EXACTLY what the user asked — no more, no less. No extra "
-        "features, no defensive scaffolding for cases they didn't "
-        "mention, no \"while I'm at it\" cleanups, no proactive "
-        "refactors. The request is the ceiling, not a starting point. "
-        "If genuinely unsure what's in scope, ASK before acting — "
-        "don't expand the task to be safe.\n"
-        "\n"
-        "";
-    // Citation rule lives in libeasyai now (preamble.hpp) so server,
-    // local, and cli render the exact same text. easyai-local appends
-    // it once here; the preamble path adds a second copy at the end
-    // of the prompt when --memory is enabled, for models (notably
-    // Qwen3.x reasoning fine-tunes) that drop the Sources block
-    // after a long <think> trace. has_memory gates the memory-tool
-    // bullets so we don't tell the model to cite a tool that isn't
-    // wired up this run.
-    s += easyai::preamble::cite_sources_block(/*has_memory=*/ rag_on);
-    return s;
+    easyai::preamble::ToolsetView view;
+    view.datetime_on    = true;
+    view.web_on         = true;
+    view.fs_on          = fs_on;
+    view.bash_on        = args.allow_bash;
+    view.python_on      = args.allow_python && fs_on;
+    view.memory_on      = !args.rag_dir.empty();
+    view.tool_lookup_on = true;
+    return easyai::preamble::build_builtin_system_prompt(view);
 }
 
 // ============================================================================

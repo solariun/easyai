@@ -187,7 +187,16 @@ Tool python3      (std::string root = ".", bool show_output = false);
 //
 // Read-only over the registry; never spawns a process or touches the
 // filesystem.
-using ToolCatalog    = std::vector<std::pair<std::string, std::string>>;
+// One entry in the registry snapshot returned to `tool_lookup`'s
+// handler. Both descriptions are present so the tool can show the
+// short trigger string in the index view (no-arg call) and the full
+// manual when a specific tool is asked for by name.
+struct ToolCatalogEntry {
+    std::string name;
+    std::string short_description;
+    std::string full_description;
+};
+using ToolCatalog    = std::vector<ToolCatalogEntry>;
 using ToolListGetter = std::function<ToolCatalog()>;
 Tool tool_lookup(ToolListGetter get_tools);
 

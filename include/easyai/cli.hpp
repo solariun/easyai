@@ -148,6 +148,11 @@ private:
     // than against a discriminated `action`-string union. Operators
     // who want the historical single-dispatcher surface can opt back
     // in with .tool_mode(ToolMode::Unified) or --tools-mode unified.
+    //
+    // Note (2026-05-26): the `fs(action="ops")` batch (50 ops / 20
+    // files per call) lives on the UNIFIED `fs` surface — opt in
+    // with `.tool_mode(ToolMode::Unified)` or `--tools-mode unified`
+    // when you want to drive multi-op edits from one tool call.
     ToolMode    tool_mode_    = ToolMode::Split;
     Plan *      plan_         = nullptr;
 };

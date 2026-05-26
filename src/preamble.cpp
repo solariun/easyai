@@ -2,10 +2,52 @@
 #include "easyai/rag_tools.hpp"   // render_memory_vocabulary
 
 #include <chrono>
+#include <cstddef>
 #include <ctime>
 #include <sstream>
 
 namespace easyai::preamble {
+
+namespace {
+
+// Strip C0 control bytes (0x00–0x1f) and DEL (0x7f) from `s`, collapse
+// any run of stripped bytes into a single space, and clamp at `cap`
+// chars (cap counts the output, not the input).  UTF-8 multi-byte
+// sequences (0x80+) pass through unchanged.
+//
+// Used when rendering tool names and descriptions into the structured
+// system prompt — see SECURITY_AUDIT §23.1.  A hostile or buggy field
+// containing embedded `\n` would otherwise break the bulleted "Active
+// tools" section, looking to the model like a new authoritative
+// section.  Same class as §20.1 (bash mirror) and §20.3 (plan render)
+// — control bytes from a less-trusted source landing on a structured
+// output channel.
+//
+// The same threat applies to MCP's `initialize.instructions` and the
+// HTTP-level `/v1/tools` payload, but those carry static / operator-
+// controlled strings only and don't need this filter today.
+std::string sanitize_for_prompt(const std::string & s, std::size_t cap) {
+    std::string out;
+    out.reserve(s.size() < cap ? s.size() : cap);
+    bool pending_space = false;
+    for (char c : s) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (uc < 0x20 || uc == 0x7f) {
+            pending_space = true;
+            continue;
+        }
+        if (pending_space) {
+            if (out.size() < cap) out += ' ';
+            pending_space = false;
+        }
+        if (out.size() >= cap) break;
+        out += c;
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+}  // namespace
 
 std::string build(const Options & opt) {
     std::ostringstream out;
@@ -53,17 +95,19 @@ std::string build(const Options & opt) {
         }
     }
 
+    // Block order (stable prefix first, volatile content last) is chosen
+    // so prompt-eval KV cache survives a memory write:
+    //
+    //   STABLE   : date/time + knowledge cutoff + KNOWLEDGE LOOP rules
+    //              + CITE SOURCES.  These change at most once per
+    //              process start.
+    //   VOLATILE : the MEMORY VOCABULARY snapshot.  Re-rendered on every
+    //              `memory(action="save"|"append"|"delete")` because the
+    //              keyword count map shifts.  Putting it AT THE TAIL of
+    //              the system message means the cache hit covers the
+    //              stable prefix; only the suffix needs re-eval after a
+    //              memory write.
     if (!opt.memory_root.empty()) {
-        std::string vocab = easyai::tools::render_memory_vocabulary(
-            opt.memory_root);
-        if (!vocab.empty()) {
-            out << "\n\n# MEMORY VOCABULARY (the keywords your "
-                   "private memory currently has tagged — the FIRST "
-                   "place to look for anything you might already "
-                   "know)\n"
-                << vocab << "\n";
-        }
-
         out << "\n\n# KNOWLEDGE LOOP — MANDATORY WORKFLOW\n"
                "For EVERY user question that could benefit from "
                "stored knowledge or external information, follow "
@@ -97,11 +141,10 @@ std::string build(const Options & opt) {
     }
 
     if (opt.cite_sources) {
-        // Last block in the preamble on purpose: putting the
-        // citation rule immediately before the conversation gives
-        // it the strongest positional weight for models (notably
-        // Qwen3.x reasoning fine-tunes) that otherwise "forget"
-        // it after a long <think> trace.
+        // Last block in the preamble on purpose (memory-vocab comes
+        // after this, but the citation rule has stronger positional
+        // weight against the cite-sources block since it's adjacent
+        // to the assistant turn).
         //
         // Auto-derive has_memory from memory_root so callers that
         // already pass memory_root don't also need to set the bool —
@@ -111,6 +154,21 @@ std::string build(const Options & opt) {
         // proxy that exposes memory via a remote name).
         const bool has_memory = opt.has_memory || !opt.memory_root.empty();
         out << "\n\n" << cite_sources_block(has_memory);
+    }
+
+    // Memory vocabulary — TAIL of the preamble on purpose (see the
+    // KV-cache comment above).  The renderer is cached by directory
+    // mtime; cost on a hot path is one stat() per request.
+    if (!opt.memory_root.empty()) {
+        std::string vocab = easyai::tools::render_memory_vocabulary(
+            opt.memory_root);
+        if (!vocab.empty()) {
+            out << "\n\n# MEMORY VOCABULARY (the keywords your "
+                   "private memory currently has tagged — the FIRST "
+                   "place to look for anything you might already "
+                   "know)\n"
+                << vocab << "\n";
+        }
     }
 
     return out.str();
@@ -342,6 +400,269 @@ std::string build_session_info(const std::vector<easyai::Tool> & tools) {
            "NOT retry variations of the same name.\n";
 
     return out.str();
+}
+
+std::string tools_block(const ToolsetView & view) {
+    std::ostringstream s;
+
+    // Closed-set rule first — applies regardless of which tools are on.
+    // Generic deny ("only the names listed below"), no enumeration of
+    // hallucinated names (deliberately, per the Shape-C decision: keep
+    // it generic to save tokens).
+    s << "## Tools — closed set\n"
+         "Your tools are EXACTLY the ones listed below (and emitted in "
+         "your `<tools>` schema this turn). Do NOT invent tools. Do NOT "
+         "call paraphrases of names you remember from other systems — "
+         "use only the EXACT names listed below. Anything you remember "
+         "from other AI systems or training that isn't in this list is "
+         "NOT available.\n"
+         "\n"
+         "Each tool below shows a SHORT trigger; the full manual (rules, "
+         "examples, edge cases) is available via `tool_lookup(name=\"<x>\")`. "
+         "Call it whenever the short line isn't enough to call confidently. "
+         "A no-match result from `tool_lookup` is authoritative — do not "
+         "retry variations.\n"
+         "\n"
+         "If a request needs a capability with no matching tool, do the "
+         "work in your visible reply. Asked to write a file and have no "
+         "write tool? Put the content DIRECTLY in the chat reply — never "
+         "paste it into a non-existent tool call.\n"
+         "\n";
+
+    // Body — list every active tool with its short trigger.  Source of
+    // truth is `view.active_tools` when populated (ground truth from
+    // the registry); otherwise fall back to the per-tool booleans with
+    // hardcoded trigger lines so a partially-populated view still
+    // renders something useful (mostly relevant to easyai-cli before
+    // it has its server-fetched catalogue).
+    if (!view.active_tools.empty()) {
+        s << "Active tools this session:\n";
+        std::size_t n = 0;
+        // Tool names are validated upstream (regex-bounded for external
+        // tools, hardcoded for builtins) but the cli's --url flow
+        // populates `active_tools` from /v1/tools — a malicious server
+        // could return a tool with embedded control bytes that would
+        // break the bullet structure.  Sanitize both fields at the
+        // render boundary; see SECURITY_AUDIT §23.1.
+        constexpr std::size_t kNameCap = 64;
+        constexpr std::size_t kDescCap = 200;
+        for (const auto & t : view.active_tools) {
+            ++n;
+            const std::string name = sanitize_for_prompt(t.name, kNameCap);
+            const std::string wd   = sanitize_for_prompt(t.wire_description(), kDescCap);
+            if (name.empty()) continue;       // unrenderable entry
+            s << "  " << n << ". " << name;
+            if (!wd.empty()) s << " — " << wd;
+            s << '\n';
+        }
+        s << '\n';
+    } else if (view.any()) {
+        s << "Active tools this session:\n";
+        if (view.datetime_on)
+            s << "  - datetime — return the current UTC and local "
+                 "date/time. Call for 'now'/'today'/'latest' or before "
+                 "date math.\n";
+        if (view.web_on)
+            s << "  - web — search the web and fetch URLs "
+                 "(action=search|fetch). Reply MUST end with a "
+                 "`Sources:` block listing URLs used.\n";
+        if (view.memory_on)
+            s << "  - memory — private memory store "
+                 "(action=search|load|append|save|list|delete|keywords). "
+                 "Search BEFORE answering from knowledge.\n";
+        if (view.fs_on)
+            s << "  - fs — filesystem: read/write/edit/list/glob/grep "
+                 "inside the sandbox. The ONLY tool that writes files. "
+                 "Paths are relative.\n";
+        if (view.bash_on)
+            s << "  - bash — run a shell command (`/bin/sh -c`). "
+                 "Allowed to write files (redirects, sed -i, mkdir). "
+                 "Use for pipes/build/git/sed/awk.\n";
+        if (view.python_on)
+            s << "  - python3 — run a Python 3 snippet for COMPUTE / "
+                 "algorithm testing only. READ-ONLY disk. "
+                 "Writes/edits go through fs or bash.\n";
+        if (view.tool_lookup_on)
+            s << "  - tool_lookup — list or inspect registered tools. "
+                 "Call when in doubt about a name or its full manual.\n";
+        s << '\n';
+    } else {
+        s << "NO TOOLS ARE REGISTERED THIS SESSION. Do not call any "
+             "tool — answer from your own knowledge. If you cannot, "
+             "say so directly.\n\n";
+    }
+
+    // Write/edit policy — emitted unconditionally whenever python3 is
+    // on, since the policy is *about* python3.  When python3 is off,
+    // the rule is moot.
+    if (view.python_on) {
+        s << "## Write/edit policy (AUTHORITATIVE)\n"
+             "`python3` is for COMPUTE and ALGORITHM TESTING ONLY. "
+             "NEVER use `python3` to create, write, modify, append, or "
+             "delete files on disk — every write-mode `open(...)` is "
+             "rejected by the sandbox, even inside the sandbox root.\n"
+             "\n"
+             "All disk writes/edits go through your filesystem "
+             "write/edit tool";
+        if (view.bash_on) {
+            s << " or, when shell features are needed (redirects, "
+                 "`sed -i`, `mkdir`, `cat <<EOF`), through `bash`";
+        }
+        s << ". On the first `PermissionError` from `python3`, switch "
+             "to the filesystem tool";
+        if (view.bash_on) s << " or `bash`";
+        s << " — do not retry the python call. The exact callable "
+             "name(s) are in your AVAILABLE TOOLS list.\n\n";
+    } else if (view.fs_on || view.bash_on) {
+        // No python registered: there's still value in stating which
+        // tools can write, so the model doesn't try a hallucinated
+        // `python`/`code_interpreter` call.
+        s << "## Write/edit policy\n"
+             "Disk writes/edits go through ";
+        if (view.fs_on && view.bash_on) {
+            s << "your filesystem write/edit tool (preferred) or "
+                 "`bash` (for shell features fs can't do).";
+        } else if (view.fs_on) {
+            s << "your filesystem write/edit tool — the only "
+                 "write surface registered this session.";
+        } else {
+            s << "`bash` (the only write tool registered this session).";
+        }
+        s << " Do not call any other name for disk work — there is "
+             "no `python3`, `code_interpreter`, `write_file`, etc. "
+             "wired up this turn. The exact callable name(s) are in "
+             "your AVAILABLE TOOLS list.\n\n";
+    }
+
+    return s.str();
+}
+
+std::string build_builtin_system_prompt(const ToolsetView & view) {
+    std::ostringstream s;
+
+    s << "You are a clear, honest assistant. Lead with the answer; add "
+         "detail only when the user needs it.\n"
+         "\n"
+         "## Think SHARP, not LONG\n"
+         "Reasoning decides the next move — not for rehearsing the "
+         "answer or exploring tangents.\n"
+         "  - 3-5 short sentences before the first tool call or "
+         "answer; up to ~10 short bullets for genuinely complex tasks. "
+         "Never paragraphs.\n"
+         "  - Telegraph style: one claim or decision per line; drop "
+         "\"I think\", \"Let me consider\", \"It seems\".\n"
+         "  - Don't enumerate options you immediately reject — pick "
+         "the move and go; tool results correct wrong moves.\n"
+         "  - Don't pre-compute the answer in reasoning then restate "
+         "it visibly. Reasoning drives the agent loop; the visible "
+         "reply is for the user.\n"
+         "  - >5 sentences without a decision → STOP and act.\n"
+         "\n"
+         "Answer directly for greetings, chitchat, math, and anything "
+         "you already know — no tool needed. When a request truly "
+         "needs work, run a tight loop:\n"
+         "  1. Plan ONE small concrete next step (not a roadmap).\n"
+         "  2. Act — call the tool in the SAME turn. Announcing a "
+         "call without making it (\"I'll search…\", \"Let me "
+         "fetch…\") is forbidden.\n"
+         "  3. Read the result, then finish or take ONE more step.\n"
+         "Stop as soon as you have something useful; a short answer "
+         "the user can refine beats a long pre-committed plan.\n"
+         "\n";
+
+    // Tools block — closed-set + per-tool triggers + write policy.
+    s << tools_block(view);
+
+    // Information pipeline — varies with memory presence.
+    s << "## Information pipeline (AUTHORITATIVE)\n"
+         "When the request needs facts you don't already know, follow "
+         "this order — strictly:\n"
+         "\n";
+    if (view.memory_on) {
+        s << "  1. MEMORY FIRST. Use your memory-search tool with "
+             "keywords from the vocabulary appended below (exact "
+             "callable name in your AVAILABLE TOOLS list). If memory "
+             "returns enough to answer, SKIP the web and go straight "
+             "to step 3.\n"
+             "  2. WEB only if memory had nothing or was "
+             "insufficient. ONE web search, then web_fetch the top "
+             "1-3 URLs.\n"
+             "  3. ANSWER. As soon as steps 1-2 give you enough, "
+             "answer the user. Don't re-search memory, don't "
+             "re-search the web, don't save more memories first.\n";
+    } else if (view.web_on) {
+        s << "  1. WEB if you don't already know. ONE web search, "
+             "then web_fetch the top 1-3 URLs.\n"
+             "  2. ANSWER. As soon as the fetched text gives you "
+             "enough, answer. Don't re-search the same query.\n";
+    } else {
+        s << "  1. ANSWER from your own knowledge. No retrieval tool "
+             "is wired up this session, so don't invent calls — say "
+             "so directly if you don't know.\n";
+    }
+    s << "\n"
+         "STOP SIGNAL. After each tool result, ask: do I have enough "
+         "now? Yes → answer immediately. No → ONE more focused tool "
+         "call, then re-check. Three or more tool calls in a row "
+         "without re-checking is a bug — you're exploring instead of "
+         "answering.\n"
+         "\n";
+
+    if (view.memory_on || view.web_on) {
+        s << "BUGS TO AVOID:\n";
+        if (view.memory_on) {
+            s << "  - Skipping memory and going straight to web when "
+                 "memory is enabled.\n"
+                 "  - After a memory load returns a stable fact "
+                 "(definition, syntax, architecture), re-verifying "
+                 "with the web — only do this when the user asked "
+                 "for \"latest\" / \"current\" / dated info.\n"
+                 "  - After saving a memory, re-searching the web on "
+                 "the same topic in the same turn — the save means "
+                 "you already learned what you needed.\n";
+        }
+        s << "  - Looping verify → save → re-verify.\n"
+             "  - Running the same web query twice in a row.\n"
+             "\n";
+    }
+
+    if (view.memory_on) {
+        s << "Saving new memories (when the info is durable — see the "
+             "memory tool's GUIDELINES) happens AFTER your reply is "
+             "written, as a final tool call. It's not another "
+             "verification step.\n"
+             "\n";
+    }
+
+    s << "## Stop when you have enough — the user can refine "
+         "(AUTHORITATIVE)\n"
+         "Go only as far as the searches you need to give a useful "
+         "answer to THIS question. Not the perfect answer, not the "
+         "exhaustive one — a useful one.\n"
+         "\n"
+         "The user is on the other side of a chat box. They CAN send "
+         "you another message — refining the query, narrowing the "
+         "scope, asking for more depth on one point. They CANNOT "
+         "interrupt your tool loop or skim while you fetch URL #8. "
+         "Their cost of asking a follow-up is one sentence; your "
+         "cost of an extra round of searches is their wait time.\n"
+         "\n"
+         "Practical shape: 1-3 targeted searches, then answer with "
+         "what you have. If something's missing, name it in the "
+         "reply (\"I couldn't find X — want me to check Y "
+         "instead?\"). Let the user steer the next step.\n"
+         "\n"
+         "## Stay strictly in scope (AUTHORITATIVE)\n"
+         "Do EXACTLY what the user asked — no more, no less. No "
+         "extra features, no defensive scaffolding for cases they "
+         "didn't mention, no \"while I'm at it\" cleanups, no "
+         "proactive refactors. The request is the ceiling, not a "
+         "starting point. If genuinely unsure what's in scope, ASK "
+         "before acting — don't expand the task to be safe.\n"
+         "\n"
+      << cite_sources_block(view.memory_on);
+
+    return s.str();
 }
 
 }  // namespace easyai::preamble

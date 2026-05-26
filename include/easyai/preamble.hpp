@@ -50,6 +50,41 @@
 
 namespace easyai::preamble {
 
+// Snapshot of which tools are live for this session.  Passed to
+// `build_builtin_system_prompt` so it can render an accurate "Active
+// tools" block and gate the per-tool advisory paragraphs.  Server,
+// local, and cli all populate one of these from their respective
+// argument structs; the renderer is identical across binaries.
+//
+// Naming convention: the booleans are about INTENT (was the operator
+// flag on?); `active_tools` is GROUND TRUTH (what's actually wired up).
+// We prefer the latter for "list the names", but the booleans drive
+// which advisory bullets to emit (e.g. python-read-only advice is
+// only useful when python3 is registered).
+struct ToolsetView {
+    bool datetime_on    = false;
+    bool web_on         = false;
+    bool fs_on          = false;
+    bool bash_on        = false;
+    bool python_on      = false;
+    bool memory_on      = false;
+    bool tool_lookup_on = false;
+
+    // Optional: the actual registered tool catalogue.  When present,
+    // the rendered "tools available" list uses these names + their
+    // wire_description() — strict ground truth, immune to the boolean
+    // flags drifting out of sync with what was actually registered.
+    // When empty, the renderer falls back to the booleans for naming.
+    std::vector<easyai::Tool> active_tools;
+
+    // True iff any flag is on (or active_tools is non-empty).  Used to
+    // suppress the "no tools" advisory when nothing's wired.
+    bool any() const {
+        return datetime_on || web_on || fs_on || bash_on || python_on
+            || memory_on || tool_lookup_on || !active_tools.empty();
+    }
+};
+
 struct Options {
     // Date/time + knowledge-cutoff blocks. When false, both blocks
     // are skipped — useful for the HTTP-client case where the
@@ -132,5 +167,30 @@ std::string cite_sources_block(bool has_memory = true);
 // datetime block is what refreshes per turn; re-emitting the tool
 // catalogue every turn just burns tokens for no behavioural gain.
 std::string build_session_info(const std::vector<easyai::Tool> & tools);
+
+// Render the "Tools available this session" section.  Always emits the
+// closed-set rule (the model must call only tools advertised this turn)
+// and the python3 read-only / fs-and-bash-only-write policy.  The body
+// enumerates the active tools by name + short_description (one line
+// each) so the model has a stable, readable index alongside the
+// machine-readable `<tools>` schema the chat template emits.
+//
+// Side-effect-free; safe to call per-request.
+std::string tools_block(const ToolsetView & view);
+
+// One full default system prompt, shared by easyai-local and
+// easyai-server.  Previously each binary maintained its own ~180-line
+// copy that drifted whenever someone touched one and not the other —
+// see git blame on examples/server.cpp build_builtin_system_prompt and
+// examples/local.cpp build_builtin_system_prompt circa 2026-Q1.  The
+// renderer is now here; the binaries are 5-line wrappers.
+//
+// The output starts with the persona + reasoning rules, includes the
+// tools_block(view), the information pipeline (memory→web→answer or
+// web→answer), stop signals, scope discipline, and ends with the
+// cite_sources_block().  Date/time and memory-vocabulary blocks are
+// appended later by build() — this function builds only the STATIC
+// portion that doesn't change per-request.
+std::string build_builtin_system_prompt(const ToolsetView & view);
 
 }  // namespace easyai::preamble

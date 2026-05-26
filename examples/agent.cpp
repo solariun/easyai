@@ -50,10 +50,10 @@ int main(int argc, char ** argv) {
           // (including itself).  The lambda re-reads engine.tools() at
           // every call, so no race with later additions.
           .add_tool(easyai::tools::tool_lookup([&engine]() {
-              std::vector<std::pair<std::string, std::string>> v;
+              easyai::tools::ToolCatalog v;
               v.reserve(engine.tools().size());
               for (const auto & t : engine.tools()) {
-                  v.emplace_back(t.name, t.description);
+                  v.push_back({ t.name, t.wire_description(), t.description });
               }
               return v;
           }))

@@ -41,9 +41,15 @@ struct RemoteModel {
 
 // Lightweight description of a remote tool returned by /v1/tools
 // (an easyai-server extension; not present on stock OpenAI).
+//
+// `short_description` is the one-line trigger string the server emits
+// alongside the full body — present on easyai-servers built ≥ 2026-05.
+// Older servers send only `description`; the parser falls back to
+// `description` in that case so the caller never sees an empty field.
 struct RemoteTool {
     std::string name;
     std::string description;
+    std::string short_description;
 };
 
 class Client {

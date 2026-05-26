@@ -172,7 +172,7 @@ Each tool object:
 | Field | Required | Notes |
 | --- | --- | --- |
 | `name` | yes | Identifier the model uses. `^[a-zA-Z][a-zA-Z0-9_]{0,63}$`. Cannot collide with built-ins (`bash`, `python3`, `web`, `fs`, `memory`, `datetime`, `tool_lookup`; the legacy alias `rag` is reserved too) or with tools declared in earlier-sorted files. |
-| `description` | yes | Plain English. 1..4096 chars. **The single most important field.** The model reads this to decide *when* to call your tool. Mention edge cases ("returns empty when nothing matches"), expected use ("call this AFTER `web(action=\"search\")`"), and units ("returns kilobytes"). |
+| `description` | yes | Plain English. 1..4096 chars. **The single most important field.** Available via `tool_lookup(name="<your-tool>")` when the model needs the full manual. Mention edge cases ("returns empty when nothing matches"), expected use ("call this AFTER `web(action=\"search\")`"), and units ("returns kilobytes"). **Wire shape (Shape-C, 2026-05-26):** the per-turn `<tools>` block ships only the FIRST 120 CHARS of `description` as the wire trigger; the rest stays server-side. So put the trigger sentence FIRST — e.g. *"Lookup local DNS for a hostname (returns A/AAAA/CNAME)."* — then expand. There's no manifest field for an explicit short trigger yet; the auto-derived first-line works in practice. |
 | `command` | yes | **Absolute** path to a regular, executable file. Validated via stat() + access(X_OK) at load. No PATH lookup. |
 | `argv` | yes | Array of strings. Each element is either a literal (no `{` / `}`) or exactly `"{paramname}"`. Embedded placeholders (`"--flag={x}"`) are rejected — split into `["--flag", "{x}"]`. |
 | `parameters` | optional | JSON-Schema-shaped: `{type:"object", properties:{...}, required:[...]}`. Types: `string` / `integer` / `number` / `boolean`. |
@@ -833,7 +833,7 @@ mean inheriting your own old technical debt later.
 
 ### Ergonomics
 
-- **Spend real time on `description`.** It's the highest-leverage field. The model reads it on every turn.
+- **Spend real time on `description`.** It's the highest-leverage field. The model reads the first 120 chars on every turn (Shape-C wire trigger) and the full body via `tool_lookup(name="<your-tool>")` when it needs detail. Put the trigger sentence first — second sentence onwards is for the manual lookup.
 - **Match `timeout_ms` and `max_output_bytes` to the worst plausible case** — not a global default.
 - **Set `treat_nonzero_exit_as_error: false`** for tools whose non-zero is informational (`pgrep`, `grep`, `diff`).
 - **Use multiple parameters instead of one composite parameter.** `service` and `region` separately is easier for the model than a `service_qualifier` blob.

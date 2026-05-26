@@ -43,6 +43,56 @@ A running log of user-facing changes. Latest first — keep this list
 current as features land so anyone returning to the repo (or
 landing on it for the first time) sees what shipped recently.
 
+### 2026-05-26 — Shape-C tools wire shape, python3 read-only, `fs.ops` 50/20, unified by default
+
+Five linked changes refactor how tools reach the model:
+
+* **Shape-C wire shape.** Per-turn `<tools>` blocks now ship
+  `name + short_description + schema` (~2 000 tokens saved per
+  session on a typical catalogue). Full multi-line manual stays
+  in libeasyai and is returned by `tool_lookup(name="<x>")` on
+  demand. `Tool::short_description` + `wire_description()` are
+  new; tools without an explicit short trigger fall back to the
+  first 120 chars of `description`.
+
+* **`tool_lookup` gains a MANUAL view.** No-arg call returns the
+  INDEX (numbered `name: short trigger` list); `name="<substr>"`
+  returns the FULL description for every match. The model uses
+  the index to scan and drills in only when it needs the manual.
+
+* **`python3` is now read-only on disk.** `kPythonSandboxPreamble`
+  rejects any write-mode `open()` (mode `'w'/'a'/'x'/'+'` or
+  `os.open` with `O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND`)
+  regardless of path. Read-only opens inside the sandbox still
+  work. `PermissionError` names the right alternative
+  (`fs(action="write"|"edit"|"append")` or `bash`). Defense-in-depth
+  — adversarial bypasses (`ctypes`, `subprocess`, `_io.FileIO`,
+  closure-cell introspection) are documented residuals.
+
+* **`fs(action="ops")` batch caps raised to 50 ops / 20 files.**
+  One call can land up to 50 file operations across up to 20
+  distinct files. Same-path edits auto-reorder bottom-up so every
+  `start_line` refers to the file's ORIGINAL line numbers — no
+  manual offset math. Report header names the touched files;
+  successful `read` ops in a batch clip at 2 KiB; failed ops show
+  the full diagnostic so the model can self-correct without
+  re-running.
+
+* **`fs(action="ops")` batch lives on the unified `fs` surface.**
+  Default `ToolMode` stays `Split` (one focused tool per action —
+  small models drive it more reliably). To pick up the batch, run
+  with `--tools-mode unified` (or `--tools-mode both`).
+
+Plus: MCP server adds an `initialize.instructions` field carrying
+the closed-set rule
+plus the same write/edit policy; memory vocabulary block moved to
+the preamble tail and cached by `(mtime, file count)` so prompt-
+eval KV stays warm across memory writes.
+
+Security audit: see [SECURITY_AUDIT.md §23 (eighth pass)](SECURITY_AUDIT.md#23-eighth-pass--2026-05-26-shape-c-tools-refactor).
+One MEDIUM finding (`tools_block` rendered untrusted fields verbatim
+— fixed by `sanitize_for_prompt`), two LOW residuals documented.
+
 ### 2026-05-17 — MTP speculative decoding (`--spec-type draft-mtp`) + installer `--mtp`
 
 llama.cpp's Multi-Token Prediction merged upstream on 2026-05-16; we
