@@ -405,7 +405,7 @@ http_timeout=86400
 # any single response longer than that is almost certainly a runaway
 # loop. Override per-workload via --temperature / --top-p / --top-k /
 # --min-p / --presence-penalty / --repeat-penalty.
-temperature="0.6"
+temperature="0.4"
 top_p="0.95"
 top_k=40
 min_p="0.05"
