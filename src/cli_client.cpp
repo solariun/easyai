@@ -4,6 +4,7 @@
 #include "easyai/cli.hpp"
 #include "easyai/client.hpp"
 #include "easyai/log.hpp"
+#include "easyai/preamble.hpp"
 #include "easyai/presets.hpp"
 #include "easyai/tool.hpp"
 #include "easyai/ui.hpp"
@@ -285,18 +286,30 @@ struct RemoteBackend::Impl {
         // (Remote mode leaves the AVAILABLE-TOOLS catalogue to the
         //  server — it has the authoritative tool list and renders
         //  the catalogue per request via preamble::build_session_info.)
+        //
+        // Same sanitization contract as LocalBackend — see
+        // SECURITY_AUDIT §25.1.
+        constexpr std::size_t kAddendumCap = 8 * 1024;
+        constexpr std::size_t kAppendixCap = 16 * 1024;
         std::string sys = cfg.system_prompt;
         for (const auto & t : client->tools()) {
             if (t.system_addendum.empty()) continue;
+            const std::string clean = easyai::preamble::sanitize_addendum(
+                t.system_addendum, kAddendumCap);
+            if (clean.empty()) continue;
             if (!sys.empty() && sys.back() != '\n') sys += '\n';
             sys += '\n';
-            sys += t.system_addendum;
+            sys += clean;
             sys += '\n';
         }
         if (!cfg.system_appendix.empty()) {
-            if (!sys.empty() && sys.back() != '\n') sys += '\n';
-            sys += '\n';
-            sys += cfg.system_appendix;
+            const std::string clean = easyai::preamble::sanitize_addendum(
+                cfg.system_appendix, kAppendixCap);
+            if (!clean.empty()) {
+                if (!sys.empty() && sys.back() != '\n') sys += '\n';
+                sys += '\n';
+                sys += clean;
+            }
         }
         if (!sys.empty()) client->system(sys);
     }

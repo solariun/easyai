@@ -205,6 +205,32 @@ order makes it obvious how to override exactly what you want.
 `render_system()` returns the resolved string. Call it any time
 (before or after `init`) to see exactly what the model will receive.
 
+### Mid-session contracts
+
+| Call | History | Use when |
+|------|---------|----------|
+| `session.system_append("...")` then `session.refresh_system()` | **preserved** | You want to add to the prompt without losing the conversation. |
+| `session.set_system("new base")` | cleared (fresh start) | Operator-facing "/system <text>" — REPLACE + reset. |
+| `session.add_tool(t)` post-init | preserved | Register a new tool mid-conversation; addendum + catalogue auto-refresh. |
+| `session.add_tool(t)` pre-init | n/a | Normal setup; queued for `init()`. |
+| `session.reset()` | cleared | Wipe history; keep tools + system. |
+
+Two safety notes the lib enforces:
+
+1. Every `Tool::system_addendum` and every `system_append(...)` is
+   run through `easyai::preamble::sanitize_addendum` before splicing.
+   C0 control bytes (NUL, ESC, bell, …) and DEL are stripped;
+   `\n` and `\t` are preserved so paragraph structure survives.
+   Caps: 8 KiB per tool addendum, 16 KiB per operator append.
+   See `SECURITY_AUDIT.md` §25.1.
+2. `engine_ptr()` / `client_ptr()` are read-only / additive escape
+   hatches. If you mutate the wrapped Engine / Client directly
+   (`engine_ptr()->add_tool(t)` instead of `session.add_tool(t)`),
+   Session's cached state drifts: the tool shows in the next turn's
+   `<tools>` block but its `system_addendum` never reaches the
+   prompt. Use Session's own mutators for anything you want
+   Session to track. See `SECURITY_AUDIT.md` §25.4.
+
 ---
 
 ## 5. Backends

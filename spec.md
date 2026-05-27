@@ -77,6 +77,42 @@ the Session layer:
 | `std::vector<Tool> extra_tools` | Caller-supplied tools, registered AFTER built-ins / memory / external, BEFORE `tool_lookup`. |
 | `std::string system_appendix` | Static text appended to the system prompt AFTER tool addenda, BEFORE the AVAILABLE-TOOLS catalogue (local). |
 
+## Sanitization at prompt-splice boundaries (AUTHORITATIVE — 2026-05-27, SECURITY_AUDIT §25.1)
+
+Every text source that gets spliced into the system prompt by the lib
+runs through one of two sanitizers in `easyai::preamble`:
+
+| Source | Sanitizer | Cap | Why |
+|--------|-----------|-----|-----|
+| Single-line tool name / wire_description in `tools_block` | `sanitize_for_prompt` (anonymous, src/preamble.cpp) — strips ALL C0 incl. `\n` | 64 / 200 | Structural — must stay one bullet item per tool. (§23.1) |
+| Multi-paragraph `Tool::system_addendum` | `preamble::sanitize_addendum` | 8 KiB / tool | Paragraph block — keeps `\n` / `\t`, strips ESC / DEL / bell / other C0. (§25.1) |
+| Operator's `Config::system_appendix` / `Session::system_append(...)` | `preamble::sanitize_addendum` | 16 KiB | Same. (§25.1) |
+
+Applied at the THREE splice sites: `LocalBackend::init`,
+`RemoteBackend::Impl::rebuild`, `Session::Impl::full_compose` (which
+also serves `Session::refresh_system` / `set_system` /
+`render_system`). Today every source is operator-controlled, but the
+sanitizer is the seatbelt for future plumbing (external manifests,
+MCP server tool descriptors) and defends the operator's TTY against
+ESC injection via `--show-system-prompt`.
+
+## Session mid-session contracts (AUTHORITATIVE — 2026-05-27, SECURITY_AUDIT §25.2 / §25.3)
+
+| Call | History preserved? | Underlying backend call |
+|------|-------------------|------------------------|
+| `Session::refresh_system()` | **YES** | `engine_ptr()->system(...)` / `client_ptr()->system(...)` (pure setter) |
+| `Session::set_system(text)` | NO (cleared, matches REPL `/system <text>`) | `backend->set_system(...)` |
+| `Session::add_tool(t)` post-init | YES | `engine_ptr()->add_tool(t)` / `client_ptr()->add_tool(t)` + `refresh_system()` |
+| `Session::add_tool(t)` pre-init | n/a (no history yet) | queued into `Config::extra_tools` |
+| `Session::reset()` | NO | `backend->reset()` |
+
+Calling `engine_ptr()->add_tool(t)` (or `client_ptr()->add_tool(t)`)
+directly is allowed but bypasses Session — the tool will be visible
+in the model's `<tools>` block on the next turn, but its
+`system_addendum` will NOT be added to the system prompt until the
+next `Session::set_system` / `refresh_system` runs. Use
+`Session::add_tool` for the safe path.
+
 # easyai-cli Specification
 
 ## Modes

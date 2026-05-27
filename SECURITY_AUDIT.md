@@ -2515,3 +2515,205 @@ the renamed Write/edit policy section.
 
 *Last reviewed against commit landing the rename. Re-run when
 adding a new tool or a new HTTP boundary.*
+
+---
+
+## 25. TENTH PASS — 2026-05-27 (unified-lib + `easyai::Session` follow-up)
+
+Audit triggered by commit `f526043` which (a) merged
+`libeasyai-cli` into `libeasyai` and (b) added the high-level
+`easyai::Session` API, the `Tool::system_addendum` field, and
+`Backend::Config::extra_tools` / `system_appendix`.  The new
+attack surface is small (Session composes strings, no new I/O,
+no new protocol), but the existing class of concerns
+(structural-corruption injection via prompt-rendered fields —
+§23.1; terminal-escape injection from rendered output — §20.1,
+§22.1) carries forward to the new code paths.
+
+### 25.1 MEDIUM — Tool `system_addendum` / `Config::system_appendix` concat was unsanitized (FIXED)
+
+**Files:** `src/backend.cpp` (`LocalBackend::init` system composer),
+`src/cli_client.cpp` (`RemoteBackend::Impl::rebuild`),
+`src/session.cpp` (`Session::Impl::full_compose`),
+`src/preamble.cpp` (new `sanitize_addendum` helper).
+
+**Issue.** The new `Tool::system_addendum` field and the
+`Backend::Config::system_appendix` field are concatenated
+verbatim into the system prompt:
+
+```cpp
+sys += t.system_addendum;          // pre-fix
+sys += cfg.system_appendix;        // pre-fix
+```
+
+Today the fields are only populated from operator-controlled
+code (the Builder API + `Session::add_tool` + caller-supplied
+Config).  But:
+
+- The library's design encourages future plumbing — a Markdown
+  manifest field in `EASYAI-*.tools` files, an MCP server's
+  tool descriptor that maps onto `system_addendum`, a
+  `--system-append-file` CLI flag that slurps a file as raw
+  text.  Any of those would put a less-trusted source on the
+  same code path.
+- Even today, the operator's own `--show-system-prompt` flag
+  prints the resolved system prompt to stdout (typically a
+  TTY).  An addendum text copy-pasted with embedded ESC bytes
+  would land on the operator's terminal verbatim — same class
+  as the model-output channels protected by §20.1 (bash
+  mirror), §20.3 (plan render), §22.1 (subprocess banner).
+- The structural-corruption vector (§23.1, addressed for
+  `tools_block`) is identical here: an embedded `\0` / ESC /
+  bell can hide bullet items, scramble section headers, or
+  reflow the "Active tools" block.
+
+**Fix.** New `easyai::preamble::sanitize_addendum(s, cap)`
+helper (`src/preamble.cpp`, exposed in
+`include/easyai/preamble.hpp`).  Strips C0 control bytes
+(0x00–0x1f) and DEL (0x7f) EXCEPT `\n` (0x0a) and `\t` (0x09);
+collapses any run of stripped bytes into a single space;
+UTF-8 multi-byte (0x80+) passes through unchanged; clamps the
+output at `cap` bytes.  `\n` is preserved because addenda are
+multi-paragraph guardrail blocks where line structure carries
+meaning; `\t` is preserved for code-block alignment.  This is
+the sister function to the existing anonymous-namespace
+`sanitize_for_prompt` (used for single-line tool name +
+description fields, which DOES strip `\n`).
+
+Applied at every concat site:
+
+| Site | Cap |
+|------|-----|
+| `LocalBackend::init` per-tool addendum | 8 KiB |
+| `LocalBackend::init` system_appendix | 16 KiB |
+| `RemoteBackend::Impl::rebuild` per-tool addendum | 8 KiB |
+| `RemoteBackend::Impl::rebuild` system_appendix | 16 KiB |
+| `Session::Impl::full_compose` per-tool addendum | 8 KiB |
+| `Session::Impl::full_compose` operator appends | 16 KiB |
+
+Caps bound the worst case (a 50-tool registry with maxed-out
+addenda is 400 KiB of system, which the chat template still
+handles), and reject the silly cases (a runaway addendum that
+fills the context window before the user's first turn).
+
+**Residual.** A pathological UTF-8 sequence is NOT decoded;
+the sanitizer treats bytes ≥ 0x80 as pass-through, so a
+malformed sequence remains malformed but is bounded by the
+cap.  Acceptable: the model's tokenizer handles malformed
+UTF-8 the same way for any other input.
+
+### 25.2 HIGH (correctness, security impact) — `Session::refresh_system` silently cleared chat history (FIXED)
+
+**File:** `src/session.cpp` (`Session::refresh_system`).
+
+**Issue.** The previous implementation pushed the recomposed
+system prompt through `backend->set_system(...)`, which
+deliberately CLEARS HISTORY (LocalBackend and RemoteBackend
+both implement `set_system` as "set + clear" to mirror the
+REPL `/system <text>` operator-facing semantics).
+
+But `refresh_system` is the path the lib's own
+`Session::add_tool` (post-init), `Session::system_append`, and
+any caller-driven "re-render after a dynamic addendum changed"
+flow go through.  None of those should wipe the conversation.
+
+**Impact.** Mid-session, a caller doing
+`session.system_append(load_today_facts()); session.refresh_system();`
+loses every prior turn.  Worse, the lib's documented contract
+(`session.hpp`: "Rebuild and push the current system prompt —
+call this after `.system_append(...)` mid-session so the next
+chat() sees the change.") implies history is preserved.  A
+silent wipe of agent context is a security-relevant correctness
+bug: the loss of a turn carrying e.g. "do NOT run rm -rf"
+flips the agent's safety posture.
+
+**Fix.** `Session::refresh_system` now pushes the recomposed
+prompt directly through `engine_ptr()->system(...)` (local) or
+`client_ptr()->system(...)` (remote).  Both are pure setters
+that touch only `p_->system_prompt` — no history is touched.
+The explicit `Session::set_system(text)` call still goes
+through `backend->set_system(...)` so the REPL `/system <text>`
+semantics (REPLACE + fresh start) are preserved.
+
+### 25.3 MEDIUM — `Session::add_tool` post-init was a silent no-op (FIXED)
+
+**File:** `src/session.cpp` (`Session::add_tool`).
+
+**Issue.** The previous implementation only pushed the Tool
+onto `p_->extra_tools`.  That vector is consumed by
+`Session::init()` via the `Config::extra_tools` path — so
+calling `add_tool` AFTER `init()` neither registered the tool
+with the live Engine/Client nor refreshed the system prompt.
+The tool was invisible to the model; its `system_addendum`
+never reached the prompt; the model continued operating
+outside the policy bounds the addendum was supposed to set.
+
+Same security shape as §25.2: a caller relying on the
+addendum to constrain behaviour (e.g. "this tool may only be
+called after confirming the user's intent") would see the
+constraint silently dropped.
+
+**Fix.** `Session::add_tool` now detects the post-init case
+(`p_->backend != nullptr`), pushes the tool onto the live
+Engine via `engine_ptr()->add_tool(t)` or onto the live
+Client via `client_ptr()->add_tool(t)`, appends to the
+internal `extra_tools` vector for consistency, and calls
+`refresh_system()` so the addendum + updated AVAILABLE-TOOLS
+catalogue reach the model on the next turn.  Pre-init
+behaviour is unchanged (queued for the Backend's own init).
+
+### 25.4 LOW (doc) — `engine_ptr` / `client_ptr` allow mutation behind Session's back (DOCUMENTED)
+
+**File:** `include/easyai/session.hpp` (Session escape-hatch
+accessors).
+
+**Observation.** `Session::engine_ptr()` and
+`Session::client_ptr()` return non-const pointers.  A caller
+can call `engine_ptr()->add_tool(t)` directly, bypassing
+Session's `add_tool` (which §25.3 made the safe path).  The
+tool is then visible to the model on the NEXT turn (the
+`<tools>` block is recomputed per turn), but its
+`system_addendum` is never spliced into the system prompt
+(that's spliced only at `init()` / `set_system()` /
+`refresh_system()` / `add_tool()`).  Same drift class as
+calling `engine_ptr()->system(text)` directly bypassing
+`Session::set_system`.
+
+**Fix.** Added a "CAREFUL — read-only / additive use only"
+note to `engine_ptr` / `client_ptr` in `session.hpp`,
+pointing at the Session-owned mutators and at this section.
+No code change — the escape hatch is intentional, the
+expectation just needed to be loud.
+
+### 25.5 Items considered, not actionable this pass
+
+- **Symbol exposure expansion in the unified library** — merging
+  cpp-httplib + OpenSSL + Client into `libeasyai.so` means any
+  caller who previously linked only the local Engine flavour
+  now loads the HTTP/TLS code too.  Unused code at runtime is
+  not active attack surface (cpp-httplib's parsers don't run
+  unless someone calls Client), and the user explicitly
+  directed the unification.  Accepted; documented in
+  `LIB_GUIDE.md` §6.
+- **`Session::render_system()` reveals memory-vocabulary** — the
+  dynamic preamble block enumerates the keywords in the RAG
+  store.  If a caller exposes `render_system()` through an
+  unauthenticated /debug endpoint, the vocab leaks.  Same trust
+  model as `--show-system-prompt`: operator-only.  No code
+  change; LIB_GUIDE.md §4 already calls out that
+  `render_system()` returns "the exact string the model will
+  receive" — implying it must be treated as sensitive in the
+  same way the system prompt itself is.
+- **`Session::set_system(text)` keeps tool addenda + appends** —
+  documented behaviour ("set BASE") but easy to misread as a
+  full reset.  No code change; LIB_GUIDE.md §4 spells out the
+  composition layers and which knob resets what.
+
+### 25.6 Accepted residual risk (carried forward)
+
+- All of §13, §16.4, §22.7, §23.2, §23.3, §23.4 unchanged.
+
+*Last reviewed against commit landing this pass.  Re-run when
+adding a new prompt-render codepath, a new HTTP boundary, or
+a new untrusted source that flows into `Tool::system_addendum`
+/ `Config::system_appendix`.*

@@ -201,6 +201,16 @@ public:
     // Direct access to the underlying engine / client for callers that
     // need raw streaming knobs or the perf counters.  Returns nullptr
     // for the other mode.
+    //
+    // CAREFUL — read-only / additive use only.  Session caches the
+    // tool registry and the rendered system prompt; if the caller
+    // mutates the underlying Engine/Client behind Session's back (e.g.
+    // engine_ptr()->add_tool(...) directly instead of
+    // Session::add_tool(...)), the caches drift and the tool's
+    // `system_addendum` never reaches the model.  Use
+    // Session::add_tool / Session::set_system / Session::refresh_system
+    // for any state mutation you want Session to track.  See
+    // SECURITY_AUDIT §25.4 / LIB_GUIDE.md §7.
     Engine *           engine_ptr   () const;
     Client *           client_ptr   () const;
 

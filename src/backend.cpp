@@ -163,19 +163,36 @@ bool LocalBackend::init(std::string & err) {
     // anything wiring up a LocalBackend directly — gets the same
     // composition without having to do it themselves. Mirrors the
     // per-request injection server.cpp does on the first user turn.
+    //
+    // Both addenda and the appendix are run through
+    // `preamble::sanitize_addendum` before splicing — see
+    // SECURITY_AUDIT §25.1.  Today the fields are operator-controlled,
+    // but the sanitizer keeps the door closed against a future
+    // external-tools / MCP plumbing where the source is less trusted,
+    // and it also defends the operator's TTY from rogue ANSI when
+    // `--show-system-prompt` is invoked.
     {
+        constexpr std::size_t kAddendumCap = 8 * 1024;   // per tool
+        constexpr std::size_t kAppendixCap = 16 * 1024;  // operator's static
         std::string sys = cfg.system_prompt;
         for (const auto & t : engine.tools()) {
             if (t.system_addendum.empty()) continue;
+            const std::string clean = preamble::sanitize_addendum(
+                t.system_addendum, kAddendumCap);
+            if (clean.empty()) continue;
             if (!sys.empty() && sys.back() != '\n') sys += '\n';
             sys += '\n';
-            sys += t.system_addendum;
+            sys += clean;
             sys += '\n';
         }
         if (!cfg.system_appendix.empty()) {
-            if (!sys.empty() && sys.back() != '\n') sys += '\n';
-            sys += '\n';
-            sys += cfg.system_appendix;
+            const std::string clean = preamble::sanitize_addendum(
+                cfg.system_appendix, kAppendixCap);
+            if (!clean.empty()) {
+                if (!sys.empty() && sys.back() != '\n') sys += '\n';
+                sys += '\n';
+                sys += clean;
+            }
         }
         if (cfg.load_tools && !engine.tools().empty()) {
             const std::string si = preamble::build_session_info(engine.tools());

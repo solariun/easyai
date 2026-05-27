@@ -670,4 +670,43 @@ std::string build_builtin_system_prompt(const ToolsetView & view) {
     return s.str();
 }
 
+// Public helper — see preamble.hpp for the rationale.  Differs from
+// the anonymous `sanitize_for_prompt` above in that this one PRESERVES
+// `\n` (0x0a) and `\t` (0x09), because addenda are multi-paragraph
+// blocks where line structure carries meaning.  Everything else in
+// C0 (incl. ESC 0x1b, bell 0x07) and DEL (0x7f) is stripped.
+std::string sanitize_addendum(const std::string & s, std::size_t cap) {
+    std::string out;
+    out.reserve(s.size() < cap ? s.size() : cap);
+    bool pending_space = false;
+    for (char c : s) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        // Allow legitimate whitespace control bytes.
+        if (uc == '\n' || uc == '\t') {
+            if (pending_space) {
+                if (out.size() < cap) out += ' ';
+                pending_space = false;
+            }
+            if (out.size() >= cap) break;
+            out += c;
+            continue;
+        }
+        // Strip the rest of C0 plus DEL.
+        if (uc < 0x20 || uc == 0x7f) {
+            pending_space = true;
+            continue;
+        }
+        if (pending_space) {
+            if (out.size() < cap) out += ' ';
+            pending_space = false;
+        }
+        if (out.size() >= cap) break;
+        out += c;
+    }
+    // Trim trailing spaces (newlines are kept — they delimit the
+    // addendum block from the next section).
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
 }  // namespace easyai::preamble

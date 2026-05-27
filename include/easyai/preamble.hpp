@@ -193,4 +193,27 @@ std::string tools_block(const ToolsetView & view);
 // portion that doesn't change per-request.
 std::string build_builtin_system_prompt(const ToolsetView & view);
 
+// Sanitize a multi-paragraph addendum before splicing it into the
+// system prompt.  Strips C0 control bytes (0x00–0x1f) and DEL (0x7f)
+// EXCEPT `\n` (0x0a) and `\t` (0x09), which are legitimate in
+// multi-paragraph text; collapses any run of stripped bytes into a
+// single space; UTF-8 multi-byte (0x80+) passes through unchanged;
+// caps the output at `cap` bytes.
+//
+// Use this on every Tool::system_addendum / Config::system_appendix
+// before concatenating it into the prompt.  Defends against:
+//   * Terminal-escape injection via `--show-system-prompt` and the
+//     CLI banners that print the resolved system prompt to a TTY
+//     (same class as SECURITY_AUDIT §20.1 / §22.1).
+//   * Structural corruption of the prompt when a future caller wires
+//     the field from a less-trusted source (an external-tools
+//     manifest, an MCP server's tool descriptor) — same class as
+//     §23.1 for `tools_block`.
+//
+// `\n` is intentionally preserved so authored guardrail paragraphs
+// retain their line structure when concatenated.  `\t` is preserved
+// for code-block formatting.  Bell (0x07), ESC (0x1b), and the rest
+// of C0 / DEL are stripped to a space.
+std::string sanitize_addendum(const std::string & s, std::size_t cap);
+
 }  // namespace easyai::preamble

@@ -123,6 +123,13 @@ struct Session::Impl {
         remote_cfg.with_tools  = with_defaults;
         remote_cfg.extra_tools = extra_tools;
     }
+
+    // Compose the whole system prompt — base + tool addenda + static /
+    // dynamic appends + dynamic preamble + (local-only) catalogue tail.
+    // Used by refresh_system / set_system / render_system.  Tool addenda
+    // and operator appends are sanitized at concat (SECURITY_AUDIT §25.1).
+    std::string full_compose(const std::vector<Tool> & registered_tools,
+                             bool include_session_info_tail);
 };
 
 // ----------------------------------------------------------- ctors / factories
@@ -212,7 +219,24 @@ Session & Session::use_google     (bool on)       { p_->use_google    = on; retu
 Session & Session::tool_mode      (cli::ToolMode m){p_->tool_mode     = m;  return *this; }
 Session & Session::memory         (std::string d) { p_->memory_dir    = std::move(d); return *this; }
 Session & Session::external_tools (std::string d) { p_->external_dir  = std::move(d); return *this; }
-Session & Session::add_tool       (Tool t)        { p_->extra_tools.push_back(std::move(t)); return *this; }
+Session & Session::add_tool(Tool t) {
+    if (p_->backend) {
+        // Post-init: register on the live Engine / Client AND refresh
+        // the system prompt so the tool's `system_addendum` and the
+        // updated AVAILABLE-TOOLS catalogue actually reach the model.
+        // Without this, calling add_tool after init() was a silent
+        // no-op — see SECURITY_AUDIT §25.3.  History is preserved.
+        if (auto * e = engine_ptr())      e->add_tool(t);
+        else if (auto * c = client_ptr()) c->add_tool(t);
+        p_->extra_tools.push_back(std::move(t));
+        refresh_system();
+    } else {
+        // Pre-init: queue for the backend to pick up via
+        // Config::extra_tools when init() runs.
+        p_->extra_tools.push_back(std::move(t));
+    }
+    return *this;
+}
 
 // --------------------------------------------------------------- sampling
 Session & Session::preset(Preset p) {
@@ -279,38 +303,33 @@ Session & Session::on_token(TokenCallback cb) { p_->token_cb = std::move(cb); re
 
 // --------------------------------------------------------------- lifecycle
 bool Session::init(std::string & err) {
-    // Compose the BASE system prompt now.  At this point the registered
-    // toolset is empty (the backend builds it during its own init()),
-    // so the view-based path renders without an active_tools snapshot;
-    // the snapshot is added back by LocalBackend::init via
-    // preamble::build_session_info.  Remote sessions skip the
-    // session_info tail entirely (the server owns that block).
-    const std::string base    = p_->compose_system({});
-    const std::string dynamic = p_->compose_dynamic();
+    // BASE system prompt — built from the operator's intent.  At this
+    // point the backend hasn't been built yet, so we can't pass a
+    // populated `active_tools` view; backend->init() appends the real
+    // catalogue tail (local mode) via preamble::build_session_info.
+    const std::string base = p_->compose_system({});
 
-    // Static appends — caller-supplied + tool addenda.  Tool addenda
-    // are collected by the Backend at its own init() time (via the new
-    // Config::extra_tools / system_appendix path).  Here we just route
-    // the operator's .system_append() blocks through Config::system_appendix.
+    // Operator's .system_append() blocks + the first dynamic preamble
+    // snapshot are concatenated into system_appendix so the Backend's
+    // own composer (which also runs the §25.1 sanitizer) splices them
+    // verbatim after the tool addenda.  Sanitization happens at the
+    // Backend boundary — see SECURITY_AUDIT §25.1.
     std::string static_appends;
     for (const auto & s : p_->system_static) {
         if (s.empty()) continue;
         if (!static_appends.empty()) static_appends += "\n\n";
         static_appends += s;
     }
-    // First dynamic snapshot — we capture it once at init() so the
-    // backend's seeded system prompt isn't empty even if no further
-    // refresh ever runs.  refresh_system() recomputes the dynamic
-    // blocks on demand.
     for (auto & fn : p_->system_dynamic) {
         std::string s = fn ? fn() : std::string();
         if (s.empty()) continue;
         if (!static_appends.empty()) static_appends += "\n\n";
         static_appends += s;
     }
-    if (!dynamic.empty()) {
+    const std::string dyn = p_->compose_dynamic();
+    if (!dyn.empty()) {
         if (!static_appends.empty()) static_appends += "\n\n";
-        static_appends += dynamic;
+        static_appends += dyn;
     }
 
     if (p_->mode == Mode::Local) {
@@ -332,38 +351,78 @@ bool Session::init(std::string & err) {
     return true;
 }
 
-void Session::refresh_system() {
-    if (!p_->backend) return;
-    const std::string base    = p_->compose_system(tools());
-    const std::string dynamic = p_->compose_dynamic();
-    std::string composed = base;
-    for (const auto & s : p_->system_static) {
-        if (s.empty()) continue;
-        if (!composed.empty() && composed.back() != '\n') composed += '\n';
-        composed += '\n';
-        composed += s;
+namespace {
+// Mirror of LocalBackend::init's addendum-concat policy — see
+// SECURITY_AUDIT §25.1.  Used by Session paths that compose the
+// system prompt after init (refresh_system, render_system).
+constexpr std::size_t kAddendumCap = 8 * 1024;
+constexpr std::size_t kAppendixCap = 16 * 1024;
+
+void append_block_with_blank_line(std::string & buf, const std::string & block) {
+    if (block.empty()) return;
+    if (!buf.empty() && buf.back() != '\n') buf += '\n';
+    buf += '\n';
+    buf += block;
+}
+}  // namespace
+
+std::string Session::Impl::full_compose(const std::vector<Tool> & registered_tools,
+                                        bool include_session_info_tail) {
+    std::string out = compose_system(registered_tools);
+
+    // Tool addenda — sanitized at concat, mirroring backend.cpp /
+    // cli_client.cpp (single source of truth would require a shared
+    // helper; the duplicate is small and read-only).
+    for (const auto & t : registered_tools) {
+        if (t.system_addendum.empty()) continue;
+        const std::string clean =
+            preamble::sanitize_addendum(t.system_addendum, kAddendumCap);
+        if (clean.empty()) continue;
+        if (!out.empty() && out.back() != '\n') out += '\n';
+        out += '\n';
+        out += clean;
+        out += '\n';
     }
-    for (auto & fn : p_->system_dynamic) {
+
+    // Operator-supplied static and dynamic appends.
+    for (const auto & s : system_static) {
+        if (s.empty()) continue;
+        const std::string clean = preamble::sanitize_addendum(s, kAppendixCap);
+        append_block_with_blank_line(out, clean);
+    }
+    for (auto & fn : system_dynamic) {
         std::string s = fn ? fn() : std::string();
         if (s.empty()) continue;
-        if (!composed.empty() && composed.back() != '\n') composed += '\n';
-        composed += '\n';
-        composed += s;
+        const std::string clean = preamble::sanitize_addendum(s, kAppendixCap);
+        append_block_with_blank_line(out, clean);
     }
-    if (!dynamic.empty()) {
-        if (!composed.empty() && composed.back() != '\n') composed += '\n';
-        composed += dynamic;
+
+    const std::string dyn = compose_dynamic();
+    if (!dyn.empty()) {
+        if (!out.empty() && out.back() != '\n') out += '\n';
+        out += dyn;
     }
-    // For local sessions, include the session_info tail (mirrors what
-    // LocalBackend::init does for the initial render).
-    if (p_->mode == Mode::Local) {
-        Engine * e = engine_ptr();
-        if (e && !e->tools().empty()) {
-            const std::string si = preamble::build_session_info(e->tools());
-            if (!si.empty()) composed += si;
-        }
+
+    if (include_session_info_tail && !registered_tools.empty()) {
+        const std::string si = preamble::build_session_info(registered_tools);
+        if (!si.empty()) out += si;
     }
-    p_->backend->set_system(composed);
+    return out;
+}
+
+void Session::refresh_system() {
+    if (!p_->backend) return;
+    const std::vector<Tool> live = tools();
+    const std::string composed = p_->full_compose(
+        live, /*include_session_info_tail=*/p_->mode == Mode::Local);
+
+    // Push the new system WITHOUT clearing history — Engine::system /
+    // Client::system are pure setters.  Going through
+    // backend->set_system would clear history (matches the explicit
+    // /system <text> REPL semantics, but is wrong for a mid-session
+    // append).  See SECURITY_AUDIT §25.2.
+    if (auto * e = engine_ptr()) e->system(composed);
+    else if (auto * c = client_ptr()) c->system(composed);
 }
 
 void Session::reset() {
@@ -373,10 +432,15 @@ void Session::reset() {
 void Session::set_system(std::string text) {
     p_->system_base       = std::move(text);
     p_->has_explicit_base = true;
-    // Push to backend right away — easiest path is set_system on the
-    // backend with the composed prompt (base + tool addenda + appends
-    // + dynamic + catalogue), which mirrors what refresh_system does.
-    refresh_system();
+    // Operator-facing "replace base + fresh start" — go through
+    // backend->set_system which clears history (matches REPL
+    // /system <text> semantics).  Compose with the full chain so
+    // tool addenda / appends / dynamic / catalogue all stick.
+    if (!p_->backend) return;
+    const std::vector<Tool> live = tools();
+    const std::string composed = p_->full_compose(
+        live, /*include_session_info_tail=*/p_->mode == Mode::Local);
+    p_->backend->set_system(composed);
 }
 
 // --------------------------------------------------------------- chat
@@ -398,36 +462,12 @@ std::string Session::chat(const std::string & user) {
 Session::Mode Session::mode() const { return p_->mode; }
 
 std::string Session::render_system() const {
-    // Reuse refresh logic without pushing to backend.  We need a const
-    // path; rebuild a transient string identically.
-    std::vector<Tool> snap = tools();
-    std::string composed = p_->compose_system(snap);
-    for (const auto & s : p_->system_static) {
-        if (s.empty()) continue;
-        if (!composed.empty() && composed.back() != '\n') composed += '\n';
-        composed += '\n';
-        composed += s;
-    }
-    for (auto & fn : p_->system_dynamic) {
-        std::string s = fn ? fn() : std::string();
-        if (s.empty()) continue;
-        if (!composed.empty() && composed.back() != '\n') composed += '\n';
-        composed += '\n';
-        composed += s;
-    }
-    std::string dynamic = p_->compose_dynamic();
-    if (!dynamic.empty()) {
-        if (!composed.empty() && composed.back() != '\n') composed += '\n';
-        composed += dynamic;
-    }
-    if (p_->mode == Mode::Local) {
-        Engine * e = engine_ptr();
-        if (e && !e->tools().empty()) {
-            const std::string si = preamble::build_session_info(e->tools());
-            if (!si.empty()) composed += si;
-        }
-    }
-    return composed;
+    // Same composition as refresh_system, but returns the string
+    // instead of pushing it.  Safe to call pre-init (live tools()
+    // returns empty, so the catalogue tail is omitted; everything
+    // else still renders).
+    const std::vector<Tool> snap = tools();
+    return p_->full_compose(snap, /*include_session_info_tail=*/p_->mode == Mode::Local);
 }
 
 std::vector<Tool> Session::tools() const {
