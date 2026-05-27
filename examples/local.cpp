@@ -298,27 +298,39 @@ static CliArgs parse(int argc, char ** argv) {
     return a;
 }
 
-// Build the built-in system prompt with tool-notes bullets gated on which
-// tools will actually be registered. Naming an unregistered tool here
-// (e.g. bash with allow_bash=off) makes models try to call it.  Mirrors
-// the gating LocalBackend / cli::Toolbelt apply at registration time.
-// Thin wrapper around easyai::preamble::build_builtin_system_prompt.
-// The ~180-line builder this replaced moved into libeasyai so server,
-// local, and cli all stay in lockstep.
-static std::string build_builtin_system_prompt(const CliArgs & args) {
-    // LocalBackend gating mirrors cli::Toolbelt::tools(): fs is on
-    // whenever sandbox is set OR a subprocess executor is on.
-    const bool fs_on   = !args.sandbox.empty() || args.allow_bash;
-
-    easyai::preamble::ToolsetView view;
-    view.datetime_on    = true;
-    view.web_on         = true;
-    view.fs_on          = fs_on;
-    view.bash_on        = args.allow_bash;
-    view.python_on      = args.allow_python && fs_on;
-    view.memory_on      = !args.rag_dir.empty();
-    view.tool_lookup_on = true;
-    return easyai::preamble::build_builtin_system_prompt(view);
+// Build a LocalBackend::Config from CLI args, ready to be handed to
+// easyai::Session::local.  Session takes ownership of every knob the
+// Engine exposes (sandbox / KV cache / spec decoding / etc.) through
+// this Config; the Session-level fluent setters below add Session-only
+// behaviour (custom system prompt, system_append, custom tools).
+static easyai::LocalBackend::Config to_config(const CliArgs & args,
+                                              const easyai::Preset & preset) {
+    easyai::LocalBackend::Config lc;
+    lc.model_path         = args.model_path;
+    lc.sandbox            = args.sandbox;
+    lc.allow_bash         = args.allow_bash;
+    lc.allow_python       = args.allow_python;
+    lc.external_tools_dir = args.external_tools_dir;
+    lc.quiet              = args.quiet;
+    lc.rag_dir            = args.rag_dir;
+    lc.n_ctx              = args.n_ctx;
+    lc.n_batch            = args.n_batch;
+    lc.ngl                = args.ngl;
+    lc.n_threads          = args.n_threads;
+    lc.load_tools         = args.load_tools;
+    lc.preset             = preset;
+    lc.repeat_penalty     = args.repeat_penalty;
+    lc.max_tokens         = args.max_tokens;
+    lc.seed               = args.seed;
+    lc.cache_type_k       = args.cache_type_k;
+    lc.cache_type_v       = args.cache_type_v;
+    lc.no_kv_offload      = args.no_kv_offload;
+    lc.kv_unified         = args.kv_unified;
+    lc.kv_overrides       = args.kv_overrides;
+    lc.spec_type          = args.spec_type;
+    lc.spec_draft_model   = args.spec_draft_model;
+    lc.spec_draft_n_max   = args.spec_draft_n_max;
+    return lc;
 }
 
 // ============================================================================
@@ -341,131 +353,86 @@ int main(int argc, char ** argv) {
         }
     }
 
-    // Resolve system prompt: --system inline > -s file > built-in default.
-    // Kept deliberately short. Goal: get a useful answer fast and let
-    // the user refine — no walls of text, no pre-committed roadmaps.
-    // The "Tool notes:" section only mentions tools that will actually
-    // be registered for THIS invocation — naming an unregistered tool
-    // (e.g. bash with allow_bash=off) makes models hallucinate calls
-    // to it. Mirrors the gating in LocalBackend / cli::Toolbelt.
-    std::string system_prompt = args.system_inline;
-    if (system_prompt.empty() && !args.system_path.empty()) {
-        easyai::text::slurp_file(args.system_path, system_prompt);
-        if (system_prompt.empty()) {
-            std::fprintf(stderr, "[easyai-local] WARNING: failed to read system file '%s'\n",
-                         args.system_path.c_str());
+    // Resolve operator's chosen base system prompt.  Inline > file >
+    // (none → Session uses the lib's built-in default).
+    std::string explicit_system = args.system_inline;
+    if (explicit_system.empty() && !args.system_path.empty()) {
+        easyai::text::slurp_file(args.system_path, explicit_system);
+        if (explicit_system.empty()) {
+            std::fprintf(stderr,
+                "[easyai-local] WARNING: failed to read system file '%s'\n",
+                args.system_path.c_str());
         }
     }
-    if (system_prompt.empty() && args.load_tools) {
-        system_prompt = build_builtin_system_prompt(args);
-    }
 
-    // Memory vocabulary snapshot — appended once at startup when
-    // --memory is enabled. Local mode rebuilds the prompt only at
-    // process start, so the model sees the keyword index as it stood
-    // when the binary launched; new memories saved mid-session are
-    // visible to memory(action="search") but won't update the
-    // injected vocabulary until the next run. Acceptable for the
-    // one-shot / single-chat local pattern; the server gets a fresh
-    // snapshot per request.
-    //
-    // We pass inject_datetime=false because LocalBackend doesn't
-    // append a date/time block per turn; injecting it once at
-    // startup would freeze "today" at whatever date the binary
-    // launched, which is worse than no injection at all. Date is
-    // expected to come from the datetime tool when needed.
-    if (!system_prompt.empty() && !args.rag_dir.empty()) {
-        std::string vocab = easyai::preamble::build({
-            /* inject_datetime  = */ false,
-            /* knowledge_cutoff = */ std::string(),
-            /* memory_root      = */ args.rag_dir,
-            /* cite_sources     = */ true,
-        });
-        if (!vocab.empty()) system_prompt += vocab;
-    }
-
-    // --show-system-prompt: dump the resolved prompt to stdout and exit
-    // before any model is loaded. Doesn't need -m / a working sandbox /
-    // anything else — purely a "what would the model see?" diagnostic.
-    if (args.show_system_prompt) {
-        std::fputs(system_prompt.c_str(), stdout);
-        std::fputc('\n', stdout);
-        return 0;
-    }
-
+    // Compute the effective preset (default + per-flag overrides).
     const easyai::Preset * p0 = easyai::find_preset(args.preset);
     easyai::Preset preset = p0 ? *p0 : *easyai::find_preset("precise");
-    // Overlay any explicit --temperature/--top-p/--top-k/--min-p on top of the
-    // chosen preset so the user's flags always win.
     if (args.temperature >= 0) preset.temperature = args.temperature;
     if (args.top_p       >= 0) preset.top_p       = args.top_p;
     if (args.top_k       >= 0) preset.top_k       = args.top_k;
     if (args.min_p       >= 0) preset.min_p       = args.min_p;
 
-    // ----- build backend ---------------------------------------------------
-    easyai::LocalBackend::Config lc;
-    lc.model_path     = args.model_path;
-    lc.system_prompt  = system_prompt;
-    lc.sandbox        = args.sandbox;
-    lc.allow_bash     = args.allow_bash;
-    lc.allow_python   = args.allow_python;
-    lc.external_tools_dir = args.external_tools_dir;
-    lc.quiet              = args.quiet;
-    lc.rag_dir            = args.rag_dir;
-    lc.n_ctx          = args.n_ctx;
-    lc.n_batch        = args.n_batch;
-    lc.ngl            = args.ngl;
-    lc.n_threads      = args.n_threads;
-    lc.load_tools     = args.load_tools;
-    lc.preset         = preset;
-    lc.repeat_penalty = args.repeat_penalty;
-    lc.max_tokens     = args.max_tokens;
-    lc.seed           = args.seed;
-    lc.cache_type_k   = args.cache_type_k;
-    lc.cache_type_v   = args.cache_type_v;
-    lc.no_kv_offload     = args.no_kv_offload;
-    lc.kv_unified        = args.kv_unified;
-    lc.kv_overrides      = args.kv_overrides;
-    lc.spec_type         = args.spec_type;
-    lc.spec_draft_model  = args.spec_draft_model;
-    lc.spec_draft_n_max  = args.spec_draft_n_max;
-    auto backend = std::make_unique<easyai::LocalBackend>(std::move(lc));
+    // Build the Session from the Config.  Session is the single
+    // unified entry point — same shape whether the model runs in
+    // process (Session::local) or behind an HTTP endpoint
+    // (Session::remote).  No more bespoke "view, registry, system
+    // composer" wiring in this binary; everything is in the lib.
+    auto session = easyai::Session::local(to_config(args, preset));
+    if (!explicit_system.empty()) session.system(explicit_system);
+
+    // --show-system-prompt: render the prompt Session WILL push to the
+    // model and exit.  Doesn't need -m / a working sandbox — purely a
+    // "what would the model see?" diagnostic.  Skip init() so no GGUF
+    // is loaded.  active_tools is empty here (init hasn't run), so the
+    // catalogue tail is omitted; the rest matches what init+chat will
+    // see at runtime.
+    if (args.show_system_prompt) {
+        std::fputs(session.render_system().c_str(), stdout);
+        std::fputc('\n', stdout);
+        return 0;
+    }
 
     std::string err;
-    if (!backend->init(err)) {
+    if (!session.init(err)) {
         std::fprintf(stderr, "[easyai-local] init failed: %s\n", err.c_str());
         return 1;
     }
 
+    easyai::text::ThinkStripper strip;
+    strip.enabled = args.no_think;
+    easyai::ui::Spinner spinner(/*enabled=*/!args.quiet);
+
+    // Streaming pipe: every visible token chunk lands on the spinner.
+    // The same callback drives one-shot AND REPL, so set it up once
+    // on the Session.  Refreshes the ctx-fill gauge per chunk so the
+    // `|45%` indicator tracks the cursor live; no-op when --quiet
+    // (the spinner is disabled and ignores set_context_pct).
+    session.on_token([&](const std::string & piece){
+        std::string visible = strip.filter(piece);
+        if (!visible.empty()) spinner.write(visible);
+        int pct = session.ctx_pct();
+        if (pct >= 0) spinner.set_context_pct(pct);
+    });
+
     // ----- one-shot mode --------------------------------------------------
     if (!args.prompt.empty()) {
         // Banners → stderr so stdout is clean for piping.
-        std::fprintf(stderr, "[easyai-local] %s\n", backend->info().c_str());
+        std::fprintf(stderr, "[easyai-local] %s\n", session.info().c_str());
 
-        easyai::text::ThinkStripper strip;
-        strip.enabled = args.no_think;
-        easyai::ui::Spinner spinner(/*enabled=*/!args.quiet);
         spinner.start_heartbeat();
 
         // Honour an inline preset prefix in the prompt too.
         std::string text = args.prompt;
         easyai::PresetResult pr = easyai::parse_preset(text);
         if (!pr.applied.empty()) {
-            backend->set_sampling(pr.temperature, pr.top_p, pr.top_k, pr.min_p);
+            session.set_sampling(pr.temperature, pr.top_p, pr.top_k, pr.min_p);
             std::fprintf(stderr, "[preset → %s]\n", pr.applied.c_str());
             text = text.substr(pr.consumed);
         }
 
         try {
-            backend->chat(text, [&](const std::string & p){
-                std::string visible = strip.filter(p);
-                if (!visible.empty()) spinner.write(visible);
-                // Refresh the ctx-fill gauge each token so `|45%`
-                // tracks the cursor live.  No-op when --quiet (the
-                // spinner is disabled and ignores set_context_pct).
-                int pct = backend->ctx_pct();
-                if (pct >= 0) spinner.set_context_pct(pct);
-            });
+            session.chat(text);
         } catch (const std::exception & e) {
             spinner.stop_heartbeat();
             spinner.finish();
@@ -481,11 +448,11 @@ int main(int argc, char ** argv) {
         // model produced a partial answer and the loop bailed because
         // n_ctx is full.  Operator needs to know to /reset (REPL) or
         // start a new process (one-shot).
-        if (backend->last_was_ctx_full()) {
+        if (session.last_was_ctx_full()) {
             std::fprintf(stderr,
                 "\n── context full ──\n%s\n"
                 "Start a new conversation (or shorten the prompt) to keep going.\n",
-                backend->last_error().c_str());
+                session.last_error().c_str());
         }
         return 0;
     }
@@ -494,12 +461,8 @@ int main(int argc, char ** argv) {
     std::fprintf(stderr,
         "[easyai-local] %s  preset=%s%s\n"
         "             type '/help' for commands, '/quit' to exit\n",
-        backend->info().c_str(), preset.name.c_str(),
+        session.info().c_str(), preset.name.c_str(),
         args.no_think ? "  [no-think]" : "");
-
-    easyai::text::ThinkStripper strip;
-    strip.enabled = args.no_think;
-    easyai::ui::Spinner spinner(/*enabled=*/!args.quiet);
 
     std::string line;
     while (true) {
@@ -511,7 +474,7 @@ int main(int argc, char ** argv) {
         if (line == "/quit" || line == "/exit") break;
         if (line == "/help" || line == "/?")    { print_presets(); continue; }
         if (line == "/reset") {
-            backend->reset();
+            session.reset();
             strip.reset();
             std::cout << "[history cleared]\n";
             continue;
@@ -519,14 +482,14 @@ int main(int argc, char ** argv) {
         if (line == "/think")    { strip.enabled = false; std::cout << "[thinking shown]\n"; continue; }
         if (line == "/no-think") { strip.enabled = true;  std::cout << "[thinking hidden]\n"; continue; }
         if (line == "/tools") {
-            for (const auto & [n, d] : backend->tool_list()) {
+            for (const auto & [n, d] : session.tool_list()) {
                 std::cout << "  " << n << " — " << d << "\n";
             }
-            if (backend->tool_count() == 0) std::cout << "[no tools registered]\n";
+            if (session.tool_count() == 0) std::cout << "[no tools registered]\n";
             continue;
         }
         if (line.rfind("/system ", 0) == 0) {
-            backend->set_system(line.substr(8));
+            session.set_system(line.substr(8));
             std::cout << "[system prompt updated; history cleared]\n";
             continue;
         }
@@ -534,7 +497,7 @@ int main(int argc, char ** argv) {
         // -------- preset / temperature command ----------------------------
         easyai::PresetResult pr = easyai::parse_preset(line);
         if (!pr.applied.empty()) {
-            backend->set_sampling(pr.temperature, pr.top_p, pr.top_k, pr.min_p);
+            session.set_sampling(pr.temperature, pr.top_p, pr.top_k, pr.min_p);
             std::fprintf(stderr, "[preset → %s]\n", pr.applied.c_str());
             if (pr.consumed >= line.size()) continue;
             line = line.substr(pr.consumed);
@@ -545,12 +508,7 @@ int main(int argc, char ** argv) {
         std::cout << "\033[33m";
         spinner.start_heartbeat();
         try {
-            backend->chat(line, [&](const std::string & p){
-                std::string visible = strip.filter(p);
-                if (!visible.empty()) spinner.write(visible);
-                int pct = backend->ctx_pct();
-                if (pct >= 0) spinner.set_context_pct(pct);
-            });
+            session.chat(line);
             std::string tail = strip.flush();
             if (!tail.empty()) spinner.write(tail);
             spinner.stop_heartbeat();
@@ -566,13 +524,13 @@ int main(int argc, char ** argv) {
         // error.  REPL stays open; the operator can /reset and keep
         // going.  When this fires we suppress the generic last_error
         // line below since they'd be redundant.
-        if (backend->last_was_ctx_full()) {
+        if (session.last_was_ctx_full()) {
             std::fprintf(stderr,
                 "── context full ──\n%s\n"
                 "Use /reset to clear history and free the context window.\n",
-                backend->last_error().c_str());
-        } else if (!backend->last_error().empty()) {
-            std::fprintf(stderr, "[easyai-local] %s\n", backend->last_error().c_str());
+                session.last_error().c_str());
+        } else if (!session.last_error().empty()) {
+            std::fprintf(stderr, "[easyai-local] %s\n", session.last_error().c_str());
         }
     }
 

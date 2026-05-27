@@ -4,20 +4,25 @@
 #
 #   find_package(easyai 0.1 REQUIRED)
 #   add_executable(myapp main.cpp)
-#   target_link_libraries(myapp PRIVATE easyai::engine)   # local llama.cpp
-#   # ...or for the OpenAI-protocol client:
-#   target_link_libraries(myapp PRIVATE easyai::cli)
-#   # ...or both:
-#   target_link_libraries(myapp PRIVATE easyai::engine easyai::cli)
+#   target_link_libraries(myapp PRIVATE easyai::easyai)
 #
-# Hand-rolled IMPORTED targets — install(EXPORT) doesn't play well with
+# easyai ships as ONE unified library (libeasyai.so).  It carries the
+# local llama.cpp Engine, the OpenAI-protocol Client, every built-in
+# tool, the system-prompt composer, the high-level Session, and the
+# CLI helpers.  There is no split between "engine" and "cli" libraries.
+#
+# Legacy aliases easyai::engine and easyai::cli still resolve to the
+# same unified library, so consumers from the split-layout era keep
+# linking without a code change.
+#
+# Hand-rolled IMPORTED target — install(EXPORT) doesn't play well with
 # our llama.cpp subdir (added EXCLUDE_FROM_ALL so its app/server targets
-# don't pollute the build).  We resolve the .so files at find_package
-# time and create UNKNOWN IMPORTED libs that downstream just links to.
+# don't pollute the build).  We resolve the .so file at find_package
+# time and create an UNKNOWN IMPORTED lib that downstream just links to.
 #
-# The libs depend at RUNTIME on libllama.so / libllama-common.so —
+# The lib depends at RUNTIME on libllama.so / libllama-common.so —
 # consumers must ensure those are reachable on the system loader path
-# (typical: ship them in /usr/lib/easyai/ alongside libeasyai*.so + set
+# (typical: ship them in /usr/lib/easyai/ alongside libeasyai.so + set
 # LD_LIBRARY_PATH or rpath; that's what scripts/install_easyai_server.sh
 # does for the server unit).
 
@@ -26,22 +31,13 @@
 set_and_check(_easyai_pkg_libdir     "@PACKAGE_CMAKE_INSTALL_LIBDIR@")
 set_and_check(_easyai_pkg_includedir "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
 
-# Engine lib — libeasyai.so (local llama.cpp wrapper).
-find_library(EASYAI_ENGINE_LIBRARY
+# Unified easyai lib — libeasyai.so/.dylib.
+find_library(EASYAI_LIBRARY
     NAMES easyai
     HINTS "${_easyai_pkg_libdir}"
     NO_DEFAULT_PATH)
-if (NOT EASYAI_ENGINE_LIBRARY)
-    find_library(EASYAI_ENGINE_LIBRARY NAMES easyai)
-endif()
-
-# Client lib — libeasyai-cli.so (OpenAI-protocol client).
-find_library(EASYAI_CLI_LIBRARY
-    NAMES easyai-cli
-    HINTS "${_easyai_pkg_libdir}"
-    NO_DEFAULT_PATH)
-if (NOT EASYAI_CLI_LIBRARY)
-    find_library(EASYAI_CLI_LIBRARY NAMES easyai-cli)
+if (NOT EASYAI_LIBRARY)
+    find_library(EASYAI_LIBRARY NAMES easyai)
 endif()
 
 find_path(EASYAI_INCLUDE_DIR
@@ -52,27 +48,20 @@ if (NOT EASYAI_INCLUDE_DIR)
     find_path(EASYAI_INCLUDE_DIR NAMES easyai/easyai.hpp)
 endif()
 
-if (EASYAI_ENGINE_LIBRARY AND EASYAI_INCLUDE_DIR
-        AND NOT TARGET easyai::engine)
-    add_library(easyai::engine UNKNOWN IMPORTED)
-    set_target_properties(easyai::engine PROPERTIES
-        IMPORTED_LOCATION             "${EASYAI_ENGINE_LIBRARY}"
+if (EASYAI_LIBRARY AND EASYAI_INCLUDE_DIR
+        AND NOT TARGET easyai::easyai)
+    add_library(easyai::easyai UNKNOWN IMPORTED)
+    set_target_properties(easyai::easyai PROPERTIES
+        IMPORTED_LOCATION             "${EASYAI_LIBRARY}"
         INTERFACE_INCLUDE_DIRECTORIES "${EASYAI_INCLUDE_DIR}"
         INTERFACE_COMPILE_FEATURES    "cxx_std_17")
-endif()
-
-if (EASYAI_CLI_LIBRARY AND EASYAI_INCLUDE_DIR
-        AND NOT TARGET easyai::cli)
-    add_library(easyai::cli UNKNOWN IMPORTED)
-    set_target_properties(easyai::cli PROPERTIES
-        IMPORTED_LOCATION             "${EASYAI_CLI_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES "${EASYAI_INCLUDE_DIR}"
-        INTERFACE_COMPILE_FEATURES    "cxx_std_17"
-        INTERFACE_LINK_LIBRARIES      "easyai::engine")
+    # Legacy aliases — same underlying library.
+    add_library(easyai::engine ALIAS easyai::easyai)
+    add_library(easyai::cli    ALIAS easyai::easyai)
 endif()
 
 set(easyai_FOUND TRUE)
-if (NOT EASYAI_ENGINE_LIBRARY OR NOT EASYAI_INCLUDE_DIR)
+if (NOT EASYAI_LIBRARY OR NOT EASYAI_INCLUDE_DIR)
     set(easyai_FOUND FALSE)
     set(easyai_NOT_FOUND_MESSAGE
         "easyai package found but lib/include couldn't be located. "

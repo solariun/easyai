@@ -121,9 +121,31 @@ if (EASYAI_BUILD_LLAMA_TOOLS)
 endif()
 
 # ============================================================================
-# libeasyai — local llama.cpp engine library
+# libeasyai — UNIFIED easyai library
+# ----------------------------------------------------------------------------
+# Single library target.  Carries everything: the local llama.cpp Engine,
+# the OpenAI-protocol Client, the canonical built-in / external / RAG /
+# MCP tools, the system-prompt composer (preamble), the Backend
+# abstraction + LocalBackend/RemoteBackend, the high-level Session, and
+# the CLI helpers (Toolbelt, log tee, sandbox validation).
+#
+# We deliberately do NOT split into libeasyai + libeasyai-cli.  Splitting
+# was a layering convenience that asked downstream agents to pick the
+# right link line per feature.  The product is the library; demos
+# (easyai-cli, easyai-server, easyai-mcp-server) consume the same single
+# library.  Anything pulled in by HTTPS / cpp-httplib is conditional on
+# CMake-time finds (libcurl, OpenSSL), not on linkage choice.
+#
+# NOTE: cpp-httplib's httplib.cpp is compiled DIRECTLY into libeasyai
+# instead of consuming the vendored cpp-httplib static target.  Reason:
+# llama.cpp's cpp-httplib build doesn't define CPPHTTPLIB_OPENSSL_SUPPORT,
+# so the static lib has no SSLClient symbols — defining the macro on our
+# side and instantiating SSLClient would fail the link.  Re-compiling
+# the .cpp here lets us add the macro and link OpenSSL ourselves, without
+# touching the upstream vendor build that easyai-server already relies on.
 # ============================================================================
 set(EASYAI_SOURCES
+    # core
     src/engine.cpp
     src/tool.cpp
     src/builtin_tools.cpp
@@ -139,10 +161,23 @@ set(EASYAI_SOURCES
     src/log.cpp
     src/cli.cpp
     src/backend.cpp
+    # remote-side (Client, RemoteBackend, agent runners, Session)
+    src/client.cpp
+    src/cli_client.cpp
+    src/agent.cpp
+    src/session.cpp
+    # vendored httplib (see header comment above)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor/cpp-httplib/httplib.cpp
 )
 
 add_library(easyai ${EASYAI_SOURCES})
+# Public alias — `easyai::easyai` is the canonical link target.
+# Legacy aliases (`easyai::engine`, `easyai::cli`) kept as no-op aliases
+# for one release so existing consumers of the split layout keep
+# linking; both now point at the same unified library.
+add_library(easyai::easyai ALIAS easyai)
 add_library(easyai::engine ALIAS easyai)
+add_library(easyai::cli    ALIAS easyai)
 set_target_properties(easyai PROPERTIES
     VERSION   ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR}
@@ -150,7 +185,9 @@ set_target_properties(easyai PROPERTIES
 target_include_directories(easyai
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor             # nlohmann/json.hpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor/cpp-httplib) # httplib.h
 # BUILD_INTERFACE wraps the link so the dep doesn't leak into the
 # exported `easyaiTargets.cmake` — downstream consumers don't see
 # llama / llama-common as required CMake targets, they just link
@@ -172,45 +209,7 @@ if (EASYAI_WITH_CURL)
     endif()
 endif()
 
-# ============================================================================
-# libeasyai-cli — OpenAI-protocol client library
-# ----------------------------------------------------------------------------
-# Target NAME is `easyai_cli` (CMake-internal — needs to be different from
-# the existing `easyai-cli` executable target below).  OUTPUT_NAME forces
-# the on-disk artifact to `libeasyai-cli.so` / `libeasyai-cli.a`.  Public
-# alias `easyai::cli` keeps downstream link-lines clean.
-# ============================================================================
-# NOTE: we compile cpp-httplib's httplib.cpp DIRECTLY into easyai_cli
-# instead of linking the vendored cpp-httplib static target.  Reason:
-# llama.cpp's cpp-httplib build doesn't define CPPHTTPLIB_OPENSSL_SUPPORT,
-# so the static lib has no SSLClient symbols — if we just defined the
-# macro on our side and tried to instantiate SSLClient, the linker
-# would fail.  Re-compiling the .cpp here lets us add the macro and
-# link OpenSSL ourselves, without touching the upstream vendor build
-# that easyai-server already relies on.
-set(EASYAI_CLI_SOURCES
-    src/client.cpp
-    src/cli_client.cpp
-    src/agent.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor/cpp-httplib/httplib.cpp
-)
-
-add_library(easyai_cli ${EASYAI_CLI_SOURCES})
-add_library(easyai::cli ALIAS easyai_cli)
-set_target_properties(easyai_cli PROPERTIES
-    VERSION   ${PROJECT_VERSION}
-    SOVERSION ${PROJECT_VERSION_MAJOR}
-    OUTPUT_NAME "easyai-cli")
-target_include_directories(easyai_cli
-    PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-            $<INSTALL_INTERFACE:include>
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
-            ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor             # nlohmann/json.hpp
-            ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor/cpp-httplib) # httplib.h
-target_link_libraries(easyai_cli PUBLIC easyai)   # reuse Tool/ToolCall/ToolResult
-target_compile_features(easyai_cli PUBLIC cxx_std_17)
-
-# OpenSSL -> HTTPS support inside libeasyai-cli.  Optional: when libssl
+# OpenSSL -> HTTPS support inside libeasyai.  Optional: when libssl
 # isn't available we skip the define and Client returns a clear
 # "HTTPS not in this build" error at request time.
 #
@@ -224,8 +223,8 @@ target_compile_features(easyai_cli PUBLIC cxx_std_17)
 # openssl@3) (the install + build_macos scripts do this automatically).
 find_package(OpenSSL QUIET)
 if (OpenSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
-    target_compile_definitions(easyai_cli PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT=1)
-    target_link_libraries(easyai_cli PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(easyai PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT=1)
+    target_link_libraries(easyai PRIVATE OpenSSL::SSL OpenSSL::Crypto)
     # On macOS, cpp-httplib's SSL build calls CFArray* / SecCertificate* /
     # SecTrust* to load the system keychain — those live in the
     # CoreFoundation and Security frameworks.  No-op on other platforms.
@@ -233,21 +232,21 @@ if (OpenSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
         find_library(EASYAI_COREFOUNDATION CoreFoundation)
         find_library(EASYAI_SECURITY       Security)
         if (EASYAI_COREFOUNDATION AND EASYAI_SECURITY)
-            target_link_libraries(easyai_cli PRIVATE
+            target_link_libraries(easyai PRIVATE
                 ${EASYAI_COREFOUNDATION} ${EASYAI_SECURITY})
         else()
-            message(WARNING "easyai-cli: CoreFoundation / Security frameworks "
+            message(WARNING "easyai: CoreFoundation / Security frameworks "
                             "not found — HTTPS link may fail on macOS")
         endif()
     endif()
-    message(STATUS "easyai-cli: OpenSSL found — HTTPS endpoints enabled")
+    message(STATUS "easyai: OpenSSL found — HTTPS endpoints enabled")
 elseif (OpenSSL_FOUND)
-    message(WARNING "easyai-cli: OpenSSL detected but imported targets "
+    message(WARNING "easyai: OpenSSL detected but imported targets "
                     "OpenSSL::SSL/Crypto were not created — HTTPS disabled. "
                     "On macOS, install brew openssl@3 and pass "
                     "-DOPENSSL_ROOT_DIR=$(brew --prefix openssl@3).")
 else()
-    message(STATUS "easyai-cli: OpenSSL NOT found — HTTPS endpoints will be rejected at runtime")
+    message(STATUS "easyai: OpenSSL NOT found — HTTPS endpoints will be rejected at runtime")
 endif()
 
 # ============================================================================
@@ -255,7 +254,7 @@ endif()
 # ============================================================================
 if (EASYAI_BUILD_EXAMPLES)
     add_executable(easyai-chat examples/chat.cpp)
-    target_link_libraries(easyai-chat PRIVATE easyai easyai_cli)
+    target_link_libraries(easyai-chat PRIVATE easyai)
 
     add_executable(easyai-agent examples/agent.cpp)
     target_link_libraries(easyai-agent PRIVATE easyai)
@@ -324,9 +323,15 @@ if (EASYAI_BUILD_EXAMPLES)
     # No local model — pair with easyai-local when you want to run a GGUF
     # in-process instead.
     add_executable(easyai-cli examples/cli.cpp)
-    target_link_libraries(easyai-cli PRIVATE easyai_cli)
+    target_link_libraries(easyai-cli PRIVATE easyai)
     target_include_directories(easyai-cli PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor)
+
+    # easyai-library-demo — minimum-viable Session demo (OpenAI-Python-
+    # SDK shape).  Paired with LIB_GUIDE.md: shows third-party authors
+    # the smallest "build an agent, register a tool, chat" program.
+    add_executable(easyai-library-demo examples/library_demo.cpp)
+    target_link_libraries(easyai-library-demo PRIVATE easyai)
 
     # easyai-mcp-server — standalone Model Context Protocol provider.
     # Links libeasyai (for tools, RAG, external-tools, MCP dispatcher,
@@ -355,11 +360,14 @@ endif()
 # After `cmake --install build`, downstream projects can do:
 #
 #   find_package(easyai 0.1 REQUIRED)
-#   target_link_libraries(myapp PRIVATE easyai::engine easyai::cli)
+#   target_link_libraries(myapp PRIVATE easyai::easyai)
 #
-# The lib targets are exported with VERSION/SOVERSION matching the project
-# version, public include dir relocated to <prefix>/include, and the cmake
-# config files written to <prefix>/lib/cmake/easyai/.
+# (Legacy aliases easyai::engine and easyai::cli still resolve to the
+# same unified library for one release.)
+#
+# The lib target is exported with VERSION/SOVERSION matching the project
+# version, public include dir relocated to <prefix>/include, and the
+# cmake config files written to <prefix>/lib/cmake/easyai/.
 # ============================================================================
 if (EASYAI_INSTALL)
     include(GNUInstallDirs)
@@ -370,7 +378,7 @@ if (EASYAI_INSTALL)
     # EXCLUDE_FROM_ALL) confuses CMake's exported-target tracker.  Hand-
     # rolling the config + IMPORTED targets sidesteps that and gives
     # downstream projects a clean find_package(easyai) experience.
-    install(TARGETS easyai easyai_cli
+    install(TARGETS easyai
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

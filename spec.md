@@ -1,3 +1,82 @@
+# easyai Specification
+
+## Library boundary (AUTHORITATIVE — 2026-05-27)
+
+easyai ships as ONE library — `libeasyai`. There is no split between
+"engine" and "cli" libraries; the same shared object carries Engine,
+Client, Session, every tool, and the system-prompt composer. CLI /
+server / MCP binaries are demos that prove the lib's surface; they
+link a single target (`easyai` / `easyai::easyai`). Legacy aliases
+`easyai::engine` and `easyai::cli` resolve to the unified target so
+existing split-layout link lines still work.
+
+| Concern | Lives where |
+|---------|-------------|
+| AI connection — local llama.cpp | `easyai::Engine` (lib) |
+| AI connection — remote OpenAI-protocol | `easyai::Client` (lib) |
+| Backend abstraction (uniform `chat`/`reset`) | `easyai::Backend`, `LocalBackend`, `RemoteBackend` (lib) |
+| Built-in tools (datetime/web/fs/bash/python/memory/tool_lookup) | `easyai::tools::*` (lib) |
+| System-prompt composition | `easyai::preamble::*` + `easyai::Session` (lib) |
+| One-call agent setup | `easyai::Session` (lib) |
+| External tool loader (`EASYAI-*.tools` manifests) | `easyai::load_external_tools_from_dir` (lib) |
+| MCP server / client | `easyai::mcp::*`, `easyai::McpClient` (lib) |
+| HTTP server, SSE, web UI | `examples/server.cpp` ONLY |
+| REPL, hybrid shell, signal handling | `examples/cli.cpp` ONLY |
+| `--show-system-prompt`, presets, banners | shared via lib helpers; binary owns the flag |
+
+Rule: anything that touches the model, registers a tool, or composes a
+system prompt MUST live in the lib so a third-party agent reads as
+short as ours. The binaries own the surface their job requires
+(HTTP routes, terminal UX, signal handling), nothing more.
+
+## Session API (AUTHORITATIVE — 2026-05-27)
+
+`easyai::Session` is the OpenAI-Python-SDK-shaped one-call entry
+point. See `LIB_GUIDE.md` for the prose; the contract:
+
+| Surface | Contract |
+|---------|----------|
+| `Session::local(path)` · `Session::local(Config)` · `Session::remote(url, model)` | Pick the backend once; same fluent API after. |
+| `.system(text)` | Replace the BASE prompt verbatim — lib default suppressed. |
+| `.no_builtin_system()` | Drop the lib's default BASE; combine with `.system_append(...)` to author from scratch. |
+| `.system_append(text)` / `.system_append(callable)` | Concatenated after the BASE in call order. Dynamic form recomputed on every `refresh_system()`. |
+| `.preamble_options(opt)` | Override per-turn `preamble::Options` (date/time, cutoff, memory_root, cite_sources). |
+| `.with_default_tools(bool)` | Toggle the canonical toolset (datetime + web + tool_lookup baseline, plus gated fs/bash/python/memory/external). On by default. |
+| `.add_tool(Tool)` | Append a custom tool; its `Tool::system_addendum` is collected. |
+| `.init(err)` | Builds backend + tools + system. Once per session. |
+| `.refresh_system()` | Re-render and push the system prompt after a mid-session `.system_append`. |
+| `.chat(user)` | Runs the agentic loop, returns visible reply. Tokens stream via `.on_token` callback. |
+| `.render_system()` | Returns the resolved system prompt for inspection. |
+
+System-prompt composition order (5 layers, see `LIB_GUIDE.md` §4):
+**base → tool addenda → operator appends → dynamic preamble → tools catalogue**.
+The tools-catalogue tail is local-only; remote sessions delegate to the
+server's own `build_session_info` (server-side, per-request).
+
+## Tool::system_addendum (AUTHORITATIVE — 2026-05-27)
+
+New optional `std::string` field on `easyai::Tool`. When a tool is
+registered onto a `Session` (or any Backend that honours
+`Config::extra_tools`), the addendum is concatenated into the system
+prompt with blank-line separators. Authoring rule: a tool that needs
+prompt-level guardrails (policy, citation rules, "always confirm X
+first") ships them itself instead of asking the application to
+mirror-paste a paragraph into its own system prompt. Removes the
+"did we update both places?" drift.
+
+Builder access: `Tool::builder("name").system_addendum("…")`.
+
+## Backend::Config extensions (2026-05-27)
+
+`LocalBackend::Config` and `RemoteBackend::Config` gained two fields,
+populated by `Session` and also usable directly by callers who skip
+the Session layer:
+
+| Field | What |
+|-------|------|
+| `std::vector<Tool> extra_tools` | Caller-supplied tools, registered AFTER built-ins / memory / external, BEFORE `tool_lookup`. |
+| `std::string system_appendix` | Static text appended to the system prompt AFTER tool addenda, BEFORE the AVAILABLE-TOOLS catalogue (local). |
+
 # easyai-cli Specification
 
 ## Modes

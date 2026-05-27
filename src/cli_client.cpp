@@ -261,7 +261,6 @@ struct RemoteBackend::Impl {
                .model   (cfg.model)
                .timeout_seconds((int) cfg.timeout_seconds);
         if (!cfg.api_key.empty())       client->api_key(cfg.api_key);
-        if (!cfg.system_prompt.empty()) client->system (cfg.system_prompt);
         push_sampling();
         if (cfg.max_tokens > 0)  client->max_tokens(cfg.max_tokens);
         if (cfg.seed       >= 0) client->seed      (cfg.seed);
@@ -274,6 +273,32 @@ struct RemoteBackend::Impl {
                 .allow_bash(cfg.allow_bash)
                 .apply     (*client);
         }
+
+        // Caller-supplied tools — registered after the built-in
+        // toolbelt so a name collision lands a hard error on the model
+        // side (not a silent shadow).  Their `system_addendum`s are
+        // collected below.
+        for (auto & t : cfg.extra_tools) client->add_tool(t);
+
+        // Compose the final system prompt mirroring LocalBackend:
+        //   base + tool addenda + system_appendix
+        // (Remote mode leaves the AVAILABLE-TOOLS catalogue to the
+        //  server — it has the authoritative tool list and renders
+        //  the catalogue per request via preamble::build_session_info.)
+        std::string sys = cfg.system_prompt;
+        for (const auto & t : client->tools()) {
+            if (t.system_addendum.empty()) continue;
+            if (!sys.empty() && sys.back() != '\n') sys += '\n';
+            sys += '\n';
+            sys += t.system_addendum;
+            sys += '\n';
+        }
+        if (!cfg.system_appendix.empty()) {
+            if (!sys.empty() && sys.back() != '\n') sys += '\n';
+            sys += '\n';
+            sys += cfg.system_appendix;
+        }
+        if (!sys.empty()) client->system(sys);
     }
     void push_sampling() {
         if (!client) return;
@@ -351,5 +376,8 @@ std::vector<std::pair<std::string,std::string>> RemoteBackend::tool_list() const
 
 int  RemoteBackend::ctx_pct()           const { return p_->client ? p_->client->last_ctx_pct() : -1; }
 bool RemoteBackend::last_was_ctx_full() const { return p_->client && p_->client->last_was_ctx_full(); }
+
+Client *       RemoteBackend::client()       { return p_->client.get(); }
+const Client * RemoteBackend::client() const { return p_->client.get(); }
 
 }  // namespace easyai

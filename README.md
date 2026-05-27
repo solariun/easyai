@@ -9,20 +9,24 @@ easyai turns [llama.cpp](https://github.com/ggml-org/llama.cpp) into an
 it C++ functions; it gives the model the ability to call them.  That's
 the whole pitch.
 
-It ships **two libraries** you can `find_package(easyai)` and link
-against, plus six ready-to-run binaries:
+It ships **one unified library** (`libeasyai`) you can
+`find_package(easyai)` and link against, plus seven ready-to-run
+binaries. The library is the product; the binaries are demos that
+prove what it can do. See [`LIB_GUIDE.md`](LIB_GUIDE.md) for the
+OpenAI-Python-SDK-shaped `easyai::Session` quickstart and the tour of
+the lib surface.
 
 | Library             | Purpose                                                                                                                                       |
 |---------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `libeasyai`         | Local llama.cpp engine — `easyai::Engine`, `easyai::Tool`, built-in tools, presets, `easyai::Plan`.  Linked via `easyai::engine`.            |
-| `libeasyai-cli`     | OpenAI-protocol client — `easyai::Client` mirrors `Engine` but the model runs on a remote `/v1/chat/completions` endpoint while tools execute locally.  Linked via `easyai::cli`. |
+| `libeasyai`         | Everything in one shared object — `easyai::Engine` (local llama.cpp), `easyai::Client` (OpenAI-protocol HTTP), `easyai::Session` (one-call agent), `easyai::Tool` + built-ins (datetime/web/fs/bash/python/memory/tool_lookup), external-tool loader, RAG store, MCP server/client, the `preamble` composer. Linked via `easyai` (alias `easyai::easyai`). Legacy aliases `easyai::engine` and `easyai::cli` still resolve to the same target. |
 
 | Binary               | What it gives you                                                                                                                                  |
 |----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `easyai-local`       | Local-only REPL: loads a GGUF in-process via `easyai::Engine`. Drop-in `llama-cli` replacement — one-shot scripting (`-p`), tools, presets, optional `<think>` strip, sandboxed `fs_*` tools, opt-in `bash` tool. |
-| `easyai-cli`         | Agentic OpenAI-protocol client built on `libeasyai-cli` — no local model.  REPL, `--shell` (hybrid AI shell), or `-p` one-shot.  Full sampling control (`--temperature`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--frequency-penalty`, `--presence-penalty`, `--seed`, `--max-tokens`, `--stop`), plan tool, server-management subcommands (`--list-models`, `--list-tools`, `--health`, `--props`, `--metrics`, `--set-preset`).  HTTPS via OpenSSL; `--insecure-tls` / `--ca-cert` for dev/internal CAs.  Full doc: [`easyai-cli.md`](easyai-cli.md). |
+| `easyai-local`       | Local-only REPL: loads a GGUF in-process via `easyai::Engine` (driven through `easyai::Session`). Drop-in `llama-cli` replacement — one-shot scripting (`-p`), tools, presets, optional `<think>` strip, sandboxed `fs_*` tools, opt-in `bash` tool. |
+| `easyai-cli`         | Agentic OpenAI-protocol client — no local model.  REPL, `--shell` (hybrid AI shell), or `-p` one-shot.  Full sampling control (`--temperature`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--frequency-penalty`, `--presence-penalty`, `--seed`, `--max-tokens`, `--stop`), plan tool, server-management subcommands (`--list-models`, `--list-tools`, `--health`, `--props`, `--metrics`, `--set-preset`).  HTTPS via OpenSSL; `--insecure-tls` / `--ca-cert` for dev/internal CAs.  Full doc: [`easyai-cli.md`](easyai-cli.md). |
 | `easyai-server`      | Drop-in `llama-server` replacement: OpenAI-compat HTTP **with full SSE streaming**, embedded SvelteKit webui, Bearer auth, Prometheus `/metrics`, KV-cache controls, flash-attn, mlock.  Speaks MCP, OpenAI, Ollama from one process.  Full doc: [`easyai-server.md`](easyai-server.md). |
 | `easyai-mcp-server`  | **Standalone Model Context Protocol provider — no model loaded.** Same tool catalogue as `easyai-server` (built-ins + the `memory` tool + external-tools), exposed over `POST /mcp` with a configurable cpp-httplib worker pool (`--threads`) and an in-flight `tools/call` cap (`--max-concurrent-calls`) for thousands-of-clients deployments.  Full doc: [`easyai-mcp-server.md`](easyai-mcp-server.md). |
+| `easyai-library-demo`| Five-line `easyai::Session` template — pair with [`LIB_GUIDE.md`](LIB_GUIDE.md).  The smallest "build an agent, register a tool, chat" program in the repo. |
 | `easyai-agent`       | A demo agent showing every built-in tool plus an inline custom tool.                                                                                |
 | `easyai-recipes`     | Tutorial agent paired with `manual.md` — implements `today_is` and `weather` (HTTP-calling) from scratch.                                          |
 | `easyai-chat`        | A bare-bones REPL with no tools — useful as a sanity check.                                                                                          |
@@ -42,6 +46,37 @@ against, plus six ready-to-run binaries:
 A running log of user-facing changes. Latest first — keep this list
 current as features land so anyone returning to the repo (or
 landing on it for the first time) sees what shipped recently.
+
+### 2026-05-27 — Unified library + `easyai::Session` (OpenAI-Python-SDK shape)
+
+Single library now — `libeasyai` carries everything (Engine, Client,
+every tool, the system-prompt composer, Session). The previous split
+into `libeasyai` + `libeasyai-cli` is gone. Demos all link a single
+target (`easyai`). Legacy aliases (`easyai::engine`, `easyai::cli`)
+still resolve to it so existing CMakeLists keep working.
+
+The new `easyai::Session` (in `easyai/session.hpp`) is the
+recommended entry point — five fluent lines for "build an agent,
+register a tool, chat", mirroring the OpenAI Python SDK call site:
+
+```cpp
+auto session = easyai::Session::remote("http://localhost:8080");
+session.with_default_tools()
+       .system_append("Speak in plain English.")
+       .on_token([](const std::string & p){ std::fputs(p.c_str(), stdout); });
+std::string err;
+session.init(err);
+session.chat("hello");
+```
+
+Pair with `easyai::Tool::builder(...).system_addendum("...")` to let a
+custom tool ship its own system-prompt guardrails — Session
+auto-concatenates them. Full reference in
+[`LIB_GUIDE.md`](LIB_GUIDE.md); minimum demo in `examples/library_demo.cpp`
+(binary `easyai-library-demo`). `examples/local.cpp` has been
+migrated to Session as a reference for in-process agents; `cli.cpp`
+and `server.cpp` follow in a later pass and continue to work via the
+existing Engine/Client paths.
 
 ### 2026-05-26 — `python3` model-facing rename to `evaluate` (back-compat alias)
 

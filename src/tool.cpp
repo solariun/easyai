@@ -58,7 +58,7 @@ Tool Tool::Builder::build() const {
     }
     js << "]}";
 
-    return Tool{ name_, desc_, short_, js.str(), handler_ };
+    return Tool{ name_, desc_, short_, js.str(), handler_, addendum_ };
 }
 
 // Resolve the description that should ship in the per-turn `<tools>`

@@ -118,6 +118,13 @@ bool LocalBackend::init(std::string & err) {
         for (auto & t : loaded.tools) engine.add_tool(t);
     }
 
+    // Caller-supplied tools — registered AFTER built-ins, memory, and
+    // external tools so name collisions surface as obvious wins for
+    // the operator's intent (their last-registered tool shadows the
+    // earlier one).  Their `system_addendum` (if any) is collected
+    // below and concatenated into the prompt.
+    for (auto & t : cfg.extra_tools) engine.add_tool(t);
+
     // tool_lookup — registered last so its snapshot covers everything
     // above. Always on (no opt-out) when load_tools is enabled: the
     // model uses it as a guard before assuming a tool exists. The
@@ -144,17 +151,37 @@ bool LocalBackend::init(std::string & err) {
             r.content.size() > 200 ? "…" : "");
     });
 
-    // Append AVAILABLE TOOLS + VERIFY-BEFORE-YOU-CALL block to the
-    // system prompt now that every tool has been registered. Done once
-    // at init (the registry doesn't change after this point), so every
-    // LocalBackend caller — local one-shot, embedded REPL, anything
-    // wiring up a LocalBackend directly — gets the catalogue +
-    // lookup-first rule without having to call build_session_info()
-    // themselves. Mirrors the per-request injection server.cpp does on
-    // the first user turn.
-    if (cfg.load_tools && !engine.tools().empty()) {
-        const std::string si = preamble::build_session_info(engine.tools());
-        if (!si.empty()) engine.system(cfg.system_prompt + si);
+    // Compose the final system prompt:
+    //
+    //   base (cfg.system_prompt)
+    //     + concatenated Tool::system_addendum from every registered tool
+    //     + cfg.system_appendix (caller-supplied static text)
+    //     + AVAILABLE TOOLS + VERIFY-BEFORE-YOU-CALL block
+    //
+    // Done once at init (the registry doesn't change after this point),
+    // so every LocalBackend caller — local one-shot, embedded REPL,
+    // anything wiring up a LocalBackend directly — gets the same
+    // composition without having to do it themselves. Mirrors the
+    // per-request injection server.cpp does on the first user turn.
+    {
+        std::string sys = cfg.system_prompt;
+        for (const auto & t : engine.tools()) {
+            if (t.system_addendum.empty()) continue;
+            if (!sys.empty() && sys.back() != '\n') sys += '\n';
+            sys += '\n';
+            sys += t.system_addendum;
+            sys += '\n';
+        }
+        if (!cfg.system_appendix.empty()) {
+            if (!sys.empty() && sys.back() != '\n') sys += '\n';
+            sys += '\n';
+            sys += cfg.system_appendix;
+        }
+        if (cfg.load_tools && !engine.tools().empty()) {
+            const std::string si = preamble::build_session_info(engine.tools());
+            if (!si.empty()) sys += si;
+        }
+        if (sys != cfg.system_prompt) engine.system(sys);
     }
 
     if (!engine.load()) {
@@ -213,5 +240,8 @@ int LocalBackend::ctx_pct() const {
 bool LocalBackend::last_was_ctx_full() const {
     return p_->engine.last_was_ctx_full();
 }
+
+Engine *       LocalBackend::engine()       { return &p_->engine; }
+const Engine * LocalBackend::engine() const { return &p_->engine; }
 
 }  // namespace easyai

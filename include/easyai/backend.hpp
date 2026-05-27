@@ -15,6 +15,7 @@
 #pragma once
 
 #include "presets.hpp"
+#include "tool.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -104,6 +105,17 @@ public:
         std::string spec_type;
         std::string spec_draft_model;
         int         spec_draft_n_max = 0;
+
+        // Caller-supplied tools, registered AFTER the built-in toolbelt
+        // (and AFTER memory / external tools) but BEFORE tool_lookup so
+        // they show up in tool_lookup's catalogue.  Each tool's optional
+        // `system_addendum` is appended to the system prompt at init().
+        std::vector<Tool> extra_tools;
+        // Static text appended to the system prompt AFTER the built-in
+        // preamble + tool addenda, BEFORE the AVAILABLE-TOOLS session
+        // info block.  Use for per-app additions like "You are the
+        // Acme support bot." that should NOT replace the lib's default.
+        std::string       system_appendix;
     };
 
     explicit LocalBackend(Config c);
@@ -125,6 +137,12 @@ public:
     std::vector<std::pair<std::string,std::string>> tool_list() const override;
     int         ctx_pct        () const override;
     bool        last_was_ctx_full() const override;
+
+    // Direct access to the wrapped Engine for callers that need the
+    // streaming knobs / perf counters / chat_params introspection that
+    // Backend doesn't expose.  Returns nullptr if init() hasn't run.
+    Engine *       engine();
+    const Engine * engine() const;
 
 private:
     struct Impl;
@@ -151,6 +169,15 @@ public:
         bool        with_tools      = false;  // register builtin tools on Client
         bool        tls_insecure    = false;
         std::string ca_cert_path;
+
+        // Caller-supplied tools, registered AFTER the built-in toolbelt.
+        // Each tool's optional `system_addendum` is appended to the
+        // system prompt at init() / rebuild() time.
+        std::vector<Tool> extra_tools;
+        // Static text appended to the system prompt AFTER the lib's
+        // default content.  Same semantics as
+        // LocalBackend::Config::system_appendix.
+        std::string       system_appendix;
     };
 
     explicit RemoteBackend(Config c);
@@ -172,6 +199,11 @@ public:
     std::vector<std::pair<std::string,std::string>> tool_list() const override;
     int         ctx_pct        () const override;
     bool        last_was_ctx_full() const override;
+
+    // Direct access to the wrapped Client.  Returns nullptr only if
+    // the impl hasn't been built (init() always builds it).
+    Client *       client();
+    const Client * client() const;
 
 private:
     struct Impl;

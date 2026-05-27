@@ -66,6 +66,22 @@ struct Tool {
     std::string parameters_json;   // JSON schema (object)
     ToolHandler handler;
 
+    // Optional system-prompt contribution. When non-empty, easyai::Session
+    // (and any caller that wants to honour the convention) appends this
+    // text to the system prompt as soon as the tool is registered. Lets
+    // a tool ship its own policy / how-to / examples in lockstep with
+    // its registration — no separate "remember to also add this to your
+    // system prompt" step. Plain text (no leading "##" required, but
+    // welcome); the Session adds a blank line before and after when
+    // emitting it.
+    //
+    // Example:
+    //   easyai::Tool weather = easyai::Tool::builder("weather")
+    //       .describe(...)
+    //       .system_addendum("Always confirm the city before a forecast.")
+    //       .handle(...).build();
+    std::string system_addendum;
+
     // Resolve the trigger string that should be sent in the per-turn
     // tools block. Falls back to the first non-empty line of `description`
     // if `short_description` is empty, capped at ~120 chars so we don't
@@ -73,7 +89,8 @@ struct Tool {
     std::string wire_description() const;
 
     static Tool make(std::string n, std::string d, std::string p, ToolHandler h) {
-        return Tool{ std::move(n), std::move(d), std::string(), std::move(p), std::move(h) };
+        return Tool{ std::move(n), std::move(d), std::string(),
+                     std::move(p), std::move(h), std::string() };
     }
 
     class Builder {
@@ -82,6 +99,9 @@ struct Tool {
 
         Builder & describe      (std::string d) { desc_ = std::move(d); return *this; }
         Builder & short_describe(std::string d) { short_ = std::move(d); return *this; }
+
+        // Optional system-prompt contribution — see Tool::system_addendum.
+        Builder & system_addendum(std::string s) { addendum_ = std::move(s); return *this; }
 
         // Add a typed parameter to the JSON schema.
         // type: "string" | "integer" | "number" | "boolean" | "array" | "object"
@@ -103,6 +123,7 @@ struct Tool {
         std::string    name_;
         std::string    desc_;
         std::string    short_;
+        std::string    addendum_;
         std::vector<P> params_;
         ToolHandler    handler_;
     };
