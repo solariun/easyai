@@ -4214,29 +4214,12 @@ int main(int argc, char ** argv) {
     }
     if (default_system.empty()) default_system = build_builtin_system_prompt(args);
 
-    // --show-system-prompt: dump the resolved persona and exit before
-    // any model loads or any port binds. Resolves --system / --system-file
-    // / built-in default in the same precedence the running server would.
-    // Useful for operators inspecting their persona without bouncing the
-    // service.
-    if (args.show_system_prompt) {
-        std::fputs(default_system.c_str(), stdout);
-        // Preview the memory-vocab portion of the per-request
-        // preamble so the operator can verify the keyword index
-        // without bouncing the service. The date/time half is
-        // dynamic (changes every request); we render only the
-        // memory vocabulary by passing inject_datetime=false.
-        if (!args.rag_dir.empty()) {
-            std::string vocab = easyai::preamble::build({
-                /* inject_datetime  = */ false,
-                /* knowledge_cutoff = */ std::string(),
-                /* memory_root      = */ args.rag_dir,
-            });
-            if (!vocab.empty()) std::fputs(vocab.c_str(), stdout);
-        }
-        std::fputc('\n', stdout);
-        return 0;
-    }
+    // (--show-system-prompt is handled below, AFTER tool registration —
+    // we want each registered tool's `system_addendum` (or its
+    // description, via Tool::effective_system_addendum's fallback) to
+    // appear in the printed prompt, so the operator sees what the model
+    // will actually receive. Model load still never happens; the
+    // early-return sits just before engine.load().)
 
     // Anchor process cwd to --sandbox before loading the external-tools
     // manifest: $SANDBOX placeholders in the manifest are resolved
@@ -4473,6 +4456,33 @@ int main(int argc, char ** argv) {
                 }
                 return v;
             }));
+    }
+
+    // --show-system-prompt: dump the resolved persona + per-tool
+    // addenda and exit before any model loads or any port binds.
+    // Composition delegates to the single library helper
+    // `preamble::compose_system_prompt` — same source of truth as
+    // Session / LocalBackend / RemoteBackend. The server's persona
+    // lives in `default_system` (not on the Engine yet — `Engine::
+    // system()` is rewritten per-request), so we hand both to the
+    // helper directly rather than going through `Engine::
+    // composed_system()`. RAG memory-vocab is appended afterwards
+    // as a preview of the dynamic per-request preamble (its
+    // date/time half is omitted; that's recomputed every request).
+    if (args.show_system_prompt) {
+        std::string sys = easyai::preamble::compose_system_prompt(
+            default_system, ctx->default_tools);
+        if (!args.rag_dir.empty()) {
+            std::string vocab = easyai::preamble::build({
+                /* inject_datetime  = */ false,
+                /* knowledge_cutoff = */ std::string(),
+                /* memory_root      = */ args.rag_dir,
+            });
+            if (!vocab.empty()) sys += vocab;
+        }
+        std::fputs(sys.c_str(), stdout);
+        std::fputc('\n', stdout);
+        return 0;
     }
 
     // The webui drives long agentic flows (search → fetch → search → fetch

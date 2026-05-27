@@ -70,6 +70,13 @@ Tool Tool::Builder::build() const {
 //      having migrated yet; they just lose the "single sentence"
 //      curation until they call `.short_describe(...)` themselves.
 //   3. otherwise, empty.
+// Resolve the block that should be appended to the system prompt at
+// tool registration. See easyai/tool.hpp for the contract.
+std::string Tool::effective_system_addendum() const {
+    if (!system_addendum.empty()) return system_addendum;
+    return description;
+}
+
 std::string Tool::wire_description() const {
     if (!short_description.empty()) return short_description;
     if (description.empty())        return std::string();

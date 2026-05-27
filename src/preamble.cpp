@@ -709,4 +709,30 @@ std::string sanitize_addendum(const std::string & s, std::size_t cap) {
     return out;
 }
 
+// Compose the final system prompt for the given base + tool list.
+// See preamble.hpp for the full contract. Mirrors the addendum-concat
+// policy that LocalBackend::init(), RemoteBackend::Impl::rebuild(),
+// and Session::Impl::full_compose() each used to execute inline —
+// those three sites now delegate here. Single source of truth.
+std::string compose_system_prompt(const std::string             & base,
+                                  const std::vector<easyai::Tool> & tools) {
+    // 8 KB per tool matches the historical inline cap at every call
+    // site; raise carefully — the model pays for every byte on every
+    // turn and addenda are not deduplicated against the per-turn
+    // `<tools>` block.
+    constexpr std::size_t kAddendumCap = 8 * 1024;
+    std::string out = base;
+    for (const auto & t : tools) {
+        const std::string raw = t.effective_system_addendum();
+        if (raw.empty()) continue;
+        const std::string clean = sanitize_addendum(raw, kAddendumCap);
+        if (clean.empty()) continue;
+        if (!out.empty() && out.back() != '\n') out += '\n';
+        out += '\n';
+        out += clean;
+        out += '\n';
+    }
+    return out;
+}
+
 }  // namespace easyai::preamble

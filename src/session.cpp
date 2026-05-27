@@ -352,10 +352,10 @@ bool Session::init(std::string & err) {
 }
 
 namespace {
-// Mirror of LocalBackend::init's addendum-concat policy — see
-// SECURITY_AUDIT §25.1.  Used by Session paths that compose the
-// system prompt after init (refresh_system, render_system).
-constexpr std::size_t kAddendumCap = 8 * 1024;
+// Per-tool addendum cap (8 KB) lives inside
+// `preamble::compose_system_prompt`. The appendix cap here covers
+// operator-supplied `system_static` / `system_dynamic` blocks that
+// land AFTER the tool addenda — see SECURITY_AUDIT §25.1.
 constexpr std::size_t kAppendixCap = 16 * 1024;
 
 void append_block_with_blank_line(std::string & buf, const std::string & block) {
@@ -368,21 +368,12 @@ void append_block_with_blank_line(std::string & buf, const std::string & block) 
 
 std::string Session::Impl::full_compose(const std::vector<Tool> & registered_tools,
                                         bool include_session_info_tail) {
-    std::string out = compose_system(registered_tools);
-
-    // Tool addenda — sanitized at concat, mirroring backend.cpp /
-    // cli_client.cpp (single source of truth would require a shared
-    // helper; the duplicate is small and read-only).
-    for (const auto & t : registered_tools) {
-        if (t.system_addendum.empty()) continue;
-        const std::string clean =
-            preamble::sanitize_addendum(t.system_addendum, kAddendumCap);
-        if (clean.empty()) continue;
-        if (!out.empty() && out.back() != '\n') out += '\n';
-        out += '\n';
-        out += clean;
-        out += '\n';
-    }
+    // Base + per-tool addenda. Delegates to the lib helper so the
+    // addendum-concat policy (effective_system_addendum fallback,
+    // 8 KB per-tool cap, sanitization, blank-line separator) lives
+    // in one place — see easyai/preamble.hpp.
+    std::string out = preamble::compose_system_prompt(
+        compose_system(registered_tools), registered_tools);
 
     // Operator-supplied static and dynamic appends.
     for (const auto & s : system_static) {

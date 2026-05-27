@@ -2612,20 +2612,29 @@ int main(int argc, char ** argv) {
     }
 
     // --show-system-prompt: dump the resolved prompt (built-in injection
-    // + user --system / --system-file content) and exit before any HTTP
-    // call. Doesn't need a working --url. The output is exactly what
-    // would be sent to the server in the first request body's system
-    // message — useful for confirming that the [environment] /
-    // [guidance] blocks landed and that the user's persona is appended
-    // correctly.
+    // + user --system / --system-file content + per-tool addenda) and
+    // exit before any HTTP call. Doesn't need a working --url. The
+    // output mirrors exactly what RemoteBackend::rebuild() composes and
+    // sends as the first request body's system message — useful for
+    // confirming that the [environment] / [guidance] blocks landed,
+    // that the user's persona is appended correctly, and that every
+    // registered tool's addendum (or its description, via the fallback
+    // in Tool::effective_system_addendum) shows up.
     if (o.show_system_prompt) {
-        if (o.system_prompt.empty()) {
+        // The Client owns the composition policy — see
+        // easyai::preamble::compose_system_prompt (single source of
+        // truth shared with Session / LocalBackend / RemoteBackend).
+        // The binary just sets the base and asks the lib for the
+        // final.
+        cli.system(o.system_prompt);
+        const std::string sys = cli.composed_system();
+        if (sys.empty()) {
             std::fprintf(stderr,
                 "(no system prompt — neither --system, --system-file, "
                 "nor any tool that triggers the [environment] / [guidance] "
                 "injection. The server's default persona handles this turn.)\n");
         } else {
-            std::fputs(o.system_prompt.c_str(), stdout);
+            std::fputs(sys.c_str(), stdout);
             std::fputc('\n', stdout);
         }
         // Tear down the log file if the libeasyai-cli auto-log path

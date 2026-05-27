@@ -1,5 +1,6 @@
 #include "easyai/engine.hpp"
 #include "easyai/tool.hpp"        // easyai::args::get_string for tool_call recovery
+#include "easyai/preamble.hpp"    // compose_system_prompt for Engine::composed_system
 #include "easyai/log.hpp"          // raw transaction log + problem markers
 
 #include "common.h"
@@ -2418,6 +2419,9 @@ std::string Engine::chat_continue() {
 std::string Engine::last_error()    const { return p_->last_error; }
 int         Engine::turns()         const { return (int) p_->history.size(); }
 const std::vector<Tool> & Engine::tools() const { return p_->tools; }
+std::string Engine::composed_system() const {
+    return preamble::compose_system_prompt(p_->system_prompt, p_->tools);
+}
 std::string Engine::backend_summary() const { return p_->backend_summary; }
 int         Engine::n_ctx()         const { return p_->ctx() ? llama_n_ctx(p_->ctx()) : p_->params.n_ctx; }
 std::string Engine::model_path()    const { return p_->params.model.path; }

@@ -172,19 +172,12 @@ bool LocalBackend::init(std::string & err) {
     // and it also defends the operator's TTY from rogue ANSI when
     // `--show-system-prompt` is invoked.
     {
-        constexpr std::size_t kAddendumCap = 8 * 1024;   // per tool
-        constexpr std::size_t kAppendixCap = 16 * 1024;  // operator's static
-        std::string sys = cfg.system_prompt;
-        for (const auto & t : engine.tools()) {
-            if (t.system_addendum.empty()) continue;
-            const std::string clean = preamble::sanitize_addendum(
-                t.system_addendum, kAddendumCap);
-            if (clean.empty()) continue;
-            if (!sys.empty() && sys.back() != '\n') sys += '\n';
-            sys += '\n';
-            sys += clean;
-            sys += '\n';
-        }
+        // Per-tool addendum cap (8 KB) is now centralised in
+        // `preamble::compose_system_prompt`; only the operator-static
+        // appendix cap stays here.
+        constexpr std::size_t kAppendixCap = 16 * 1024;
+        std::string sys = preamble::compose_system_prompt(
+            cfg.system_prompt, engine.tools());
         if (!cfg.system_appendix.empty()) {
             const std::string clean = preamble::sanitize_addendum(
                 cfg.system_appendix, kAppendixCap);

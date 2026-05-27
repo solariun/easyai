@@ -400,6 +400,23 @@ class Engine {
     std::string                 last_error()        const;
     int                         turns()             const;
     const std::vector<Tool>   & tools()             const;
+    // Resolve the system prompt the model will receive: whatever was
+    // set via `system(...)` PLUS every registered tool's
+    // `effective_system_addendum()` (its `system_addendum` if the
+    // tool set one, else its `description` as a fallback — see
+    // `Tool::effective_system_addendum` in easyai/tool.hpp), composed
+    // via the canonical `preamble::compose_system_prompt` helper so
+    // the policy (8 KB per-tool cap, sanitization, blank-line
+    // separator) stays in lockstep with Session / LocalBackend /
+    // RemoteBackend. Pure: no I/O, no mutation, cheap to call. Use
+    // this from binaries that want to "request the final system" and
+    // dump it (e.g., `--show-system-prompt`).
+    //
+    // Caveat: if a backend (LocalBackend) has already composed and
+    // written back via `system(composed)`, calling this getter again
+    // will RE-append addenda. Backends own the lifecycle; callers
+    // outside that pipeline should read this BEFORE backend init.
+    std::string                 composed_system()   const;
     std::string                 backend_summary()   const;  // e.g. "Metal (GPU)"
     int                         n_ctx()             const;  // configured context window
     std::string                 model_path()        const;

@@ -287,21 +287,12 @@ struct RemoteBackend::Impl {
         //  server — it has the authoritative tool list and renders
         //  the catalogue per request via preamble::build_session_info.)
         //
-        // Same sanitization contract as LocalBackend — see
-        // SECURITY_AUDIT §25.1.
-        constexpr std::size_t kAddendumCap = 8 * 1024;
+        // Per-tool addendum policy (effective_system_addendum
+        // fallback, 8 KB cap, sanitization) lives in
+        // `preamble::compose_system_prompt`. SECURITY_AUDIT §25.1.
         constexpr std::size_t kAppendixCap = 16 * 1024;
-        std::string sys = cfg.system_prompt;
-        for (const auto & t : client->tools()) {
-            if (t.system_addendum.empty()) continue;
-            const std::string clean = easyai::preamble::sanitize_addendum(
-                t.system_addendum, kAddendumCap);
-            if (clean.empty()) continue;
-            if (!sys.empty() && sys.back() != '\n') sys += '\n';
-            sys += '\n';
-            sys += clean;
-            sys += '\n';
-        }
+        std::string sys = easyai::preamble::compose_system_prompt(
+            cfg.system_prompt, client->tools());
         if (!cfg.system_appendix.empty()) {
             const std::string clean = easyai::preamble::sanitize_addendum(
                 cfg.system_appendix, kAppendixCap);

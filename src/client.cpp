@@ -19,6 +19,7 @@
 // in the request body the server forwards real delta.tool_calls, so
 // the custom events are pure UI noise from our side.
 #include "easyai/client.hpp"
+#include "easyai/preamble.hpp"   // compose_system_prompt for Client::composed_system
 #include "easyai/log.hpp"
 
 #include <httplib.h>
@@ -1278,6 +1279,9 @@ Client & Client::extra_body_json    (std::string raw)    { p_->extra_body_raw   
 Client & Client::add_tool   (Tool t) { p_->tools.push_back(std::move(t)); return *this; }
 Client & Client::clear_tools()       { p_->tools.clear();                  return *this; }
 const std::vector<Tool> & Client::tools() const { return p_->tools; }
+std::string Client::composed_system() const {
+    return easyai::preamble::compose_system_prompt(p_->system_prompt, p_->tools);
+}
 
 Client & Client::on_token  (TokenCallback cb) { p_->on_token  = std::move(cb); return *this; }
 Client & Client::on_reason (TokenCallback cb) { p_->on_reason = std::move(cb); return *this; }

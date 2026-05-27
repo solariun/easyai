@@ -193,6 +193,25 @@ public:
     Client & clear_tools     ();
     const std::vector<Tool> & tools() const;
 
+    // Resolve the system prompt that would be sent to the remote
+    // server: whatever was set via `system(...)` PLUS every registered
+    // tool's `effective_system_addendum()` (its `system_addendum` if
+    // the tool set one, else its `description` as a fallback — see
+    // `Tool::effective_system_addendum` in easyai/tool.hpp), composed
+    // via the canonical `preamble::compose_system_prompt` helper so
+    // the policy (8 KB per-tool cap, sanitization, blank-line
+    // separator) stays in lockstep with Session / LocalBackend /
+    // RemoteBackend. Pure: no I/O, no mutation, no network call.
+    // The intended "request the final system" entry point for
+    // binaries that want to dump or inspect what the model will
+    // receive (e.g., `--show-system-prompt`).
+    //
+    // Caveat: if a backend (RemoteBackend) has already composed and
+    // written back via `system(composed)`, calling this getter again
+    // will RE-append addenda. Backends own the lifecycle; callers
+    // outside that pipeline should read this BEFORE backend rebuild.
+    std::string composed_system() const;
+
     // ----- streaming callbacks ---------------------------------------------
     using TokenCallback = std::function<void(const std::string &)>;
     using ToolCallback  = std::function<void(const ToolCall &, const ToolResult &)>;

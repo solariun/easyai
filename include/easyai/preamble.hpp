@@ -216,4 +216,26 @@ std::string build_builtin_system_prompt(const ToolsetView & view);
 // of C0 / DEL are stripped to a space.
 std::string sanitize_addendum(const std::string & s, std::size_t cap);
 
+// Compose the final system prompt for the given base + tool list. For
+// every tool, appends `Tool::effective_system_addendum()` (which is
+// `system_addendum` when the tool set one, else `description` as a
+// fallback — see easyai/tool.hpp), each piped through
+// `sanitize_addendum(_, 8192)` and separated by blank lines. Single
+// source of truth for the addendum-concat policy that Session,
+// LocalBackend, and RemoteBackend (cli-client) all execute — and the
+// canonical "request the final system" entry point for binaries that
+// want to dump or inspect what the model will receive.
+//
+// Pure function: no I/O, no global state, no mutation of inputs. Cheap
+// to call (microseconds for typical tool counts) — safe to call on
+// hot paths and from any thread.
+//
+// Does NOT include operator-supplied `system_appendix` or dynamic
+// per-request preamble (datetime / memory vocabulary). Callers that
+// want those should append `preamble::build(...)` separately and run
+// their appendix through `sanitize_addendum` themselves — see
+// LocalBackend::init() for the canonical post-compose tail.
+std::string compose_system_prompt(const std::string             & base,
+                                  const std::vector<easyai::Tool> & tools);
+
 }  // namespace easyai::preamble
