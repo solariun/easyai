@@ -809,7 +809,7 @@ ToolHandler make_save_handler(std::shared_ptr<RagStore> store) {
                 "keywords must be a non-empty array (1.."
                 + std::to_string(kMaxKeywordsPerEntry)
                 + " short keywords). Why: keywords are how rag_search finds this "
-                  "memory later — a memory with no keywords is unreachable by "
+                  "entry later — an entry with no keywords is unreachable by "
                   "keyword search (only rag_list can find it).");
         }
         // Normalize each keyword. Drop empties (e.g. "???" → ""),
@@ -862,10 +862,10 @@ ToolHandler make_save_handler(std::shared_ptr<RagStore> store) {
         // (load_index_locked ran at startup; saves keep it in sync).
         if (title_is_fixed(title) && store->index.count(title) > 0) {
             return ToolResult::error(
-                "memory \"" + title + "\" is fixed (immutable) — cannot "
+                "entry \"" + title + "\" is fixed (immutable) — cannot "
                 "overwrite. To replace it, the operator must remove the "
                 "file from disk manually. Pick a different title for a "
-                "new memory.");
+                "new entry.");
         }
 
         if (!store->save_locked(title, keywords, content, err)) {
@@ -950,7 +950,7 @@ ToolHandler make_append_handler(std::shared_ptr<RagStore> store) {
         if (suffix.empty()) {
             return ToolResult::error(
                 "content is empty — nothing to append. If you want to "
-                "replace the whole memory, use rag_save with the same title.");
+                "replace the whole entry, use rag_save with the same title.");
         }
 
         // Optional: extra keywords to merge into the existing list.
@@ -992,9 +992,9 @@ ToolHandler make_append_handler(std::shared_ptr<RagStore> store) {
             // error with a helpful message.
             if (extra_keywords.empty()) {
                 return ToolResult::error(
-                    "no memory titled \"" + title + "\" — memory_append "
+                    "no entry titled \"" + title + "\" — knowledge_append "
                     "can create it, but keywords[] is required for new "
-                    "memories (search needs at least one).");
+                    "entries (search needs at least one).");
             }
             if (suffix.size() > kMaxContentBytes) {
                 return ToolResult::error(
@@ -1005,7 +1005,7 @@ ToolHandler make_append_handler(std::shared_ptr<RagStore> store) {
                 return ToolResult::error(err);
             }
             std::ostringstream o;
-            o << "new memory saved as \"" << title << kEntrySuffix << "\" ("
+            o << "new entry saved as \"" << title << kEntrySuffix << "\" ("
               << suffix.size() << " bytes, "
               << extra_keywords.size() << " keyword"
               << (extra_keywords.size() == 1 ? "" : "s") << ")";
@@ -1027,8 +1027,8 @@ ToolHandler make_append_handler(std::shared_ptr<RagStore> store) {
         // Immutability gate: fixed memories live forever as written.
         if (title_is_fixed(title)) {
             return ToolResult::error(
-                "memory \"" + title + "\" is fixed (immutable) — cannot "
-                "append. Pick a different title for a related memory, "
+                "entry \"" + title + "\" is fixed (immutable) — cannot "
+                "append. Pick a different title for a related entry, "
                 "or have the operator remove the file from disk first.");
         }
 
@@ -1059,10 +1059,10 @@ ToolHandler make_append_handler(std::shared_ptr<RagStore> store) {
 
         if (merged.size() > kMaxContentBytes) {
             return ToolResult::error(
-                "appended memory would exceed " + std::to_string(kMaxContentBytes)
+                "appended entry would exceed " + std::to_string(kMaxContentBytes)
                 + " bytes (existing " + std::to_string(old_body.size())
                 + " B + appendix " + std::to_string(suffix.size())
-                + " B + separator). Split into a new memory with rag_save "
+                + " B + separator). Split into a new entry with rag_save "
                   "instead, or condense the appendix.");
         }
 
@@ -1086,9 +1086,9 @@ ToolHandler make_append_handler(std::shared_ptr<RagStore> store) {
             // require the model to supply them on append rather than
             // writing a search-invisible memory.
             return ToolResult::error(
-                "existing memory has no keywords (someone may have hand-"
+                "existing entry has no keywords (someone may have hand-"
                 "edited it); pass keywords[] to rag_append so the merged "
-                "memory remains searchable.");
+                "entry remains searchable.");
         }
 
         if (!store->save_locked(title, merged_keywords, merged, err)) {
@@ -1340,7 +1340,7 @@ ToolHandler make_search_handler(std::shared_ptr<RagStore> store) {
         o << "Use rag_load with up to " << kMaxLoadAtOnce
           << " of these titles for full content.\n"
           << "\n[CITE: if you use any of these results in your reply, "
-             "end with a Sources: block citing memory: \"<title>\" "
+             "end with a Sources: block citing knowledge: \"<title>\" "
              "per entry used.]\n";
         return ToolResult::ok(o.str());
     };
@@ -1406,7 +1406,7 @@ ToolHandler make_load_handler(std::shared_ptr<RagStore> store) {
               << "  (unix=" << mtime << ")\n";
             o << "fixed: " << (title_is_fixed(title) ? "yes" : "no") << "\n";
             if (title_is_fixed(title)) {
-                o << "note: this memory is immutable — rag_save and rag_delete "
+                o << "note: this entry is immutable — rag_save and rag_delete "
                      "will refuse to change or remove it.\n";
             }
             o << "\n";
@@ -1414,7 +1414,7 @@ ToolHandler make_load_handler(std::shared_ptr<RagStore> store) {
             if (!body.empty() && body.back() != '\n') o << '\n';
         }
         o << "\n[CITE: if you use loaded content in your reply, end "
-             "with a Sources: block citing memory: \"<title>\" per "
+             "with a Sources: block citing knowledge: \"<title>\" per "
              "entry used.]\n";
         return ToolResult::ok(o.str());
     };
@@ -1504,7 +1504,7 @@ ToolHandler make_delete_handler(std::shared_ptr<RagStore> store) {
         // the prefix.
         if (title_is_fixed(title)) {
             return ToolResult::error(
-                "memory \"" + title + "\" is fixed (immutable) — cannot "
+                "entry \"" + title + "\" is fixed (immutable) — cannot "
                 "be forgotten through this tool. The operator can remove "
                 "the file from disk manually if it really needs to go.");
         }
@@ -1520,7 +1520,7 @@ ToolHandler make_delete_handler(std::shared_ptr<RagStore> store) {
         }
         if (!existed) {
             return ToolResult::ok(
-                "no memory titled \"" + title + "\" — nothing to forget");
+                "no entry titled \"" + title + "\" — nothing to forget");
         }
         return ToolResult::ok(
             "forgot \"" + title + kEntrySuffix + "\"");
@@ -1684,14 +1684,18 @@ Tool make_rag_tool(std::string root_dir) {
     auto h_delete   = make_delete_handler  (store);
     auto h_keywords = make_keywords_handler(store);
 
-    return Tool::builder("memory")
+    return Tool::builder("knowledge")
         .short_describe(
-            "Persistent memory store (search|load|save|append|"
-            "list|delete|keywords).")
+            "Knowledge store — save & recall notes, skills, facts "
+            "for future use.")
         .describe(
-            "Private persistent memory — one tool, seven actions.\n"
+            "Persistent knowledge store for the model — save and recall "
+            "mental notes, skills, facts, preferences, and pieces of "
+            "information for future use across conversations. NOT for "
+            "storing output content (code, text meant for the user) — "
+            "write those directly in your response.\n"
             "\n"
-            "Actions:\n"
+            "One tool, seven actions:\n"
             "  save     — create/overwrite. Needs: title, keywords, content.\n"
             "  append   — add to existing (or create if new). Needs: title, content.\n"
             "  search   — find by keyword. Needs: keywords (first is required match).\n"
@@ -1700,8 +1704,7 @@ Tool make_rag_tool(std::string root_dir) {
             "  delete   — remove by title. fix-easyai-* are protected.\n"
             "  keywords — show all keywords in use.\n"
             "\n"
-            "Save durable facts (preferences, architecture, commands, fixes). "
-            "One memory per topic — append to existing rather than duplicating."
+            "One entry per topic — append to existing rather than duplicating."
         )
         .param("action",      "string",
                "save|append|search|load|list|delete|keywords.", true)
@@ -1757,24 +1760,19 @@ Tool make_rag_tool(std::string root_dir) {
 
             // The inner handlers still cite the legacy seven-tool
             // names (rag_save, rag_append, rag_search, ...) in their
-            // guidance prose. The model only has `memory` in its
+            // guidance prose. The model only has `knowledge` in its
             // catalog, so any literal `rag_<verb>` reference would be
             // a dangling identifier. Rewrite each occurrence in place
-            // to the dispatch form the model can actually call. Cheap
-            // (O(n) over a small message); the set of substitutions is
-            // closed and stable.
+            // to the dispatch form the model can actually call.
             struct Sub { const char * from; const char * to; };
             static const Sub kSubs[] = {
-                // Order matters: rag_append must come before rag_a... siblings
-                // would, but only rag_save shares the leading 'rag_' so any
-                // order works. Keep alphabetical for grep-ability.
-                { "rag_append",   "memory(action=\"append\")"   },
-                { "rag_delete",   "memory(action=\"delete\")"   },
-                { "rag_keywords", "memory(action=\"keywords\")" },
-                { "rag_list",     "memory(action=\"list\")"     },
-                { "rag_load",     "memory(action=\"load\")"     },
-                { "rag_save",     "memory(action=\"save\")"     },
-                { "rag_search",   "memory(action=\"search\")"   },
+                { "rag_append",   "knowledge(action=\"append\")"   },
+                { "rag_delete",   "knowledge(action=\"delete\")"   },
+                { "rag_keywords", "knowledge(action=\"keywords\")" },
+                { "rag_list",     "knowledge(action=\"list\")"     },
+                { "rag_load",     "knowledge(action=\"load\")"     },
+                { "rag_save",     "knowledge(action=\"save\")"     },
+                { "rag_search",   "knowledge(action=\"search\")"   },
             };
             for (const auto & s : kSubs) {
                 std::string from = s.from;
@@ -1791,12 +1789,12 @@ Tool make_rag_tool(std::string root_dir) {
 }
 
 // ----------------------------------------------------------------------------
-// memory_split_tools — focused alternative to the unified `memory` tool.
+// knowledge_split_tools — focused alternative to the unified `knowledge` tool.
 // ----------------------------------------------------------------------------
 // Same per-action handlers, same on-disk store; the only difference is
 // surface. Smaller models avoid the "unknown action" / "wrong action for
 // these args" failure mode when the verb IS the tool name.
-std::vector<Tool> memory_split_tools(std::string root_dir) {
+std::vector<Tool> knowledge_split_tools(std::string root_dir) {
     auto store = build_rag_store(std::move(root_dir));
     auto h_save     = make_save_handler    (store);
     auto h_append   = make_append_handler  (store);
@@ -1808,24 +1806,20 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
 
     // Inner handlers cite the legacy seven-tool names (rag_save,
     // rag_append, rag_search, ...) in their guidance prose because
-    // those were the original tool names. With memory_split_tools
-    // registered, the actual callable names are memory_save /
-    // memory_search / etc. — leaving rag_<verb> in handler output
+    // those were the original tool names. With knowledge_split_tools
+    // registered, the actual callable names are knowledge_save /
+    // knowledge_search / etc. — leaving rag_<verb> in handler output
     // would point the model at non-existent tool names. Wrap every
     // handler with a substitution that rewrites occurrences in place.
-    // Mirrors the same idiom make_rag_tool uses (line ~1850); the
-    // unified dispatcher there maps to `memory(action="...")` form
-    // because that IS its tool surface, while we map to the split
-    // names. Cheap O(n) string scan per call.
     struct Sub { const char * from; const char * to; };
     static const Sub kSubs[] = {
-        { "rag_append",   "memory_append"   },
-        { "rag_delete",   "memory_delete"   },
-        { "rag_keywords", "memory_keywords" },
-        { "rag_list",     "memory_list"     },
-        { "rag_load",     "memory_load"     },
-        { "rag_save",     "memory_save"     },
-        { "rag_search",   "memory_search"   },
+        { "rag_append",   "knowledge_append"   },
+        { "rag_delete",   "knowledge_delete"   },
+        { "rag_keywords", "knowledge_keywords" },
+        { "rag_list",     "knowledge_list"     },
+        { "rag_load",     "knowledge_load"     },
+        { "rag_save",     "knowledge_save"     },
+        { "rag_search",   "knowledge_search"   },
     };
     auto rewrite_for_split = [](ToolResult r) -> ToolResult {
         for (const auto & s : kSubs) {
@@ -1855,8 +1849,11 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
     std::vector<Tool> out;
     out.reserve(7);
 
-    out.push_back(Tool::builder("memory_save")
-        .describe("Create or overwrite a memory.")
+    out.push_back(Tool::builder("knowledge_save")
+        .describe(
+            "Save knowledge — create or overwrite an entry in the "
+            "model's persistent store for mental notes, skills, facts, "
+            "and information to recall in future conversations.")
         .param("title",    "string", "Short name (spaces become _).", true)
         .param("keywords", "array",  "Search terms (first is primary).", true)
         .param("content",  "string", "Body text.", true)
@@ -1864,43 +1861,47 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
         .handle(h_save)
         .build());
 
-    out.push_back(Tool::builder("memory_append")
-        .describe("Add text to an existing memory. Creates it if new (keywords required).")
-        .param("title",    "string", "Memory title.", true)
+    out.push_back(Tool::builder("knowledge_append")
+        .describe(
+            "Append to knowledge — add text to an existing entry. "
+            "Creates it if new (keywords required).")
+        .param("title",    "string", "Entry title.", true)
         .param("content",  "string", "Text to append.", true)
         .param("keywords", "array",  "Search terms (required if new).", false)
         .handle(h_append)
         .build());
 
-    out.push_back(Tool::builder("memory_search")
-        .describe("Find memories by keyword. Returns ranked matches with previews.")
+    out.push_back(Tool::builder("knowledge_search")
+        .describe(
+            "Recall knowledge — find entries by keyword. Returns "
+            "ranked matches with previews.")
         .param("keywords",    "array",   "Search terms (first is required match).", true)
         .param("max_results", "integer", "Results per page (default 10, max 20).", false)
         .param("page",        "integer", "Page number (default 1).", false)
         .handle(h_search)
         .build());
 
-    out.push_back(Tool::builder("memory_load")
-        .describe("Read full content of memories by title.")
+    out.push_back(Tool::builder("knowledge_load")
+        .describe("Load knowledge — read full content of entries by title.")
         .param("titles", "array", "Exact titles (1..20).", true)
         .handle(h_load)
         .build());
 
-    out.push_back(Tool::builder("memory_list")
-        .describe("List all memory titles.")
+    out.push_back(Tool::builder("knowledge_list")
+        .describe("List all knowledge entry titles.")
         .param("prefix", "string",  "Filter by title prefix.", false)
         .param("max",    "integer", "Max results (default 50).", false)
         .handle(h_list)
         .build());
 
-    out.push_back(Tool::builder("memory_delete")
-        .describe("Delete a memory. Immutable (fix-easyai-*) entries are protected.")
+    out.push_back(Tool::builder("knowledge_delete")
+        .describe("Delete a knowledge entry. Immutable (fix-easyai-*) entries are protected.")
         .param("title", "string", "Exact title.", true)
         .handle(h_delete)
         .build());
 
-    out.push_back(Tool::builder("memory_keywords")
-        .describe("Show all keywords in use and their counts.")
+    out.push_back(Tool::builder("knowledge_keywords")
+        .describe("Show all keywords in use across knowledge entries.")
         .param("min_count", "integer", "Hide below N uses (default 1).", false)
         .param("max",       "integer", "Max results (default 200).", false)
         .handle(h_keywords)
@@ -1935,7 +1936,7 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
 // bounded even for very large memories. The sort key is
 // (count desc, name asc) — same order memory(action="keywords") uses,
 // so the model sees a familiar ranking.
-std::string render_memory_vocabulary(const std::string & root_dir) {
+std::string render_knowledge_vocabulary(const std::string & root_dir) {
     if (root_dir.empty()) return std::string();
 
     namespace fs = std::filesystem;
@@ -2009,15 +2010,10 @@ std::string render_memory_vocabulary(const std::string & root_dir) {
         const bool truncated = total_kw > kCap;
         if (truncated) rows.resize(kCap);
 
-        // Tool-name-neutral wording: works whether the operator
-        // registered the unified `memory(action=...)` dispatcher or
-        // the split memory_search / memory_keywords / memory_load /
-        // ... family. The model has the exact callable name in its
-        // AVAILABLE TOOLS list.
         std::ostringstream o;
         o << total_entries << " entr"
           << (total_entries == 1 ? "y" : "ies")
-          << " (most-common first; use your memory-search tool with "
+          << " (most-common first; use your knowledge-search tool with "
           << "these keywords to recall — the exact callable name is "
           << "in your AVAILABLE TOOLS list):\n";
         for (std::size_t i = 0; i < rows.size(); ++i) {
@@ -2026,7 +2022,7 @@ std::string render_memory_vocabulary(const std::string & root_dir) {
         }
         if (truncated) {
             o << " …(+" << (total_kw - kCap)
-              << " more; use the memory-keywords tool for the full list)";
+              << " more; use the knowledge-keywords tool for the full list)";
         }
         rendered = o.str();
     }

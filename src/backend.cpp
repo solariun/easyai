@@ -74,18 +74,16 @@ bool LocalBackend::init(std::string & err) {
     // Registered when the operator gives us a directory. The directory
     // does NOT have to exist yet; the tools create it on first save.
     //
-    // Split surface: seven single-responsibility tools (memory_save,
-    // memory_append, memory_search, memory_load, memory_list,
-    // memory_delete, memory_keywords) instead of the unified
-    // `memory(action=...)` dispatcher. Weaker tool-callers (qwen3-
-    // coder-next observed 2026-05-24) routinely collapse composite
-    // sub-actions into top-level tool names ("update" instead of
-    // "plan(action='update')"); the split surface removes that
-    // failure mode entirely for memory because the verb IS the tool
-    // name. tools::make_rag_tool() is still exported for callers who
-    // explicitly want the unified surface. See RAG.md.
+    // Split surface: seven single-responsibility tools (knowledge_save,
+    // knowledge_append, knowledge_search, knowledge_load, knowledge_list,
+    // knowledge_delete, knowledge_keywords) instead of the unified
+    // `knowledge(action=...)` dispatcher. Weaker tool-callers routinely
+    // collapse composite sub-actions into top-level tool names; the
+    // split surface removes that failure mode because the verb IS the
+    // tool name. tools::make_rag_tool() is still exported for callers
+    // who explicitly want the unified surface. See RAG.md.
     if (!cfg.rag_dir.empty()) {
-        for (auto & t : tools::memory_split_tools(cfg.rag_dir)) {
+        for (auto & t : tools::knowledge_split_tools(cfg.rag_dir)) {
             engine.add_tool(std::move(t));
         }
     }

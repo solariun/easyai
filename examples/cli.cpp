@@ -538,7 +538,7 @@ struct Options {
     std::string external_tools_dir;            // dir of EASYAI-*.tools files
     std::string rag_dir;                        // optional RAG persistent-registry dir
     // Default "split": focused one-verb-per-tool surfaces (fs_read,
-    // fs_edit, memory_save, …) instead of the legacy single dispatcher
+    // fs_edit, knowledge_save, …) instead of the legacy single dispatcher
     // (fs(action="read"), …). Smaller / quantised tool-callers
     // dispatch much more reliably against the split shape; large
     // models handle either. Pass --tools-mode unified to opt back into
@@ -796,10 +796,10 @@ void usage(const char * argv0) {
 "    --no-show-python           same as --no-show-bash, but for `python3`.\n"
 "                                 INI: [cli] show_python = false.\n"
 "    --tools-mode MODE          how the multi-action tool families (fs, web,\n"
-"                                 memory) are exposed to the model:\n"
+"                                 knowledge) are exposed to the model:\n"
 "                                   \"split\"  — one focused tool per action\n"
 "                                     (fs_read, fs_edit, fs_glob, …, web_search,\n"
-"                                     web_fetch, memory_save, …); flat schemas,\n"
+"                                     web_fetch, knowledge_save, …); flat schemas,\n"
 "                                     no \"unknown action\" failure mode. DEFAULT\n"
 "                                     since 2026-05-15 — works reliably across\n"
 "                                     small / quantised callers and large ones.\n"
@@ -1577,14 +1577,14 @@ void register_tools(easyai::Client & cli,
     if (wants("system_swaps"))     cli.add_tool(systools::make_system_swaps());
 
     // Persistent memory — the agent's long-term store.
-    // One `memory(action=...)` tool registered when --memory <dir> is
+    // One `knowledge(action=...)` tool registered when --memory <dir> is
     // given. The dir does not need to exist yet; the tool creates it on
     // first save. See RAG.md.
     if (!o.rag_dir.empty()) {
-        if (o.tools_enabled.empty() || o.tools_enabled.count("memory")) {
+        if (o.tools_enabled.empty() || o.tools_enabled.count("knowledge")) {
             if (tm_unified) cli.add_tool(easyai::tools::make_rag_tool(o.rag_dir));
             if (tm_split) {
-                for (auto & t : easyai::tools::memory_split_tools(o.rag_dir)) {
+                for (auto & t : easyai::tools::knowledge_split_tools(o.rag_dir)) {
                     cli.add_tool(std::move(t));
                 }
             }

@@ -154,7 +154,7 @@ struct Tool {
 //
 // Single source of truth — every tool-name lookup runs through this.
 inline std::string canonical_tool_name(const std::string & name) {
-    if (name == "rag")     return "memory";
+    if (name == "rag")     return "knowledge";
     if (name == "python3") return "evaluate";
     return name;
 }

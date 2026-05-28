@@ -184,7 +184,7 @@ constexpr std::size_t kPathMax =
 // that even a caller who forgets to pre-populate `reserved_names`
 // can't accidentally let a manifest shadow `bash`.
 const std::unordered_set<std::string> kBuiltInNames = {
-    "datetime", "web", "fs", "bash", "python3", "memory", "tool_lookup",
+    "datetime", "web", "fs", "bash", "python3", "knowledge", "tool_lookup",
 };
 
 // ---------------------------------------------------------------------------

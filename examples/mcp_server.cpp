@@ -868,22 +868,19 @@ int main(int argc, char ** argv) {
         for (auto & t : tb.tools()) ctx->default_tools.push_back(std::move(t));
     }
 
-    // -------- memory ------------------------------------------------------
-    // Seven single-responsibility tools (memory_save, memory_append,
-    // memory_search, memory_load, memory_list, memory_delete,
-    // memory_keywords) — each surfaced as its own MCP tool. Picked over
-    // the unified `memory(action=...)` dispatcher because weaker tool-
-    // callers collapse composite sub-actions into top-level tool names
-    // (see backend.cpp comment, 2026-05-24 qwen3-coder-next session).
-    // tools::make_rag_tool() is still exported for the unified surface.
+    // -------- knowledge ----------------------------------------------------
+    // Seven single-responsibility tools (knowledge_save, knowledge_append,
+    // knowledge_search, knowledge_load, knowledge_list, knowledge_delete,
+    // knowledge_keywords) — each surfaced as its own MCP tool.
     if (!args.rag_dir.empty()) {
-        for (auto & t : easyai::tools::memory_split_tools(args.rag_dir)) {
+        for (auto & t : easyai::tools::knowledge_split_tools(args.rag_dir)) {
             ctx->default_tools.push_back(std::move(t));
         }
         std::fprintf(stderr,
-            "easyai-mcp-server: memory enabled (split: memory_save, "
-            "memory_append, memory_search, memory_load, memory_list, "
-            "memory_delete, memory_keywords), root = %s\n",
+            "easyai-mcp-server: knowledge enabled (split: knowledge_save, "
+            "knowledge_append, knowledge_search, knowledge_load, "
+            "knowledge_list, knowledge_delete, knowledge_keywords), "
+            "root = %s\n",
             args.rag_dir.c_str());
     }
 

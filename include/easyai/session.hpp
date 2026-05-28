@@ -136,8 +136,8 @@ public:
     Session & use_google        (bool on = true);
     Session & tool_mode         (cli::ToolMode m);
 
-    // Persistent memory store directory.  Empty = off.  When set, the
-    // memory_split_tools() bundle is registered AND the memory-
+    // Persistent knowledge store directory.  Empty = off.  When set, the
+    // knowledge_split_tools() bundle is registered AND the knowledge-
     // vocabulary block is appended to the system per turn.
     Session & memory            (std::string dir);
     // Directory of EASYAI-*.tools manifests.  Errors are logged to

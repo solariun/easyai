@@ -18,11 +18,11 @@
 //      training data ends, plus a rule: post-cutoff facts must be
 //      verified via a tool or stated as uncertain.
 //
-//   3. # MEMORY VOCABULARY — the keywords currently tagged in the
-//      agent's persistent memory store, sorted by count desc / name
+//   3. # KNOWLEDGE VOCABULARY — the keywords currently tagged in the
+//      agent's persistent knowledge store, sorted by count desc / name
 //      asc, capped at the top 40. Lets the model see what it can
-//      memory(action="search") for without having to first call
-//      memory(action="keywords"). Skipped when no memory store is
+//      knowledge(action="search") for without having to first call
+//      knowledge(action="keywords"). Skipped when no knowledge store is
 //      configured OR the store is empty / fully untagged.
 //
 // The function is STATELESS — every call recomputes (fresh date,
@@ -109,11 +109,11 @@ struct Options {
     // contract still holds. Server, local, and cli all opt in.
     bool cite_sources = false;
 
-    // When true, the cite_sources block emits its memory-tool bullets
-    // (memory(action="search"), memory(action="load"), memory_search,
-    // memory_load). When false, those bullets are omitted so the model
+    // When true, the cite_sources block emits its knowledge-tool bullets
+    // (knowledge(action="search"), knowledge(action="load"), knowledge_search,
+    // knowledge_load). When false, those bullets are omitted so the model
     // is not told to cite tools that aren't registered. Drive this from
-    // whether the memory/RAG tool is actually wired up this session.
+    // whether the knowledge/RAG tool is actually wired up this session.
     // Ignored when cite_sources=false.
     bool has_memory = false;
 };

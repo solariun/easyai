@@ -1,5 +1,5 @@
 #include "easyai/preamble.hpp"
-#include "easyai/rag_tools.hpp"   // render_memory_vocabulary
+#include "easyai/rag_tools.hpp"   // render_knowledge_vocabulary
 
 #include <chrono>
 #include <cstddef>
@@ -113,28 +113,27 @@ std::string build(const Options & opt) {
                "stored knowledge or external information, follow "
                "this loop IN ORDER:\n"
                "\n"
-               "  1. MEMORY FIRST — search your memory for relevant "
-               "keywords. If hits exist, load them. Memory is your "
-               "primary knowledge base; always check it before "
-               "anything else.\n"
+               "  1. KNOWLEDGE FIRST — search your knowledge store for "
+               "relevant keywords. If hits exist, load them. Your "
+               "knowledge store is your primary information base; "
+               "always check it before anything else.\n"
                "\n"
                "  2. WEB SECOND — if web tools are available, ALSO "
                "search the web for the same topic. Do this even when "
-               "memory returned results — the web may have newer or "
+               "knowledge returned results — the web may have newer or "
                "broader information.\n"
                "\n"
-               "  3. MERGE & ANSWER — combine what memory and web "
+               "  3. MERGE & ANSWER — combine what knowledge and web "
                "gave you. When they conflict, prefer the more recent "
                "or more authoritative source and note the discrepancy "
                "to the user.\n"
                "\n"
-               "  4. UPDATE MEMORY — if the web produced durable "
-               "knowledge that your memory didn't have (or had "
-               "outdated), save or append it to memory so future "
-               "sessions benefit. Save the distilled fact, not the "
-               "raw page.\n"
+               "  4. UPDATE KNOWLEDGE — if the web produced durable "
+               "facts that your knowledge store didn't have (or had "
+               "outdated), save or append them so future sessions "
+               "benefit. Save the distilled fact, not the raw page.\n"
                "\n"
-               "BOTH sources matter: memory for accumulated context "
+               "BOTH sources matter: knowledge for accumulated context "
                "and preferences, web for freshness and breadth. "
                "Skipping either when both are available is a failure "
                "mode.\n";
@@ -160,13 +159,13 @@ std::string build(const Options & opt) {
     // KV-cache comment above).  The renderer is cached by directory
     // mtime; cost on a hot path is one stat() per request.
     if (!opt.memory_root.empty()) {
-        std::string vocab = easyai::tools::render_memory_vocabulary(
+        std::string vocab = easyai::tools::render_knowledge_vocabulary(
             opt.memory_root);
         if (!vocab.empty()) {
-            out << "\n\n# MEMORY VOCABULARY (the keywords your "
-                   "private memory currently has tagged — the FIRST "
-                   "place to look for anything you might already "
-                   "know)\n"
+            out << "\n\n# KNOWLEDGE VOCABULARY (the keywords your "
+                   "persistent knowledge store currently has tagged — "
+                   "the FIRST place to look for anything you might "
+                   "already know)\n"
                 << vocab << "\n";
         }
     }
@@ -204,9 +203,9 @@ std::string cite_sources_block(bool has_memory) {
         // the model memory tools trigger Sources is a lie that nudges
         // it to invent calls to a non-existent memory tool.
         out <<
-            "  - MEMORY / RAG TOOLS — anything that searched or loaded "
-            "persistent memory (e.g. memory_search, memory_load, or a "
-            "unified memory dispatcher)\n";
+            "  - KNOWLEDGE / RAG TOOLS — anything that searched or loaded "
+            "persistent knowledge (e.g. knowledge_search, knowledge_load, "
+            "or a unified knowledge dispatcher)\n";
     }
     out <<
         "  - ANY other tool that returned content from outside your "
@@ -221,8 +220,8 @@ std::string cite_sources_block(bool has_memory) {
         "\n"
         "PRE-SEND CHECKLIST (run BEFORE emitting your final token):\n"
         "  1. Did any tool I called this turn return outside content "
-        "(URLs, web pages, search results, retrieved memory entries, "
-        "loaded memory bodies, document text)?\n"
+        "(URLs, web pages, search results, retrieved knowledge entries, "
+        "loaded knowledge bodies, document text)?\n"
         "  2. If yes — is `Sources:` the LAST block in my reply?\n"
         "If (1) is yes and (2) is no → STOP. Append the `Sources:` "
         "block NOW. Do not apologise, do not justify, just add it.\n"
@@ -240,7 +239,7 @@ std::string cite_sources_block(bool has_memory) {
         "\n"
         "  Sources:\n"
         "  - https://example.com/article-you-actually-fetched\n"
-        "  - memory: \"Title_of_loaded_memory\"\n"
+        "  - knowledge: \"Title_of_loaded_entry\"\n"
         "\n"
         "Rules:\n"
         "  - One entry per line, prefixed `- `.\n"
@@ -251,8 +250,8 @@ std::string cite_sources_block(bool has_memory) {
         "  - Order = citation order in your reply (first cited, "
         "first listed).\n"
         "  - For web content: cite the URL.\n"
-        "  - For memory content: cite as "
-        "`memory: \"<title>\"` using the exact memory title.\n"
+        "  - For knowledge content: cite as "
+        "`knowledge: \"<title>\"` using the exact entry title.\n"
         "  - If outside tools returned nothing useful AND you "
         "answered from your own knowledge, OMIT the block entirely "
         "— do not fabricate one.\n";
@@ -396,8 +395,8 @@ std::string build_session_info(const std::vector<easyai::Tool> & tools) {
            "arguments go in the arguments field. Never include "
            "parentheses, never include `action=\"…\"`, never include "
            "argument values in the name. Example:\n"
-           "  WRONG: name=\"memory_search(keywords=[\\\"x\\\"])\"\n"
-           "  RIGHT: name=\"memory_search\", "
+           "  WRONG: name=\"knowledge_search(keywords=[\\\"x\\\"])\"\n"
+           "  RIGHT: name=\"knowledge_search\", "
            "arguments={\"keywords\":[\"x\"]}\n"
            "\n"
            "If you are about to invoke a tool name you have NOT seen "
@@ -521,7 +520,9 @@ std::string tools_block(const ToolsetView & view) {
                  "(action=search|fetch). Reply MUST end with a "
                  "`Sources:` block listing URLs used.\n";
         if (view.memory_on)
-            s << "  - memory — private memory store "
+            s << "  - knowledge — persistent knowledge store for saving "
+                 "and recalling mental notes, skills, facts, and "
+                 "information across conversations "
                  "(action=search|load|append|save|list|delete|keywords). "
                  "Search BEFORE answering from knowledge.\n";
         if (view.fs_on)
@@ -591,17 +592,17 @@ std::string build_builtin_system_prompt(const ToolsetView & view) {
          "this order — strictly:\n"
          "\n";
     if (view.memory_on) {
-        s << "  1. MEMORY FIRST. Use your memory-search tool with "
+        s << "  1. KNOWLEDGE FIRST. Use your knowledge-search tool with "
              "keywords from the vocabulary appended below (exact "
-             "callable name in your AVAILABLE TOOLS list). If memory "
+             "callable name in your AVAILABLE TOOLS list). If knowledge "
              "returns enough to answer, SKIP the web and go straight "
              "to step 3.\n"
-             "  2. WEB only if memory had nothing or was "
+             "  2. WEB only if knowledge had nothing or was "
              "insufficient. ONE web search, then web_fetch the top "
              "1-3 URLs.\n"
              "  3. ANSWER. As soon as steps 1-2 give you enough, "
-             "answer the user. Don't re-search memory, don't "
-             "re-search the web, don't save more memories first.\n";
+             "answer the user. Don't re-search knowledge, don't "
+             "re-search the web, don't save more entries first.\n";
     } else if (view.web_on) {
         s << "  1. WEB if you don't already know. ONE web search, "
              "then web_fetch the top 1-3 URLs.\n"
@@ -623,13 +624,13 @@ std::string build_builtin_system_prompt(const ToolsetView & view) {
     if (view.memory_on || view.web_on) {
         s << "BUGS TO AVOID:\n";
         if (view.memory_on) {
-            s << "  - Skipping memory and going straight to web when "
-                 "memory is enabled.\n"
-                 "  - After a memory load returns a stable fact "
+            s << "  - Skipping knowledge and going straight to web when "
+                 "knowledge is enabled.\n"
+                 "  - After a knowledge load returns a stable fact "
                  "(definition, syntax, architecture), re-verifying "
                  "with the web — only do this when the user asked "
                  "for \"latest\" / \"current\" / dated info.\n"
-                 "  - After saving a memory, re-searching the web on "
+                 "  - After saving knowledge, re-searching the web on "
                  "the same topic in the same turn — the save means "
                  "you already learned what you needed.\n";
         }
@@ -639,8 +640,8 @@ std::string build_builtin_system_prompt(const ToolsetView & view) {
     }
 
     if (view.memory_on) {
-        s << "Saving new memories (when the info is durable — see the "
-             "memory tool's GUIDELINES) happens AFTER your reply is "
+        s << "Saving new knowledge (when the info is durable — see the "
+             "knowledge tool's GUIDELINES) happens AFTER your reply is "
              "written, as a final tool call. It's not another "
              "verification step.\n"
              "\n";

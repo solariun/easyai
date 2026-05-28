@@ -79,19 +79,19 @@ namespace easyai::tools {
 // entries.
 Tool make_rag_tool(std::string root_dir);
 
-// Focused per-action variants of the `memory` tool: memory_save,
-// memory_append, memory_search, memory_load, memory_list,
-// memory_delete, memory_keywords. Same on-disk store and handlers as
-// the unified surface; for smaller tool-callers that handle
+// Focused per-action variants of the `knowledge` tool: knowledge_save,
+// knowledge_append, knowledge_search, knowledge_load, knowledge_list,
+// knowledge_delete, knowledge_keywords. Same on-disk store and handlers
+// as the unified surface; for smaller tool-callers that handle
 // one-verb-per-tool more reliably than a discriminated `action`
 // string. The Toolbelt exposes this via tool_mode(Split | Both).
-std::vector<Tool> memory_split_tools(std::string root_dir);
+std::vector<Tool> knowledge_split_tools(std::string root_dir);
 
 // Compact one-line vocabulary snapshot — every distinct keyword in
 // the memory store at `root_dir`, sorted by count descending then
 // name ascending, capped at the top 40 to bound token cost. Format:
 //
-//   [MEMORY VOCABULARY (12 entries; most-common first):
+//   [KNOWLEDGE VOCABULARY (12 entries; most-common first):
 //   claude(8) easyai(5) bitnet(3) build(3) iteration(2) ...]
 //
 // Empty store → empty string (caller decides whether to inject).
@@ -102,6 +102,6 @@ std::vector<Tool> memory_split_tools(std::string root_dir);
 // Reads the directory each call (no persistent state); fine for the
 // per-request server hot path since render time is dominated by
 // inference, not the ~10-50ms directory scan.
-std::string render_memory_vocabulary(const std::string & root_dir);
+std::string render_knowledge_vocabulary(const std::string & root_dir);
 
 }  // namespace easyai::tools
