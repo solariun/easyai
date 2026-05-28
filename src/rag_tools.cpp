@@ -1686,134 +1686,45 @@ Tool make_rag_tool(std::string root_dir) {
 
     return Tool::builder("memory")
         .short_describe(
-            "Private memory store. action=search|load|append|save|"
-            "list|delete|keywords. Search BEFORE answering from "
-            "knowledge.")
+            "Persistent memory store (search|load|save|append|"
+            "list|delete|keywords).")
         .describe(
-            "Your private memory — one tool, seven actions.\n"
-            "Arguments are PLAIN JSON — no XML tags, no markup.\n"
+            "Private persistent memory — one tool, seven actions.\n"
             "\n"
-            "PRIVATE: the user can't see, list, or browse this store. "
-            "Never say \"check memory\" / \"I saved it\" — load it "
-            "yourself and put the body in your reply.\n"
+            "Actions:\n"
+            "  save     — create/overwrite. Needs: title, keywords, content.\n"
+            "  append   — add to existing (or create if new). Needs: title, content.\n"
+            "  search   — find by keyword. Needs: keywords (first is required match).\n"
+            "  load     — read full content. Needs: titles (array).\n"
+            "  list     — all titles. Optional: prefix, max.\n"
+            "  delete   — remove by title. fix-easyai-* are protected.\n"
+            "  keywords — show all keywords in use.\n"
             "\n"
-            "action=\"save\"     title, keywords, content → store or "
-            "overwrite.\n"
-            "  Optional: fix=true → immutable, title gets "
-            "`fix-easyai-` prefix.\n"
-            "\n"
-            "action=\"append\"   title, content → add to existing "
-            "memory (a Markdown `---` separates additions). If the "
-            "title does not exist, creates a new memory (keywords "
-            "required). Returns whether saved (new) or updated "
-            "(appended). Refused on fix-easyai-*.\n"
-            "  Optional: keywords (merged into existing, deduped, "
-            "cap 8; required if title is new).\n"
-            "\n"
-            "action=\"search\"   keywords (JSON array) → ranked "
-            "matches.\n"
-            "  keywords[0] is MANDATORY (every result carries it); "
-            "the rest rank but don't exclude.\n"
-            "  Optional: max_results (default 10, max 20), page "
-            "(default 1).\n"
-            "\n"
-            "action=\"load\"     titles (1..20 exact) → full content.\n"
-            "\n"
-            "action=\"list\"     → titles only.\n"
-            "  Optional: prefix (e.g. `fix-easyai-`), max (default "
-            "50, max 200).\n"
-            "\n"
-            "action=\"delete\"   title → forget. fix-easyai-* are "
-            "immutable.\n"
-            "\n"
-            "action=\"keywords\" → vocabulary overview (every keyword "
-            "+ count).\n"
-            "  Optional: min_count (default 1), max (default 200, "
-            "max 500).\n"
-            "\n"
-            "CALL EXAMPLES (exact JSON):\n"
-            "  {\"action\":\"search\",\"keywords\":[\"BitNet\",\"binary\"]}\n"
-            "  {\"action\":\"load\",\"titles\":[\"BitNet\"]}\n"
-            "  {\"action\":\"save\",\"title\":\"BitNet\","
-            "\"keywords\":[\"BitNet\",\"quantization\"],"
-            "\"content\":\"...\"}\n"
-            "  {\"action\":\"list\"}\n"
-            "  {\"action\":\"keywords\"}\n"
-            "\n"
-            "KNOWLEDGE LOOP (MANDATORY when memory + web are "
-            "available):\n"
-            "\n"
-            "  1. MEMORY FIRST — search memory for relevant keywords "
-            "before anything else. Load hits. Memory is your primary "
-            "knowledge base across sessions.\n"
-            "\n"
-            "  2. WEB SECOND — also search the web, even when memory "
-            "had results. The web may have newer or broader info.\n"
-            "\n"
-            "  3. MERGE & ANSWER — combine both sources. Prefer the "
-            "more recent or authoritative one when they conflict; "
-            "note the discrepancy to the user.\n"
-            "\n"
-            "  4. UPDATE MEMORY — if the web produced durable "
-            "knowledge that memory lacked or had outdated, save or "
-            "append it now. Save the distilled fact, not raw page "
-            "content.\n"
-            "\n"
-            "Skipping either source when both are available is a "
-            "failure mode.\n"
-            "\n"
-            "SAVE GUIDELINES:\n"
-            "\n"
-            "  - Save what's DURABLE — facts you'll want next "
-            "session: preferences, architecture, commands, fixes, "
-            "recipes. NOT transient research the user is already "
-            "reading.\n"
-            "\n"
-            "  - ONE comprehensive memory per topic, not fragments. "
-            "Append to existing entries instead of creating parallel "
-            "ones.\n"
-            "\n"
-            "  - Reusable procedures → keyword \"skill\". Search "
-            "keywords=[\"skill\", ...] before working a procedure "
-            "out from scratch.\n"
-            "\n"
-            "CITATION (INVIOLABLE): after ANY memory search or load "
-            "this turn that returns content you use in your reply, "
-            "your reply MUST end with a `Sources:` block citing the "
-            "memory title(s) as `memory: \"<title>\"`. This applies "
-            "even when no web tools were used — memory retrieval is "
-            "an external lookup."
+            "Save durable facts (preferences, architecture, commands, fixes). "
+            "One memory per topic — append to existing rather than duplicating."
         )
         .param("action",      "string",
-               "\"save\", \"append\", \"search\", \"load\", \"list\", "
-               "\"delete\", or \"keywords\".", true)
+               "save|append|search|load|list|delete|keywords.", true)
         .param("title",       "string",
-               "1..64 chars [A-Za-z0-9._+-]. save/append/delete.",
-               false)
+               "Short name (save/append/delete).", false)
         .param("titles",      "array",
-               "1..20 exact titles. load only.", false)
+               "Exact titles to load (1..20).", false)
         .param("keywords",    "array",
-               "JSON array of 1..8 short strings [A-Za-z0-9._+-]. "
-               "On search: first keyword is required, rest rank.",
-               false)
+               "Search terms (first is required match).", false)
         .param("content",     "string",
-               "UTF-8 body. save/append. Total on disk capped at "
-               "256 KB.", false)
+               "Body text (save/append).", false)
         .param("fix",         "boolean",
-               "save only. Immutable + `fix-easyai-` prefix. Default "
-               "false.", false)
+               "Make immutable (save only, default false).", false)
         .param("prefix",      "string",
-               "list only. Filter titles by prefix.", false)
+               "Filter by prefix (list only).", false)
         .param("max",         "integer",
-               "list/keywords cap. list default 50 (max 200); "
-               "keywords default 200 (max 500).", false)
+               "Result cap (list/keywords).", false)
         .param("max_results", "integer",
-               "search page size. Default 10, max 20.", false)
+               "Page size for search (default 10).", false)
         .param("page",        "integer",
-               "search page index, 1-based. Default 1.", false)
+               "Page number for search (default 1).", false)
         .param("min_count",   "integer",
-               "keywords only. Hide keywords used by fewer than N "
-               "memories. Default 1.", false)
+               "Min uses to show (keywords only).", false)
         .handle([h_save, h_append, h_search, h_load, h_list, h_delete, h_keywords]
                 (const ToolCall & c) -> ToolResult {
             std::string action;
@@ -1945,111 +1856,53 @@ std::vector<Tool> memory_split_tools(std::string root_dir) {
     out.reserve(7);
 
     out.push_back(Tool::builder("memory_save")
-        .describe(
-            "Store a new memory or overwrite an existing one. Title "
-            "and keywords are normalised (spaces → `_`, punctuation "
-            "dropped); the canonical key is reported back.\n"
-            "Arguments are PLAIN JSON — no XML tags, no markup.\n"
-            "Example: {\"title\":\"BitNet\","
-            "\"keywords\":[\"BitNet\",\"quantization\"],"
-            "\"content\":\"...\"}")
-        .param("title",    "string",
-               "1..64 chars after normalisation.", true)
-        .param("keywords", "array",
-               "1..24 short strings. Lead with the must-have term — "
-               "search treats keywords[0] as required.", true)
-        .param("content",  "string",
-               "Memory body. UTF-8, capped at 256 KB.", true)
-        .param("fix",      "boolean",
-               "Immutable + `fix-easyai-` prefix. Default false.",
-               false)
+        .describe("Create or overwrite a memory.")
+        .param("title",    "string", "Short name (spaces become _).", true)
+        .param("keywords", "array",  "Search terms (first is primary).", true)
+        .param("content",  "string", "Body text.", true)
+        .param("fix",      "boolean", "Make immutable. Default false.", false)
         .handle(h_save)
         .build());
 
     out.push_back(Tool::builder("memory_append")
-        .describe(
-            "Append to an existing memory (a Markdown `---` "
-            "separates each addition). If the title does not "
-            "exist, creates a new memory (keywords required). "
-            "Returns whether the memory was saved (new) or "
-            "updated (appended). Refused on fix-easyai-*.")
-        .param("title",    "string",
-               "Memory title — existing or new.", true)
-        .param("content",  "string",
-               "Text added after the current body (or full body "
-               "if new).", true)
-        .param("keywords", "array",
-               "Extra keywords merged in (deduped, cap 24). "
-               "Required when creating a new memory.", false)
+        .describe("Add text to an existing memory. Creates it if new (keywords required).")
+        .param("title",    "string", "Memory title.", true)
+        .param("content",  "string", "Text to append.", true)
+        .param("keywords", "array",  "Search terms (required if new).", false)
         .handle(h_append)
         .build());
 
     out.push_back(Tool::builder("memory_search")
-        .describe(
-            "Find memories by keyword. Returns ranked matches "
-            "tagged `[matched N/M]`. Search memory FIRST before "
-            "the web — then also web_search for freshness. Update "
-            "memory with any durable new facts the web provided.\n"
-            "Arguments are PLAIN JSON — no XML tags, no markup.\n"
-            "Example: {\"keywords\":[\"BitNet\",\"binary\"]}\n"
-            "\n"
-            "CITATION: if you use retrieved content in your reply, "
-            "it MUST end with a `Sources:` block citing "
-            "`memory: \"<title>\"` per entry.")
-        .param("keywords",    "array",
-               "1..24 strings. keywords[0] is required (every hit "
-               "carries it); the rest rank.", true)
-        .param("max_results", "integer",
-               "Page size, default 10, max 20.", false)
-        .param("page",        "integer",
-               "1-based, default 1.", false)
+        .describe("Find memories by keyword. Returns ranked matches with previews.")
+        .param("keywords",    "array",   "Search terms (first is required match).", true)
+        .param("max_results", "integer", "Results per page (default 10, max 20).", false)
+        .param("page",        "integer", "Page number (default 1).", false)
         .handle(h_search)
         .build());
 
     out.push_back(Tool::builder("memory_load")
-        .describe(
-            "Read the full content of 1..20 memories by exact title.\n"
-            "Arguments are PLAIN JSON — no XML tags, no markup.\n"
-            "Example: {\"titles\":[\"BitNet\",\"Preferences\"]}\n"
-            "\n"
-            "CITATION: if you use loaded content in your reply, "
-            "it MUST end with a `Sources:` block citing "
-            "`memory: \"<title>\"` per entry.")
-        .param("titles", "array",
-               "1..20 exact titles.", true)
+        .describe("Read full content of memories by title.")
+        .param("titles", "array", "Exact titles (1..20).", true)
         .handle(h_load)
         .build());
 
     out.push_back(Tool::builder("memory_list")
-        .describe(
-            "Titles only (no bodies). Pass prefix=\"fix-easyai-\" "
-            "for immutable memories.")
-        .param("prefix", "string",
-               "Filter titles by prefix.", false)
-        .param("max",    "integer",
-               "Result cap, default 50, max 200.", false)
+        .describe("List all memory titles.")
+        .param("prefix", "string",  "Filter by title prefix.", false)
+        .param("max",    "integer", "Max results (default 50).", false)
         .handle(h_list)
         .build());
 
     out.push_back(Tool::builder("memory_delete")
-        .describe(
-            "Forget a memory. fix-easyai-* are immutable and cannot "
-            "be deleted here.")
-        .param("title", "string",
-               "Exact title.", true)
+        .describe("Delete a memory. Immutable (fix-easyai-*) entries are protected.")
+        .param("title", "string", "Exact title.", true)
         .handle(h_delete)
         .build());
 
     out.push_back(Tool::builder("memory_keywords")
-        .describe(
-            "Vocabulary overview — every distinct keyword + count. "
-            "Call before save/search when unsure what vocabulary "
-            "you've already established.")
-        .param("min_count", "integer",
-               "Hide keywords used by fewer than N memories. Default "
-               "1.", false)
-        .param("max",       "integer",
-               "Result cap, default 200, max 500.", false)
+        .describe("Show all keywords in use and their counts.")
+        .param("min_count", "integer", "Hide below N uses (default 1).", false)
+        .param("max",       "integer", "Max results (default 200).", false)
         .handle(h_keywords)
         .build());
 

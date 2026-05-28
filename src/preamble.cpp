@@ -323,6 +323,13 @@ std::string build_session_info(const std::vector<easyai::Tool> & tools) {
     if (tools.empty()) return std::string();
 
     std::ostringstream out;
+    out << "\n\n# FILE OUTPUT — AUTHORITATIVE RULE\n"
+           "Only use file-write or file-read operations if a filesystem "
+           "or file tool (e.g. `fs`, `bash`, or any tool whose name "
+           "contains \"file\") is present in the AVAILABLE TOOLS list "
+           "below. If NO such tool is available, write the file content "
+           "directly in your answer instead.\n";
+
     out << "\n\n# AVAILABLE TOOLS — call ONLY these names this session\n"
            "These are the EXACT tools registered in your session. The "
            "names are case-sensitive. Calling a name NOT in this list "
