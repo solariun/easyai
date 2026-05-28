@@ -4192,13 +4192,21 @@ static std::string build_builtin_system_prompt(const ServerArgs & args) {
     view.web_on         = tools_on;
     view.fs_on          = tools_on && args.allow_fs;
     view.bash_on        = tools_on && args.allow_bash;
-    // python3: gated on the same predicate as cli::Toolbelt::tools()
-    // — sandbox-or-bash, plus the operator opt-out flag.
     view.python_on      = tools_on && args.allow_python
                        && (!args.sandbox.empty() || args.allow_bash);
     view.memory_on      = !args.rag_dir.empty();
     view.tool_lookup_on = tools_on;
-    return easyai::preamble::build_builtin_system_prompt(view);
+    std::string out = easyai::preamble::build_builtin_system_prompt(view);
+
+    out += "\n\n## Interface — Web UI\n"
+           "You are interfacing through a web UI. All requests must be "
+           "answered directly in your response text. Use ONLY the tools "
+           "listed above, exactly as described and within their stated "
+           "constraints. Do NOT assume, invent, or guess tool names — "
+           "if a tool is not in your AVAILABLE TOOLS list, it does not "
+           "exist.\n";
+
+    return out;
 }
 
 int main(int argc, char ** argv) {
