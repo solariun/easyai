@@ -551,10 +551,9 @@ struct Options {
     float                    top_p             = -1.0f;
     int                      top_k             = -1;
     float                    min_p             = -1.0f;
-    // 1.15 by default to break thinking-model rephrasing loops
-    // ("I'll write types.h / Let me write types.h / OK, creating
-    // types.h" repeated). Pass --repeat-penalty 1.0 to disable.
-    float                    repeat_penalty    = 1.15f;
+    // 1.0 by default — the server's [ENGINE] and [MODEL_*] profiles
+    // handle per-model tuning. Pass --repeat-penalty to override.
+    float                    repeat_penalty    = 1.0f;
     float                    frequency_penalty = -2.0f;
     float                    presence_penalty  = -2.0f;
     long long                seed              = -1;

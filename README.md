@@ -634,7 +634,7 @@ pass (2026-05-08). Three findings, all closed in this commit:
   module scope. (Adversarial bypass via `ctypes` / `subprocess` /
   `_io.FileIO` is unchanged and still documented as out-of-scope.)
 * **LOW — installer INI-shape validation widened.** §20.4 / §21.4
-  already validated `--temperature`, `--top-p`, `--ctx-size` etc.
+  already validated `--temperature`, `--top-p`, `--frequency-penalty`, `--ctx-size` etc.
   via `require_numeric` to defeat heredoc injection. Today
   extended the integer roster (`--service-port`, `--threads`,
   `--threads-batch`, `--ngl`) and added a new `require_no_injection`
@@ -984,7 +984,7 @@ headers, INI keys) is unchanged.
   `easyai::mcp::fetch_remote_tools` get the same defence-in-depth.
 * **Installer validates numeric sampling/timeout flags.**
   `--temperature`, `--top-p`, `--top-k`, `--min-p`,
-  `--repeat-penalty`, `--max-tokens`, `--http-timeout`, `--ctx-size`
+  `--repeat-penalty`, `--frequency-penalty`, `--max-tokens`, `--http-timeout`, `--ctx-size`
   must match `^-?[0-9]+(\.[0-9]+)?$` before they flow into the INI
   via heredoc. Closes a defence-in-depth gap where a crafted value
   containing `\n` could inject extra INI keys.
@@ -1034,7 +1034,7 @@ default prompts, and the CLI flag wiring at once.
   cleanups). The same guidance lives in the server's Deep persona
   and easyai-local's built-in prompt.
 * **Default sampling preset → `precise`** (was `balanced`).
-  Temp 0.2, top_p 0.95, top_k 40, min_p 0.10. Tuned for code,
+  Temp 0.2, top_p 0.92, top_k 50, min_p 0.03. Tuned for code,
   math, and factual Q&A — the dominant use case for a tool-calling
   agent. Flipped across server, local, cli, webui, library
   fallbacks, and the systemd installer's INI templates. README's
@@ -1090,7 +1090,8 @@ default prompts, and the CLI flag wiring at once.
 * **`--split-rag` opts back into the legacy seven `rag_*` tools.**
   Replaces `--experimental-rag`. Same semantics, opposite default.
   Wired as a CLI flag on every binary AND as `[SERVER] split_rag`
-  in the INI overlay (`easyai.ini` / `easyai-mcp.ini`). Useful for
+  in the INI overlay (`easyai.ini` / `easyai-mcp.ini`; per-model
+  overrides via `[MODEL_<pattern>]` sections). Useful for
   weak / 1-bit-quant tool callers (Bonsai-class) that handle many
   flat schemas more reliably than one discriminated schema.
 * **Default system prompts trimmed.** `easyai-server` and
@@ -1348,14 +1349,19 @@ has a matching INI key (see [`easyai-server.md`](easyai-server.md) §1).
 | `--top-p F` | per preset | Nucleus sampling p. |
 | `--top-k N` | per preset | Top-k cutoff. |
 | `--min-p F` | per preset | Min-p threshold. |
-| `--repeat-penalty F` | 1.15 | Repetition penalty (multiplicative on recent logits) — anti-loop safety net for thinking models that lock into rephrasing their own intent. `--repeat-penalty 1.0` disables. |
-| `--presence-penalty F` | 0.0 | Presence penalty (additive, fixed cost per token-already-seen, OpenAI semantics, `[-2.0, 2.0]`). Discourages topic stickiness without penalising literal tool-name repetition; pairs well with `--repeat-penalty 1.0` on long agentic flows. See [`design.md` §4b](design.md#4b-sampling-and-the-penalty-stack). |
-| `--max-tokens N` | unlimited | Cap tokens per request. |
+| `--repeat-penalty F` | 1.04 | Repetition penalty (multiplicative on recent logits) — anti-loop safety net for thinking models that lock into rephrasing their own intent. `--repeat-penalty 1.0` disables. |
+| `--frequency-penalty F` | 0.05 | Frequency penalty (additive, scales with count of each token already generated, OpenAI semantics, `[0.0, 2.0]`). Discourages verbatim repetition proportionally to how often a token has already appeared. |
+| `--presence-penalty F` | 0.1 | Presence penalty (additive, fixed cost per token-already-seen, OpenAI semantics, `[-2.0, 2.0]`). Discourages topic stickiness without penalising literal tool-name repetition; pairs well with `--repeat-penalty 1.0` on long agentic flows. See [`design.md` §4b](design.md#4b-sampling-and-the-penalty-stack). |
+| `--max-tokens N` | 12288 | Cap tokens per request. |
 | `--seed U32` | random | RNG seed (0 = random). |
 | `--max-incomplete-retries N` | 10 | Retry budget for "announce-only" turns; 0 disables. |
-| `-c, --ctx N` | 8192 | Context size. |
+| `-c, --ctx N` | 262144 | Context size. |
 | `--batch N` | = ctx | Logical batch size. |
-| `--ngl N` | -1 (auto) | GPU layers (0 = CPU only). |
+| `--ngl N` | 99 | GPU layers (0 = CPU only). |
+| `--split-mode, -sm MODE` | `none` | Multi-GPU split strategy: `none`, `layer`, `row`, `tensor`. |
+| `--rope-scaling MODE` | `yarn` | RoPE scaling method: `none`, `linear`, `yarn`. |
+| `--rope-scale F` | 2 | RoPE frequency scale factor. |
+| `--yarn-orig-ctx N` | 131072 | YaRN original context size for scaling. |
 | `-t, --threads N` | hw cores | CPU threads. |
 | `-ctk, --cache-type-k TYPE` | `f16` | K-cache dtype (`f32`,`f16`,`bf16`,`q8_0`,`q4_0`,`q4_1`,`q5_0`,`q5_1`,`iq4_nl`). |
 | `-ctv, --cache-type-v TYPE` | `f16` | V-cache dtype (same set). |
@@ -1427,9 +1433,9 @@ upstream `llama-server`, OpenAI itself, etc.).
 | `--top-p F` | server | Nucleus top-p. |
 | `--top-k N` | server | Top-k cutoff. |
 | `--min-p F` | server | min-p (llama-server / easyai). |
-| `--repeat-penalty F` | 1.15 | Repetition penalty — anti-loop default; pass 1.0 to disable. |
-| `--frequency-penalty F` | server | OpenAI standard \[-2.0, 2.0\]. |
-| `--presence-penalty F` | server | OpenAI standard \[-2.0, 2.0\]. |
+| `--repeat-penalty F` | 1.04 | Repetition penalty — anti-loop default; pass 1.0 to disable. |
+| `--frequency-penalty F` | server | Frequency penalty (OpenAI standard, `[0.0, 2.0]`). |
+| `--presence-penalty F` | server | Presence penalty (OpenAI standard, `[-2.0, 2.0]`). |
 | `--seed N` | random | Deterministic sampling seed. |
 | `--max-tokens N` | server | Cap reply length. |
 | `--stop SEQ` | — | Add a stop string (repeatable). |
@@ -1479,12 +1485,18 @@ use `easyai-cli`.
 | `--top-p F` | per preset | top-p. |
 | `--top-k N` | per preset | top-k. |
 | `--min-p F` | per preset | min-p. |
-| `--repeat-penalty F` | 1.15 | Repetition penalty — anti-loop default; pass 1.0 to disable. |
-| `--max-tokens N` | unlimited | Cap tokens per turn. |
+| `--repeat-penalty F` | 1.04 | Repetition penalty — anti-loop default; pass 1.0 to disable. |
+| `--frequency-penalty F` | 0.05 | Frequency penalty (`[0.0, 2.0]`). |
+| `--presence-penalty F` | 0.1 | Presence penalty (`[-2.0, 2.0]`). |
+| `--max-tokens N` | 12288 | Cap tokens per turn. |
 | `--seed U32` | random | RNG seed. |
-| `-c, --ctx N` | 4096 | Context size. |
+| `-c, --ctx N` | 262144 | Context size. |
 | `--batch N` | = ctx | Logical batch size. |
-| `--ngl N` | -1 (auto) | GPU layers. |
+| `--ngl N` | 99 | GPU layers. |
+| `--split-mode, -sm MODE` | `none` | Multi-GPU split strategy: `none`, `layer`, `row`, `tensor`. |
+| `--rope-scaling MODE` | `yarn` | RoPE scaling method: `none`, `linear`, `yarn`. |
+| `--rope-scale F` | 2 | RoPE frequency scale factor. |
+| `--yarn-orig-ctx N` | 131072 | YaRN original context size for scaling. |
 | `-t, --threads N` | hw cores | CPU threads. |
 | `--no-tools` | off | Skip the built-in toolbelt. |
 | `--sandbox DIR` | — | Enable the unified `fs` tool scoped to `DIR`. |
@@ -1541,15 +1553,16 @@ Full local engine. Header:
 | Method | Type | Default | What it does |
 |---|---|---|---|
 | `.model(gguf_path)` | `string` | — | GGUF file. |
-| `.context(n) / .batch(n)` | `int` | 4096 / = ctx | KV / logical batch size. |
-| `.gpu_layers(n)` | `int` | -1 (auto) | -1 = all, 0 = CPU only. |
+| `.context(n) / .batch(n)` | `int` | 262144 / = ctx | KV / logical batch size. |
+| `.gpu_layers(n)` | `int` | 99 | 99 = all layers offloaded, 0 = CPU only. |
 | `.threads(n) / .threads_batch(n)` | `int` | hw / = threads | CPU threads. |
 | `.seed(u32)` | `uint32_t` | random | RNG seed. |
 | `.system(prompt)` | `string` | — | System prompt. |
-| `.temperature(t) / .top_p(p) / .top_k(k) / .min_p(p)` | scalar | 0.7 / 0.95 / 40 / 0.05 | Sampling. |
-| `.repeat_penalty(r)` | `float` | 1.15 | Repetition penalty (multiplicative on recent logits) — anti-loop default. Set to 1.0 to disable. |
-| `.presence_penalty(p)` | `float` | 0.0 | Presence penalty (additive, fixed cost per token-already-seen, OpenAI semantics, range `[-2.0, 2.0]`). Pairs well with `repeat_penalty=1.0` on long agentic flows. See [`design.md` §4b](design.md#4b-sampling-and-the-penalty-stack). |
-| `.max_tokens(n)` | `int` | -1 (until ctx) | Per-turn cap. |
+| `.temperature(t) / .top_p(p) / .top_k(k) / .min_p(p)` | scalar | 0.2 / 0.92 / 50 / 0.03 | Sampling. |
+| `.repeat_penalty(r)` | `float` | 1.04 | Repetition penalty (multiplicative on recent logits) — anti-loop default. Set to 1.0 to disable. |
+| `.frequency_penalty(f)` | `float` | 0.05 | Frequency penalty (additive, scales with count, `[0.0, 2.0]`). |
+| `.presence_penalty(p)` | `float` | 0.1 | Presence penalty (additive, fixed cost per token-already-seen, OpenAI semantics, range `[-2.0, 2.0]`). Pairs well with `repeat_penalty=1.0` on long agentic flows. See [`design.md` §4b](design.md#4b-sampling-and-the-penalty-stack). |
+| `.max_tokens(n)` | `int` | 12288 | Per-turn cap. |
 | `.tool_choice_auto / .tool_choice_required / .tool_choice_none` | call | auto | Tool-choice mode. |
 | `.parallel_tool_calls(on)` | `bool` | off | Allow parallel tool calls. |
 | `.verbose(on)` | `bool` | off | Engine debug logs. |
@@ -1562,6 +1575,10 @@ Full local engine. Header:
 | `.add_kv_override(spec)` | `string` | — | GGUF metadata override (repeatable). |
 | `.flash_attn(on) / .use_mlock(on) / .use_mmap(on)` | `bool` | auto/off/on | Compute / memory. |
 | `.numa(strategy)` | `string` | off | `distribute` / `isolate` / `numactl` / `""`. |
+| `.split_mode(mode)` | `string` | `none` | Multi-GPU split: `none`, `layer`, `row`, `tensor`. |
+| `.rope_scaling(mode)` | `string` | `yarn` | RoPE scaling: `none`, `linear`, `yarn`. |
+| `.rope_freq_scale(f)` | `float` | 2 | RoPE frequency scale factor. |
+| `.yarn_orig_ctx(n)` | `int` | 131072 | YaRN original context size. |
 | `.enable_thinking(on)` | `bool` | on | Chat-template thinking flag. |
 | `.add_tool(t) / .clear_tools()` | call | — | Tool registration. |
 | `.on_token(cb) / .on_tool(cb) / .on_hop_reset(cb) / .on_incomplete_retry(cb)` | callback | — | Streaming hooks. |
@@ -1595,7 +1612,7 @@ consumer process. Header:
 | `.model(id)` | `string` | — | Request body `model` field. |
 | `.system(prompt)` | `string` | — | System prompt(s). |
 | `.temperature(t) / .top_p(v) / .top_k(v) / .min_p(v)` | scalar | server | Sampling. |
-| `.repeat_penalty(v)` | float | 1.15 | Repetition penalty — anti-loop default; `1.0` disables. |
+| `.repeat_penalty(v)` | float | 1.04 | Repetition penalty — anti-loop default; `1.0` disables. |
 | `.frequency_penalty(v) / .presence_penalty(v)` | float | server | OpenAI-shape penalties. |
 | `.seed(s)` | `long long` | -1 | -1 = randomise. |
 | `.max_tokens(n)` | `int` | server | Cap. |
@@ -1674,8 +1691,8 @@ the real behaviour dial.
   logits; high temperature amplifies that noise into real errors.
 
 The presets below are just curated combinations of these four knobs —
-e.g. `precise` (the project default) encodes `temp 0.2, top_p 0.95,
-top_k 40, min_p 0.10`.
+e.g. `precise` (the project default) encodes `temp 0.2, top_p 0.92,
+top_k 50, min_p 0.03`.
 
 ### Sampling presets
 
@@ -1689,9 +1706,9 @@ when you need looser sampling.
 | Name | temp | top_p | top_k | min_p | Behaviour | Pick when… |
 |---|---|---|---|---|---|---|
 | `deterministic` | 0.0 | 1.0 | 1 | 0.00 | Greedy: always picks the single most likely token. Same prompt → byte-identical answer every time. No randomness, no exploration. | You need reproducibility (CI, benchmarks, eval harnesses), or when even tiny variation breaks downstream parsing. |
-| `precise` (default) | 0.2 | 0.95 | 40 | 0.10 | Sticks to high-confidence tokens. Concise, follows instructions tightly, rarely contradicts itself or invents facts. min_p of 0.10 aggressively prunes low-probability tokens — good for stable tool calls and structured output. | Code generation, math, factual Q&A, the `memory` tool, tool-calling agents, structured output (JSON/SQL/cypher), anything you'd want to be "right" rather than "interesting". |
-| `balanced` | 0.7 | 0.95 | 40 | 0.05 | A bit of variety while still mostly committing to the most-likely answer. Phrasing varies between runs; the substance shouldn't. | General-purpose chat, summarisation, casual Q&A, anywhere you want natural-sounding prose without surprises. |
-| `creative` | 1.0 | 0.95 | 40 | 0.05 | More phrasing variety, occasional surprising word choices, willingness to take a less-obvious angle. | Brainstorming, fiction, marketing copy, ideation, anything where "interesting" beats "literal". |
+| `precise` (default) | 0.2 | 0.92 | 50 | 0.03 | Sticks to high-confidence tokens. Concise, follows instructions tightly, rarely contradicts itself or invents facts. Slightly wider candidate pool than before (top_k 50, min_p 0.03) for more natural phrasing while staying deterministic enough for stable tool calls. | Code generation, math, factual Q&A, the `memory` tool, tool-calling agents, structured output (JSON/SQL/cypher), anything you'd want to be "right" rather than "interesting". |
+| `balanced` | 0.7 | 0.92 | 50 | 0.03 | A bit of variety while still mostly committing to the most-likely answer. Phrasing varies between runs; the substance shouldn't. | General-purpose chat, summarisation, casual Q&A, anywhere you want natural-sounding prose without surprises. |
+| `creative` | 1.0 | 0.92 | 50 | 0.03 | More phrasing variety, occasional surprising word choices, willingness to take a less-obvious angle. | Brainstorming, fiction, marketing copy, ideation, anything where "interesting" beats "literal". |
 | `wild` | 1.4 | 0.98 | 60 | 0.00 | Maximum entropy. Frequently picks low-probability tokens; can wander off-topic, contradict itself, hallucinate. | Pure exploration, "show me something I wouldn't have thought of", stylistic experiments. Don't ship it. |
 
 Aliases (case-insensitive) recognised by `find_preset()`:
@@ -1943,7 +1960,9 @@ engine.add_tool(
   Configures HTTP transport (`endpoint`, `api_key`, `timeout_seconds`,
   `verbose`) plus the full sampling/penalty surface (`temperature`, `top_p`,
   `top_k`, `min_p`, `repeat_penalty`, `frequency_penalty`, `presence_penalty`,
-  `seed`, `max_tokens`, `stop(vector)`, `extra_body_json`).  Streaming
+  `seed`, `max_tokens`, `stop(vector)`, `extra_body_json`).
+  Engine-side also exposes `split_mode`, `rope_scaling`, `rope_freq_scale`,
+  `yarn_orig_ctx` for multi-GPU and context-extension tuning.  Streaming
   callbacks (`on_token`, `on_reason`, `on_tool`) and an agentic multi-hop
   loop mirror `Engine::chat_continue` semantics.
 * Direct-endpoint helpers — `list_models`, `list_remote_tools`, `health`,
@@ -1985,15 +2004,35 @@ alias      = EasyAi
 mcp_auth   = on              ; require Bearer on /mcp
 
 [ENGINE]
-ngl        = -1              ; auto-fit GPU
+ngl        = 99              ; offload all layers to GPU
 flash_attn = on
 mlock      = on
+ctx_size   = 262144
 cache_type_k = q8_0
 cache_type_v = q8_0
+frequency_penalty = 0.05
+split_mode     = none         ; none | layer | row | tensor
+rope_scaling   = yarn         ; none | linear | yarn
+rope_freq_scale = 2
+yarn_orig_ctx  = 131072
+
+[MODEL_deepseek]              ; per-model profile — matches any GGUF
+temperature = 0.15            ; whose resolved filename contains
+top_k       = 30              ; "deepseek" (case-insensitive)
+
+[MODEL_qwen]
+temperature = 0.25
+repeat_penalty = 1.08
 
 [MCP_USER]
 gustavo    = REPLACE-WITH-OPENSSL-RAND-HEX-32
 ```
+
+`[MODEL_<pattern>]` sections let you override any `[ENGINE]` key for
+specific models. The `<pattern>` is matched case-insensitively as a
+substring against the resolved model filename; when multiple sections
+match, the longest pattern wins. Precedence: CLI > MODEL_ > ENGINE >
+hardcoded default.
 
 Full key reference + worked examples: [`easyai-server.md`](easyai-server.md) §1.
 

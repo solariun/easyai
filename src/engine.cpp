@@ -842,7 +842,7 @@ struct Engine::Impl {
         params.sampling.top_p        = 0.95f;
         params.sampling.top_k        = 40;
         params.sampling.min_p        = 0.05f;
-        params.sampling.penalty_repeat = 1.1f;
+        params.sampling.penalty_repeat = 1.0f;
     }
 
     ~Impl() {
@@ -1395,6 +1395,7 @@ Engine & Engine::top_k(int v)                   { p_->params.sampling.top_k = v;
 Engine & Engine::min_p(float v)                 { p_->params.sampling.min_p = v; return *this; }
 Engine & Engine::repeat_penalty(float v)        { p_->params.sampling.penalty_repeat = v; return *this; }
 Engine & Engine::presence_penalty(float v)      { p_->params.sampling.penalty_present = v; return *this; }
+Engine & Engine::frequency_penalty(float v)    { p_->params.sampling.penalty_freq = v; return *this; }
 Engine & Engine::max_tokens(int n)              { p_->max_new_tokens = n; return *this; }
 Engine & Engine::tool_choice_auto()             { p_->tool_choice = COMMON_CHAT_TOOL_CHOICE_AUTO;     return *this; }
 Engine & Engine::tool_choice_required()         { p_->tool_choice = COMMON_CHAT_TOOL_CHOICE_REQUIRED; return *this; }
@@ -1590,6 +1591,33 @@ Engine & Engine::numa(const std::string & strategy) {
     else if (strategy == "numactl")    p_->params.numa = GGML_NUMA_STRATEGY_NUMACTL;
     else if (strategy == "mirror")     p_->params.numa = GGML_NUMA_STRATEGY_MIRROR;
     else p_->last_error = "numa: unknown strategy '" + strategy + "'";
+    return *this;
+}
+
+Engine & Engine::split_mode(const std::string & mode) {
+    if      (mode == "none")   p_->params.split_mode = LLAMA_SPLIT_MODE_NONE;
+    else if (mode == "layer")  p_->params.split_mode = LLAMA_SPLIT_MODE_LAYER;
+    else if (mode == "row")    p_->params.split_mode = LLAMA_SPLIT_MODE_ROW;
+    else if (mode == "tensor") p_->params.split_mode = LLAMA_SPLIT_MODE_TENSOR;
+    else p_->last_error = "split_mode: unknown mode '" + mode + "'";
+    return *this;
+}
+
+Engine & Engine::rope_scaling(const std::string & type) {
+    if      (type == "none")   p_->params.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_NONE;
+    else if (type == "linear") p_->params.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_LINEAR;
+    else if (type == "yarn")   p_->params.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_YARN;
+    else p_->last_error = "rope_scaling: unknown type '" + type + "'";
+    return *this;
+}
+
+Engine & Engine::rope_freq_scale(float scale) {
+    p_->params.rope_freq_scale = scale;
+    return *this;
+}
+
+Engine & Engine::yarn_orig_ctx(int ctx) {
+    p_->params.yarn_orig_ctx = ctx;
     return *this;
 }
 

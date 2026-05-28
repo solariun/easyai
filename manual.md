@@ -32,9 +32,9 @@ C++17 program". By the end you will know how to:
 | **3** | Embedding `libeasyai`  | `Agent` (3-line hello), `Backend` (local↔remote), `Engine` API top-to-bottom, callbacks, presets, tools, escape hatches |
 | **4** | Embedding `libeasyai-cli` | `Client` API top-to-bottom — your code drives a remote model with local tools |
 | **5** | Authoring custom tools | Builder API, schemas, sandboxes, error handling, the `Plan` tool, `system_*` tools cookbook |
-| **6** | Deploying easyai-server | Single-binary install, systemd unit, nginx TLS termination, multiple-server fan-out |
+| **6** | Deploying easyai-server | Single-binary install, systemd unit, nginx TLS termination, per-model INI profiles, multiple-server fan-out |
 | **7** | Operating the server   | `/health` and `/metrics`, presets at runtime, log rotation, crash capture |
-| **8** | Performance & tuning   | KV cache types, flash-attn, mlock, ngl auto-fit, prompt-eval throughput, sampler choices |
+| **8** | Performance & tuning   | KV cache types, flash-attn, mlock, ngl auto-fit, RoPE/YaRN context extension, GPU split mode, sampler choices |
 | **9** | Recipes (cookbook)     | Real prompts + flag combinations, including the planning agent, papers digest, host triage |
 | **10** | Troubleshooting       | Build, GPU, runtime, model, tool, network, TLS issues |
 | **11** | Design references     | Pointers into `design.md` for the deeper "why" |
@@ -2073,7 +2073,7 @@ int main() {
        .model("EasyAi")
        .system("You are a planning agent. Be concise.")
        .temperature(0.2f)
-       .top_p(0.95f)
+       .top_p(0.92f)
        .seed(42);
 
     cli.add_tool(easyai::tools::datetime());
@@ -2210,14 +2210,14 @@ them alone keeps the server's default in effect.
 
 ```cpp
 cli.temperature(0.2f)
-   .top_p(0.95f)
-   .top_k(40)
-   .min_p(0.05f)               // llama-server / easyai
-   .repeat_penalty(1.15f)      // anti-loop default; pass 1.0 to disable
-   .frequency_penalty(0.0f)    // OpenAI standard, [-2.0, 2.0]
-   .presence_penalty(0.0f)     // OpenAI standard, [-2.0, 2.0]
+   .top_p(0.92f)
+   .top_k(50)
+   .min_p(0.03f)               // llama-server / easyai
+   .repeat_penalty(1.04f)      // anti-loop default; pass 1.0 to disable
+   .frequency_penalty(0.05f)   // per-token count penalty, [0.0, 2.0]
+   .presence_penalty(0.1f)     // per-token-seen penalty, [-2.0, 2.0]
    .seed(42)                   // deterministic; -1 = randomise
-   .max_tokens(512)
+   .max_tokens(12288)
    .stop({ "\n\nUSER:", "\n\nQ:" });
 ```
 
@@ -2775,7 +2775,56 @@ tokens — the upgrade window is briefly visible to active users.
 For zero-downtime upgrades, run two backends behind a load
 balancer and drain one at a time.
 
-### 6.4 Backups
+### 6.4 Per-model INI profiles — `[MODEL_<pattern>]`
+
+The INI file supports per-model override sections.  When the server
+loads a model, it resolves symlinks, strips the path to
+basename-without-extension, and does a case-insensitive substring
+match against all `[MODEL_*]` section names.  The longest match wins.
+
+Keys are the same as `[ENGINE]` — `temperature`, `top_p`, `top_k`,
+`min_p`, `repeat_penalty`, `presence_penalty`, `frequency_penalty`,
+`max_tokens`, `context`, `ngl`, `flash_attn`, `cache_type_k`,
+`cache_type_v`, `rope_scaling`, `rope_freq_scale`, `yarn_orig_ctx`,
+`split_mode`, etc.  Only include keys you want to override; omitted
+keys keep the `[ENGINE]` value.
+
+Precedence: **CLI flags > MODEL_\<match\> > [ENGINE] > hardcoded**.
+
+Example: loading `Qwen3-Coder-Next-Q6_K_M.gguf` (or a symlink
+`ai.gguf` pointing at it) matches both `[MODEL_Qwen3]` and
+`[MODEL_Qwen3-Coder-Next]` — the latter wins because
+`"Qwen3-Coder-Next"` is a longer substring match.
+
+```ini
+[MODEL_Qwen3-Coder]
+temperature      = 0.2
+top_p            = 0.92
+top_k            = 50
+min_p            = 0.03
+repeat_penalty   = 1.04
+presence_penalty = 0.1
+frequency_penalty = 0.05
+context          = 262144
+rope_scaling     = yarn
+rope_freq_scale  = 2
+yarn_orig_ctx    = 131072
+
+[MODEL_DeepSeek]
+temperature      = 0.6
+top_p            = 0.95
+top_k            = 40
+min_p            = 0.05
+repeat_penalty   = 1.0
+presence_penalty = 0.0
+frequency_penalty = 0.0
+context          = 131072
+```
+
+The installer writes these as commented-out examples in
+`/etc/easyai/easyai.ini`.
+
+### 6.5 Backups
 
 Stateless except for whatever you put in `/var/lib/easyai/`
 (model files, sandboxed fs_* roots).  Snapshot that directory.
@@ -2882,12 +2931,12 @@ final token is drawn from the survivors.
 
 They stack — tightening all of them at once is redundant. Practical
 rule: pick *one* adaptive cutter (`top_p ~0.9–0.95` **or** `min_p
-~0.05–0.1`), leave `top_k` generous as a backstop, and use
-`temperature` as the real behaviour dial. Low `temperature` (0.2–0.6)
-for code / agentic / structured output; higher (0.8–1.2) for creative
-work; lean conservative on heavily quantised models (quantisation
-already adds logit noise, and high temperature amplifies it into real
-errors).
+~0.03–0.1`), leave `top_k` generous as a backstop (`50` default), and
+use `temperature` as the real behaviour dial. Low `temperature`
+(0.2–0.6) for code / agentic / structured output; higher (0.8–1.2) for
+creative work; lean conservative on heavily quantised models
+(quantisation already adds logit noise, and high temperature amplifies
+it into real errors).
 
 Presets order (project-wide default is **`precise`**):
 * `deterministic`  — temp 0.0, greedy.  Same prompt → byte-identical reply. Reproducibility / CI / eval harnesses.
@@ -2903,18 +2952,18 @@ Per-request: pin temp + top_p + top_k + min_p in the request body
 (via the `--temperature` / `--top-p` / etc. flags on cli-remote, or
 the matching `Client::*` setters in code).  These reset every turn.
 
-### 8.6 Penalties — `repeat_penalty` and `presence_penalty`
+### 8.6 Penalties — `repeat_penalty`, `frequency_penalty`, and `presence_penalty`
 
 Penalties bias generation *against* tokens that have already been
 produced.  Three knobs, three failure modes:
 
-| Knob | Form | What it bites on |
-|---|---|---|
-| `repeat_penalty` | multiplicative on logits in recent window | tight literal repetition ("I'll write X / Let me write X / OK, creating X") |
-| `frequency_penalty` | additive, scales with token *count* | over-use of common tokens ("the the the") |
-| `presence_penalty` | additive, fixed cost per token-already-seen *at all* | topic stickiness without per-occurrence ramp-up |
+| Knob | Form | Default | What it bites on |
+|---|---|---|---|
+| `repeat_penalty` | multiplicative on logits in recent window | 1.04 | tight literal repetition ("I'll write X / Let me write X / OK, creating X") |
+| `frequency_penalty` | additive, proportional to token *count* | 0.05 | over-use of common tokens ("the the the"); range [0.0, 2.0] |
+| `presence_penalty` | additive, fixed cost per token-already-seen *at all* | 0.1 | topic stickiness without per-occurrence ramp-up |
 
-The default `repeat_penalty=1.15` is an anti-loop safety net for
+`repeat_penalty` (default `1.04`) is a light anti-loop safety net for
 thinking models that otherwise rephrase the same intent before
 acting.  It works for short turns.  On *long agentic flows* (10+
 tool hops) it starts misfiring — by the fifth `fs_read_file` call
@@ -2922,25 +2971,31 @@ the literal tokens of the tool name fall inside the window, the
 model paraphrases ("read_file", "fs_read"), the dispatcher fails
 with "unknown tool".
 
-`presence_penalty` (default `0.0`) is the lever for the *other*
+`frequency_penalty` (default `0.05`) applies an additive cost
+proportional to how many times a token has appeared.  Unlike
+`repeat_penalty`, the cost grows with each occurrence, so it
+penalises *frequent* re-use harder than a one-off repeat.
+Set via `[ENGINE] frequency_penalty` / `--frequency-penalty`.
+
+`presence_penalty` (default `0.1`) is the lever for the *other*
 failure mode.  A fixed per-token-seen cost discourages re-introducing
 the same vocabulary without the per-occurrence ramp of
 `repeat_penalty`, so calling `fs_read_file` for the tenth time costs
 the same as the second.
 
-The production AI box ships `repeat_penalty=1.0` (off) +
-`presence_penalty=1.5` because that pairing tested better on long
-flows than `repeat_penalty=1.15` alone.  Operators with shorter
-chat workloads can keep the original pairing
-(`repeat_penalty=1.15`, `presence_penalty=0`).
+The production AI box ships `repeat_penalty=1.04` +
+`frequency_penalty=0.05` + `presence_penalty=0.1` — a balanced
+triple that tested better on long agentic flows than a single heavy
+`repeat_penalty`.  Operators with shorter chat workloads can keep
+a simpler pairing (`repeat_penalty=1.15`, others at `0`).
 
 Persistence: penalties are set at startup via the INI / CLI flags
-(`[ENGINE] repeat_penalty / presence_penalty`,
-`--repeat-penalty / --presence-penalty`) and **persist across
-requests**.  Per-request `set_sampling()` only resets the shapers
-(temp / top_p / top_k / min_p) — the penalties stick.  This is
-deliberate: they're operator-tuned guardrails, not per-call
-stylistic knobs.
+(`[ENGINE] repeat_penalty / presence_penalty / frequency_penalty`,
+`--repeat-penalty / --presence-penalty / --frequency-penalty`) and
+**persist across requests**.  Per-request `set_sampling()` only
+resets the shapers (temp / top_p / top_k / min_p) — the penalties
+stick.  This is deliberate: they're operator-tuned guardrails, not
+per-call stylistic knobs.
 
 The full design rationale (math, failure modes, layered API) lives
 in [`design.md` §4b](design.md#4b-sampling-and-the-penalty-stack).
@@ -2951,6 +3006,41 @@ in [`design.md` §4b](design.md#4b-sampling-and-the-penalty-stack).
 same.  A model that runs away calling tools without converging will
 hit the cap and bail out with the last partial answer.  Visible in
 verbose mode as `[easyai] hop 7: …`.
+
+### 8.8 RoPE scaling and context extension
+
+When `ctx_size` exceeds the model's native training context, RoPE
+scaling lets the model extrapolate.  Three Engine setters control it:
+
+* **`rope_scaling(type)`** — `"none"` (default), `"linear"`, or
+  `"yarn"`.  YaRN is the recommended method for large extensions
+  (2x+).
+* **`rope_freq_scale(scale)`** — frequency scale factor.
+  `0.0` = model default.  Pass `2` to double the effective context.
+* **`yarn_orig_ctx(ctx)`** — YaRN original context length.
+  `0` = use model default.  Set to the model's training context
+  (e.g. `131072` for a 128K-trained model) when extending with YaRN.
+
+CLI / INI equivalents: `--rope-scaling`, `--rope-scale`,
+`--yarn-orig-ctx` / `[ENGINE] rope_scaling`, `rope_freq_scale`,
+`yarn_orig_ctx`.
+
+The installer defaults ship `rope_scaling=yarn`, `rope_freq_scale=2`,
+`yarn_orig_ctx=131072` — doubling a 128K model to the default
+`ctx_size=262144`.
+
+### 8.9 GPU split mode
+
+Controls how model layers distribute across multiple GPUs:
+
+* **`split_mode(mode)`** — `"none"` (single GPU), `"layer"` (default,
+  split layers across GPUs), `"row"`, or `"tensor"`.
+
+CLI / INI: `-sm` / `--split-mode` / `[ENGINE] split_mode`.
+
+Single-GPU setups should use `"none"` (the installer default).
+Multi-GPU rigs benefit from `"layer"` or `"row"` depending on the
+model size vs. per-GPU VRAM.
 
 ---
 
@@ -3050,13 +3140,13 @@ launch looks like:
     --model      /var/lib/easyai/models/ai.gguf \
     --alias      SolariunAI_Box \
     --host       0.0.0.0 --port 8080 \
-    --ctx        128000 \
+    --ctx        262144 \
     --ngl        99 \
     --threads    8  --threads-batch 8 \
     --flash-attn \
     --cache-type-k q8_0 --cache-type-v q8_0 \
     --mlock --no-mmap \
-    --preset balanced --temperature 0.6 --top-p 0.9 --top-k 20 \
+    --preset balanced --temperature 0.2 --top-p 0.92 --top-k 50 \
     --api-key    "$EASYAI_API_KEY" \
     --metrics \
     --system-file /etc/easyai/system.txt \
@@ -3081,6 +3171,11 @@ Flag map vs. `llama-server`:
 | `--metrics`              | `--metrics`              |
 | `--reasoning <on/off>`   | `--reasoning <on/off>`   |
 | `--override-kv`          | `--override-kv`          |
+| `--frequency-penalty`    | `--frequency-penalty`    |
+| `-sm / --split-mode`     | `-sm / --split-mode`     |
+| `--rope-scaling`         | `--rope-scaling`         |
+| `--rope-freq-scale`      | `--rope-scale`           |
+| `--yarn-orig-ctx`        | `--yarn-orig-ctx`        |
 | `-np / --parallel`       | accepted; warns since the engine is single-context |
 
 When `--api-key` is set, every `/v1/*` request must carry

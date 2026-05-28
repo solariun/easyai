@@ -256,7 +256,8 @@ empty reply. The behaviour is logged when `Engine::verbose(true)`.
 
 ```cpp
 Engine().model("…").context(4096).gpu_layers(99)
-        .system("…").temperature(0.7).top_p(0.95)
+        .system("…").temperature(0.2).top_p(0.92)
+        .frequency_penalty(0.0).rope_scaling("none")
         .add_tool(…).on_token(…).load();
 ```
 
@@ -451,17 +452,114 @@ intentionally not done yet because no concrete need has surfaced.
 | Layer | Surface | Knobs |
 |---|---|---|
 | **Tier 1** (`Agent`) | implicit — uses preset only | preset name, no penalty access |
-| **Tier 2a** (`Engine`) | `Engine::repeat_penalty(float)`, `Engine::presence_penalty(float)` | typed setters |
+| **Tier 2a** (`Engine`) | `Engine::repeat_penalty(float)`, `Engine::frequency_penalty(float)`, `Engine::presence_penalty(float)` | typed setters |
 | **Tier 2b** (`Client`) | `Client::repeat_penalty / frequency_penalty / presence_penalty` | typed setters; written into the OpenAI request body |
-| **Tier 3** (CLI / INI) | `--repeat-penalty F`, `--presence-penalty F`, `[ENGINE] repeat_penalty / presence_penalty` | one flag and one INI key per knob |
+| **Tier 3** (CLI / INI) | `--repeat-penalty F`, `--presence-penalty F`, `[ENGINE] repeat_penalty / frequency_penalty / presence_penalty` | one flag and one INI key per knob |
 | **Tier 4** (raw HTTP) | request-body field `presence_penalty` etc. | currently honoured by the Client (outbound) but ignored by the server (inbound — see "Per-request behaviour" above) |
 
-`frequency_penalty` is intentionally *not* exposed at Tier 2a
-(Engine).  llama.cpp supports it (`penalty_freq`) but we haven't
-seen a workload where it outperformed the
-`repeat_penalty + presence_penalty` pair, so adding the surface
-would just be one more knob to mistune.  If the need arises the
-plumbing follows the `presence_penalty` template exactly.
+`frequency_penalty` is now exposed at Tier 2a as
+`Engine::frequency_penalty(float)`.  Valid range is [0.0, 2.0];
+default 0.0 (disabled).  Maps to `params.sampling.penalty_freq`.
+The setter follows the same pattern as `presence_penalty` —
+staged until `load()`, then modifiable via `set_sampling()`.
+The INI key `[ENGINE] frequency_penalty` and per-model
+`[MODEL_<pattern>] frequency_penalty` also wire through.
+
+### Compute and context-extension knobs
+
+Three additional Engine setters control how the model distributes
+work across GPUs and how RoPE position encoding is scaled for
+long-context inference:
+
+| Setter | Values | Default | Maps to |
+|---|---|---|---|
+| `Engine::split_mode(const std::string & mode)` | `"none"` / `"layer"` / `"row"` / `"tensor"` | (llama.cpp default, typically `"layer"`) | `params.split_mode` enum |
+| `Engine::rope_scaling(const std::string & type)` | `"none"` / `"linear"` / `"yarn"` | `"none"` (use model metadata) | `params.rope_scaling_type` enum |
+| `Engine::rope_freq_scale(float scale)` | any float; 0.0 = default | 0.0 | `params.rope_freq_scale` |
+| `Engine::yarn_orig_ctx(int ctx)` | any int; 0 = model default | 0 | `params.yarn_orig_ctx` |
+
+**`split_mode`** controls how tensor work is partitioned across
+multiple GPUs:
+
+* `none` — single GPU, no split.
+* `layer` — whole layers assigned to GPUs (classic pipeline
+  parallelism; the default for most multi-GPU setups).
+* `row` — individual rows of weight matrices split across GPUs.
+* `tensor` — finer-grained tensor-level split.
+
+Most operators never touch this — `layer` works well.  `row` and
+`tensor` trade more inter-GPU traffic for better memory balance
+when GPU VRAM sizes differ.
+
+**`rope_scaling`** selects the positional-encoding extension
+strategy for context lengths beyond the model's native training
+window:
+
+* `none` — no scaling; use whatever the model's GGUF metadata
+  declares.
+* `linear` — classic linear interpolation (Chen et al. 2023).
+  Cheap, works for moderate extension ratios (2-4x).
+* `yarn` — Yet Another RoPE extensioN (Peng et al. 2023).
+  Better quality at high extension ratios (8-16x), slightly
+  more compute.
+
+`rope_freq_scale` is the frequency-domain scaling factor used by
+both `linear` and `yarn`.  A value of 0.0 tells llama.cpp to use
+the model's built-in default.  Typical values for a 4x extension
+are around 0.25 (linear) or auto-computed (yarn).
+
+`yarn_orig_ctx` sets the original context size that YaRN uses as
+its reference window.  0 means "read from model metadata."  Only
+meaningful when `rope_scaling = "yarn"`.
+
+All four setters are staged (take effect at `load()`), follow the
+same fluent `Engine &` return pattern, and are exposed as INI keys
+under `[ENGINE]` and `[MODEL_<pattern>]`.
+
+### Per-model INI profiles (`[MODEL_<pattern>]`)
+
+The `easyai.ini` file supports per-model override sections that
+let an operator tune sampling and compute knobs per model without
+CLI flags:
+
+```ini
+[ENGINE]
+temperature      = 0.2
+ctx_size         = 262144
+
+[MODEL_qwen3]
+temperature      = 0.4
+frequency_penalty = 0.05
+rope_scaling     = yarn
+yarn_orig_ctx    = 8192
+
+[MODEL_llama-3]
+repeat_penalty   = 1.1
+split_mode       = row
+```
+
+**Matching rule:** the pattern in `[MODEL_<pattern>]` is compared
+case-insensitively as a substring against the resolved model
+filename (symlinks followed via `realpath`).  When multiple
+sections match, the **longest pattern wins** — so `MODEL_qwen3-30b`
+beats `MODEL_qwen3` for a file named `qwen3-30b-q4.gguf`.
+
+**Supported keys** are the same set available under `[ENGINE]`:
+`temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`,
+`frequency_penalty`, `presence_penalty`, `max_tokens`, `ctx_size`,
+`ngl`, `split_mode`, `rope_scaling`, `rope_freq_scale`,
+`yarn_orig_ctx`.
+
+**Precedence (highest wins):**
+
+1. CLI flags (`--temperature 0.3`)
+2. Matching `[MODEL_<pattern>]` section
+3. `[ENGINE]` section
+4. Hardcoded defaults
+
+This layering lets the operator set safe global defaults in
+`[ENGINE]`, override per model family in `[MODEL_*]`, and still
+override everything from the command line for a one-off run.
 
 ---
 

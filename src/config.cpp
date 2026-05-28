@@ -167,4 +167,36 @@ Ini load_ini_file(const std::string & path, std::string & err_out) {
     return out;
 }
 
+std::string find_model_section(const Ini & ini, const std::string & model_name) {
+    if (model_name.empty()) return {};
+
+    std::string name_lc;
+    name_lc.reserve(model_name.size());
+    for (char c : model_name)
+        name_lc.push_back((char) std::tolower((unsigned char) c));
+
+    std::string best_section;
+    std::size_t best_len = 0;
+
+    for (const auto & kv : ini.sections) {
+        const auto & sec = kv.first;
+        if (sec.size() <= 6) continue;
+        if (sec.substr(0, 6) != "MODEL_") continue;
+        std::string pattern = sec.substr(6);
+
+        std::string pattern_lc;
+        pattern_lc.reserve(pattern.size());
+        for (char c : pattern)
+            pattern_lc.push_back((char) std::tolower((unsigned char) c));
+
+        if (pattern_lc.empty()) continue;
+        if (name_lc.find(pattern_lc) != std::string::npos &&
+            pattern_lc.size() > best_len) {
+            best_len     = pattern_lc.size();
+            best_section = sec;
+        }
+    }
+    return best_section;
+}
+
 }  // namespace easyai::config

@@ -47,8 +47,10 @@
 #   ./install_easyai_server.sh --ctx-size 32768   # default 100000 (100 K)
 #   ./install_easyai_server.sh --ngl 99            # GPU layers (-1=auto, 0=CPU)
 #   ./install_easyai_server.sh --no-mlock --use-mmap
-#   ./install_easyai_server.sh --temperature 0.7 --top-k 40 --min-p 0.05
-#   ./install_easyai_server.sh --repeat-penalty 1.15  # default 1.0 (off; min_p handles it)
+#   ./install_easyai_server.sh --temperature 0.2 --top-k 50 --min-p 0.03
+#   ./install_easyai_server.sh --repeat-penalty 1.04 --frequency-penalty 0.05
+#   ./install_easyai_server.sh --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 131072
+#   ./install_easyai_server.sh --split-mode none       # none|layer|row|tensor
 #   ./install_easyai_server.sh --http-timeout 86400   # default 24h, matches cli
 #   ./install_easyai_server.sh --webui-title "AI Box"
 #   ./install_easyai_server.sh --webui-icon /path/to/logo.svg   # ico|png|svg|gif|jpg|webp
@@ -331,16 +333,15 @@ ini_file="$config_dir/easyai.ini"
 # in /etc, agent-generated state goes in /var/lib (FHS).
 rag_dir="/var/lib/easyai/rag"
 
-# 128 K context — generous for any single conversation while still leaving
-# headroom on iGPU systems (KV cache scales linearly with context).
-# Override with --ctx-size for very long agentic flows that need it.
-ctx_size=128000
-# --ngl: -1 = auto-fit (llama.cpp picks how many layers fit, leaving ≥1 GiB
-# of GPU memory free).  On iGPUs with sufficient GTT this offloads ALL
-# layers including KV cache, so CPU-side RSS stays small (<1 GiB).
-# 0 = CPU only; 99 = force all layers (OOMs if it doesn't fit).
-# -1 is the default so a fresh install never hits OOM at startup.
-ngl=-1
+# 256 K context — needed for long agentic flows, deep research, and
+# large codebases.  Paired with --rope-scaling yarn + --rope-scale 2
+# + --yarn-orig-ctx 131072 to extend models trained at 128 K.
+# Override with --ctx-size.
+ctx_size=262144
+# --ngl 99: force all layers onto GPU.  The research/coding agent
+# workload assumes a GPU with enough VRAM to hold the full model.
+# Use --ngl -1 for auto-fit or --ngl 0 for CPU-only.
+ngl=99
 webui_title="EasyAi"                          # --webui-title <text>
 webui_icon=""                                 # --webui-icon <path/to/.ico|.png|.svg|.gif|.jpg|.webp>
 webui_icon_dest="$config_dir/favicon"         # final installed path under /etc/easyai
@@ -391,27 +392,35 @@ no_mmap=1
 # sessions don't get cut by either side.  Reduce for public-facing servers
 # where slow-loris resilience matters more than long-thinking-turn support.
 http_timeout=86400
-# Sampling defaults written into [ENGINE] ACTIVE (not commented).  Tuned for
-# modern thinking-MoE models (Qwen3-Next, GLM-4.6, DeepSeek-V3-class) on
-# the production AI box. The previous code/agent tune (temp 0.5, min_p
-# 0.5, presence_penalty 1.5) was too aggressive for chat: min_p 0.5
-# only keeps tokens within 2x of the top probability — fine for tight
-# tool-use phrasing, but cuts off most of the distribution on creative
-# / multi-step reasoning, and produces flat output on long chains of
-# thought. The values below follow the Qwen3 family's own recommended
-# defaults (temp 0.6, top_p 0.95, top_k 40, min_p 0.05) and pair with
-# presence_penalty 1.0 — MoE experts self-regulate, so the heavy anti-
-# loop floor is no longer needed. max_tokens=81920 is the per-turn cap;
-# any single response longer than that is almost certainly a runaway
-# loop. Override per-workload via --temperature / --top-p / --top-k /
-# --min-p / --presence-penalty / --repeat-penalty.
-temperature="0.4"
+# RoPE / YaRN context extension — needed when ctx_size exceeds the
+# model's native training context. "yarn" scaling with scale=2 and
+# yarn_orig_ctx=131072 doubles a 128K-trained model to 256K.
+rope_scaling="yarn"
+rope_freq_scale="2"
+yarn_orig_ctx=131072
+# GPU split mode: none=single GPU, layer=split layers across GPUs (default
+# in llama.cpp), row=tensor parallelism, tensor=full tensor parallelism.
+# "none" is correct for single-GPU / iGPU systems.
+split_mode="none"
+# Sampling defaults written into [ENGINE] ACTIVE (not commented).
+# These are the BASELINE — intentionally loose so the engine works
+# acceptably with any model out of the box. Per-model tuning lives
+# in [MODEL_<pattern>] sections which override these when the loaded
+# model name matches. presence_penalty=1.5 is the anti-loop safety
+# net for generic MoE/thinking models; model-specific profiles
+# (Qwen3-Coder-Next, Qwen3.6, DeepSeek) lower or zero it.
+# max_tokens=12288 caps a single response turn (code rarely exceeds
+# this; runaway loops are caught earlier).
+# Override per-workload via --temperature / --top-p / --top-k /
+# --min-p / --presence-penalty / --repeat-penalty / --frequency-penalty.
+temperature="1.0"
 top_p="0.95"
-top_k=40
-min_p="0.05"
+top_k=20
+min_p="0.0"
 repeat_penalty="1.0"
-presence_penalty="1.0"
-max_tokens=81920
+presence_penalty="1.5"
+frequency_penalty="0.05"
+max_tokens=12288
 api_key=""                                    # leave empty to skip auth (open server)
 
 model_src=""                                  # required when --no-model NOT passed
@@ -479,12 +488,17 @@ while [[ $# -gt 0 ]]; do
         --no-mmap)          no_mmap=1; shift ;;
         --repeat-penalty)   repeat_penalty="$2"; shift 2 ;;
         --presence-penalty) presence_penalty="$2"; shift 2 ;;
+        --frequency-penalty) frequency_penalty="$2"; shift 2 ;;
         --temperature)      temperature="$2"; shift 2 ;;
         --top-p)            top_p="$2"; shift 2 ;;
         --top-k)            top_k="$2"; shift 2 ;;
         --min-p)            min_p="$2"; shift 2 ;;
         --max-tokens)       max_tokens="$2"; shift 2 ;;
         --http-timeout)     http_timeout="$2"; shift 2 ;;
+        --rope-scaling)     rope_scaling="$2"; shift 2 ;;
+        --rope-scale)       rope_freq_scale="$2"; shift 2 ;;
+        --yarn-orig-ctx)    yarn_orig_ctx="$2"; shift 2 ;;
+        --split-mode)       split_mode="$2"; shift 2 ;;
         # Numeric sampling/timeout values are written into easyai.ini
         # via heredoc.  We interpolate them as-is, so anything other
         # than a number could sneak a newline or extra "key = value"
@@ -594,6 +608,7 @@ require_numeric "--top-k"           "$top_k"
 require_numeric "--min-p"           "$min_p"
 require_numeric "--repeat-penalty"  "$repeat_penalty"
 require_numeric "--presence-penalty" "$presence_penalty"
+require_numeric "--frequency-penalty" "$frequency_penalty"
 require_numeric "--max-tokens"      "$max_tokens"
 require_numeric "--http-timeout"    "$http_timeout"
 require_numeric "--ctx-size"        "$ctx_size"
@@ -601,6 +616,8 @@ require_numeric "--service-port"    "$service_port"
 require_numeric "--threads"         "$n_threads_default"
 require_numeric "--threads-batch"   "$n_threads_batch_default"
 require_numeric "--ngl"             "$ngl"
+require_numeric "--rope-scale"      "$rope_freq_scale"
+require_numeric "--yarn-orig-ctx"   "$yarn_orig_ctx"
 
 # Non-numeric knobs also flow into the heredoc; reject newline / '=' /
 # '[' / ']' shapes so they can't carve a new section or override key.
@@ -609,6 +626,8 @@ require_no_injection "--alias"        "$service_alias"
 require_no_injection "--webui-title"  "$webui_title"
 require_no_injection "--cache-type-k" "$cache_type_k"
 require_no_injection "--cache-type-v" "$cache_type_v"
+require_no_injection "--rope-scaling" "$rope_scaling"
+require_no_injection "--split-mode"   "$split_mode"
 
 # Hostname must be a valid RFC 1123 label: letters / digits / hyphens,
 # no leading or trailing hyphen, max 63 chars. hostnamectl would reject
@@ -675,11 +694,16 @@ printf '    ngl              = %s   (-1=auto, 0=CPU only, 99=all GPU layers)\n' 
 printf '    threads / batch  = %s / %s\n' "$n_threads_default" "$n_threads_batch_default"
 printf '    preset           = %s  thinking=%s\n' "$preset" "$thinking"
 printf '    KV cache         = K=%s  V=%s  flash_attn=%s\n' "$cache_type_k" "$cache_type_v" "$enable_flash_attn"
+printf '    split_mode       = %s\n' "$split_mode"
+printf '    rope             = scaling=%s  scale=%s  yarn_orig_ctx=%s\n' \
+                                 "$rope_scaling" "$rope_freq_scale" "$yarn_orig_ctx"
 printf '    memory           = mlock=%s  no_mmap=%s\n' "$mlock" "$no_mmap"
 printf '    http_timeout     = %ss\n' "$http_timeout"
 printf '    sampling         = temp=%s top_p=%s top_k=%s min_p=%s\n' \
                                  "$temperature" "$top_p" "$top_k" "$min_p"
-printf '                       repeat_penalty=%s  max_tokens=%s\n' "$repeat_penalty" "$max_tokens"
+printf '                       repeat_penalty=%s  presence_penalty=%s  frequency_penalty=%s\n' \
+                                 "$repeat_penalty" "$presence_penalty" "$frequency_penalty"
+printf '                       max_tokens=%s\n' "$max_tokens"
 printf '    metrics          = %s\n' "$enable_metrics"
 printf '    verbose          = %s\n' "$enable_verbose"
 printf '    llama_tools      = %s   (llama-cli/server/gguf-split/quantize/bench/... in $prefix/bin)\n' \
@@ -1537,6 +1561,14 @@ cache_type_k     = $cache_type_k
 cache_type_v     = $cache_type_v
 mlock            = $([[ "$mlock" -eq 1 ]] && echo on || echo off)
 no_mmap          = $([[ "$no_mmap" -eq 1 ]] && echo on || echo off)
+split_mode       = $split_mode
+
+# RoPE / YaRN context extension — required when ctx exceeds the model's
+# native training context. "yarn" scaling with rope_freq_scale=2 and
+# yarn_orig_ctx=131072 doubles a 128K-trained model to 256K.
+rope_scaling      = $rope_scaling
+rope_freq_scale   = $rope_freq_scale
+yarn_orig_ctx     = $yarn_orig_ctx
 
 # Sampling overrides — leave commented for engine defaults.
 temperature      = $temperature
@@ -1545,6 +1577,7 @@ top_k            = $top_k
 min_p            = $min_p
 repeat_penalty   = $repeat_penalty
 presence_penalty = $presence_penalty
+frequency_penalty = $frequency_penalty
 max_tokens       = $max_tokens
 
 # ------------------------------------------------------------
@@ -1608,6 +1641,70 @@ max_tokens       = $max_tokens
 # gustavo  = REPLACE-ME-WITH-OPENSSL-RAND-HEX-32
 # claude   = different-token-for-claude-desktop
 # ci       = different-token-for-the-ci-runner
+
+# ============================================================
+# [MODEL_<pattern>] — per-model ENGINE overrides
+# ============================================================
+# Define per-model tuning profiles that override [ENGINE] defaults
+# when the loaded model name matches. The server strips the GGUF
+# path to basename-without-extension, then checks all [MODEL_*]
+# sections for a case-insensitive substring match. The LONGEST
+# matching pattern wins.
+#
+# Precedence: CLI flags > MODEL_<match> > [ENGINE] > hardcoded.
+#
+# Keys are the same as [ENGINE] — temperature, top_p, top_k,
+# min_p, repeat_penalty, presence_penalty, frequency_penalty,
+# max_tokens, context, ngl, flash_attn, cache_type_k, cache_type_v,
+# rope_scaling, rope_freq_scale, yarn_orig_ctx, split_mode, etc.
+# Only include keys you want to override; omitted keys keep the
+# [ENGINE] value.
+#
+# Example: loading "Qwen3-Coder-Next-Q6_K_M.gguf" matches both
+# [MODEL_Qwen3] and [MODEL_Qwen3-Coder-Next] — the latter wins
+# because "Qwen3-Coder-Next" is a longer substring match.
+
+# Research + coding agent profile for Qwen3-Coder-Next.
+# Low temperature, tight top_p/min_p, mild penalties — tuned for
+# deterministic code output and structured tool-calling.
+# KV K-cache at f16 for maximum attention precision on long contexts.
+[MODEL_Qwen3-Coder-Next]
+temperature      = 0.2
+top_p            = 0.92
+top_k            = 50
+min_p            = 0.03
+repeat_penalty   = 1.04
+presence_penalty = 0.1
+frequency_penalty = 0.05
+max_tokens       = 12288
+context          = 262144
+cache_type_k     = f16
+rope_scaling     = yarn
+rope_freq_scale  = 2
+yarn_orig_ctx    = 131072
+
+# Qwen3.6 family — balanced chat defaults.
+# Moderate temperature for natural conversation, no presence penalty
+# (the model's own MoE gating handles diversity), repeat off.
+[MODEL_Qwen3.6]
+temperature      = 0.6
+top_p            = 0.95
+top_k            = 20
+min_p            = 0.0
+repeat_penalty   = 1.0
+presence_penalty = 0.0
+
+# Add your own profiles below. Examples:
+#
+#[MODEL_DeepSeek]
+#temperature      = 0.6
+#top_p            = 0.95
+#top_k            = 40
+#min_p            = 0.05
+#repeat_penalty   = 1.0
+#presence_penalty = 0.0
+#frequency_penalty = 0.0
+#context          = 131072
 
 # ============================================================
 # [TOOLS] — per-tool ACL (RESERVED for a future release)

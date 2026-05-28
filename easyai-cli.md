@@ -196,7 +196,7 @@ prepended (see [§7](#7-system-prompt--injected-blocks)).
 | `--top-p F` | 0–1 | Nucleus top-p. |
 | `--top-k N` | int ≥0 | Top-k cutoff. |
 | `--min-p F` | 0–1 | llama.cpp / easyai min-p. |
-| `--repeat-penalty F` | ≥ 0 | **Default 1.15** — anti-loop safety net for thinking models. Pass `1.0` to disable. |
+| `--repeat-penalty F` | ≥ 0 | **Default 1.04** — anti-loop safety net for thinking models. Pass `1.0` to disable. |
 | `--frequency-penalty F` | -2..2 | OpenAI standard. |
 | `--presence-penalty F` | -2..2 | OpenAI standard. |
 | `--seed N` | int | Deterministic sampling. |
@@ -357,7 +357,7 @@ the server's preset drives sampling. Set explicitly to override.
 | `top_p`             | float | `--top-p`              | server default | |
 | `top_k`             | int   | `--top-k`              | server default | |
 | `min_p`             | float | `--min-p`              | server default | |
-| `repeat_penalty`    | float | `--repeat-penalty`     | `1.15`         | Anti-loop multiplicative penalty. Set `1.0` to disable. |
+| `repeat_penalty`    | float | `--repeat-penalty`     | `1.04`         | Anti-loop multiplicative penalty. Set `1.0` to disable. |
 | `frequency_penalty` | float | `--frequency-penalty`  | server default | OpenAI semantics. |
 | `presence_penalty`  | float | `--presence-penalty`   | server default | OpenAI semantics. |
 | `seed`              | int64 | `--seed`               | random         | -1 = random. |

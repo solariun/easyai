@@ -1874,7 +1874,8 @@ without complaint.
 **Fix.** Two changes in `install_easyai_server.sh`:
 
 1. `require_numeric` roster extended with `--service-port`,
-   `--threads`, `--threads-batch`, `--ngl`. Same `^-?[0-9]+(\.[0-9]+)?$`
+   `--threads`, `--threads-batch`, `--ngl`, `--frequency-penalty`,
+   `--rope-scale`, `--yarn-orig-ctx`. Same `^-?[0-9]+(\.[0-9]+)?$`
    regex as before — defends against newline / `=` / `[` / `]` /
    whitespace / `$(...)` in one shot.
 2. New `require_no_injection "<flag>" "$value"` helper for
@@ -1883,7 +1884,8 @@ without complaint.
    punctuation alone so legitimate inputs (a webui title with spaces,
    a quantization name like `q8_0`, an alias with dots) all pass.
    Applied to `--service-host`, `--alias`, `--webui-title`,
-   `--cache-type-k`, `--cache-type-v`.
+   `--cache-type-k`, `--cache-type-v`, `--rope-scaling`,
+   `--split-mode`.
 
 The threat model stays the same as §20.4: "operator typo or hostile
 CI", not "external attacker reaches the installer". This is

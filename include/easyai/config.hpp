@@ -60,4 +60,11 @@ struct Ini {
 // load.
 Ini load_ini_file(const std::string & path, std::string & err_out);
 
+// Find the best-matching [MODEL_<pattern>] section for a resolved model
+// name.  Scans every section whose name starts with "MODEL_", strips that
+// prefix to get the pattern, and does a case-insensitive substring match
+// against `model_name`.  The longest matching pattern wins.  Returns the
+// full section name (e.g. "MODEL_Qwen3-Coder") or "" if nothing matches.
+std::string find_model_section(const Ini & ini, const std::string & model_name);
+
 }  // namespace easyai::config

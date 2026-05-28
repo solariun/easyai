@@ -88,6 +88,7 @@ constexpr std::string_view kBrandSvg = R"SVG(<svg xmlns="http://www.w3.org/2000/
 #include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <climits>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -3575,19 +3576,26 @@ struct ServerArgs {
     float       top_p          = -1.0f;
     int         top_k          = -1;
     float       min_p          = -1.0f;
-    // 1.15 by default — anti-loop safety net for thinking models that
-    // sometimes rephrase their own intent ("I'll write X / Let me write
-    // X / OK, creating X" forever). Set repeat_penalty = 1.0 in the INI
-    // (or pass --repeat-penalty 1.0) to disable.
-    float       repeat_penalty = 1.15f;
+    // 1.0 by default — per-model profiles in [MODEL_*] INI sections
+    // handle anti-loop tuning. Override via --repeat-penalty or INI.
+    float       repeat_penalty = 1.0f;
     // Presence penalty (OpenAI semantics: fixed token-already-seen
     // penalty, range [-2.0, 2.0], default 0.0 = disabled). Sentinel
     // -2.0f leaves the engine default (no penalty); any value strictly
     // greater than -2.0 wins (so -2.0 itself is treated as "unset" —
     // matches the Client's convention in src/client.cpp).
     float       presence_penalty = -2.0f;
+    float       frequency_penalty = -2.0f;
     int         max_tokens     = -1;
     uint32_t    seed           = 0u;
+
+    // RoPE / YaRN context extension
+    std::string rope_scaling;          // "none", "linear", "yarn"
+    float       rope_freq_scale = 0.0f;// 0.0 = model default
+    int         yarn_orig_ctx   = 0;   // 0 = model default
+
+    // GPU split strategy
+    std::string split_mode;            // "none", "layer" (default), "row", "tensor"
 
     // KV cache controls
     std::string cache_type_k;
@@ -3861,6 +3869,10 @@ static const std::vector<FlagDef> & kFlags() {
         { {"-ctk","--cache-type-k"},"ENGINE","cache_type_k",   "cache_type_k",   true,  SET_STR(&ServerArgs::cache_type_k) },
         { {"-ctv","--cache-type-v"},"ENGINE","cache_type_v",   "cache_type_v",   true,  SET_STR(&ServerArgs::cache_type_v) },
         { {"--numa"},              "ENGINE", "numa",           "numa",           true,  SET_STR(&ServerArgs::numa) },
+        { {"-sm","--split-mode"},  "ENGINE", "split_mode",     "split_mode",     true,  SET_STR(&ServerArgs::split_mode) },
+        { {"--rope-scaling"},      "ENGINE", "rope_scaling",   "rope_scaling",   true,  SET_STR(&ServerArgs::rope_scaling) },
+        { {"--rope-scale"},        "ENGINE", "rope_freq_scale","rope_freq_scale",true,  SET_FLOAT(&ServerArgs::rope_freq_scale) },
+        { {"--yarn-orig-ctx"},     "ENGINE", "yarn_orig_ctx",  "yarn_orig_ctx",  true,  SET_INT(&ServerArgs::yarn_orig_ctx) },
         { {"--override-kv"},       "ENGINE", "override_kv",    "override_kv",    true,  SET_LIST_APPEND(&ServerArgs::kv_overrides) },
         { {"--spec-type"},         "ENGINE", "spec_type",      "spec_type",      true,  SET_STR(&ServerArgs::spec_type) },
         { {"--spec-draft-n-max"},  "ENGINE", "spec_draft_n_max","spec_draft_n_max",true, SET_INT(&ServerArgs::spec_draft_n_max) },
@@ -3877,6 +3889,7 @@ static const std::vector<FlagDef> & kFlags() {
         { {"--min-p"},             "ENGINE", "min_p",          "min_p",          true,  SET_FLOAT(&ServerArgs::min_p) },
         { {"--repeat-penalty"},    "ENGINE", "repeat_penalty", "repeat_penalty", true,  SET_FLOAT(&ServerArgs::repeat_penalty) },
         { {"--presence-penalty"},  "ENGINE", "presence_penalty","presence_penalty",true, SET_FLOAT(&ServerArgs::presence_penalty) },
+        { {"--frequency-penalty"}, "ENGINE", "frequency_penalty","frequency_penalty",true, SET_FLOAT(&ServerArgs::frequency_penalty) },
         { {"--max-tokens"},        "ENGINE", "max_tokens",     "max_tokens",     true,  SET_INT(&ServerArgs::max_tokens) },
         { {"--max-incomplete-retries"}, "ENGINE", "max_incomplete_retries", "max_incomplete_retries", true, SET_INT(&ServerArgs::max_incomplete_retries) },
         { {"--seed"},              "ENGINE", "seed",           "seed",           true,  SET_UINT32(&ServerArgs::seed) },
@@ -3928,6 +3941,28 @@ static void apply_ini_to_args(const easyai::config::Ini & ini, ServerArgs & a) {
         if (f.ini_section.empty() || f.ini_key.empty()) continue;
         if (a.cli_set.count(f.canonical))               continue;
         std::string v = ini.get(f.ini_section, f.ini_key);
+        if (v.empty()) continue;
+        f.set(a, v);
+    }
+}
+
+// Apply per-model overrides from the best-matching [MODEL_<pattern>]
+// section. Keys are the same ENGINE keys from kFlags().  MODEL_ wins
+// over [ENGINE] but CLI flags still take precedence (cli_set check).
+static void apply_model_overrides(const easyai::config::Ini & ini,
+                                  ServerArgs & a,
+                                  const std::string & model_name) {
+    std::string section = easyai::config::find_model_section(ini, model_name);
+    if (section.empty()) return;
+
+    std::fprintf(stderr, "[easyai-server] model profile: [%s] matched for '%s'\n",
+                 section.c_str(), model_name.c_str());
+
+    for (const auto & f : kFlags()) {
+        if (f.ini_section != "ENGINE") continue;
+        if (f.ini_key.empty())         continue;
+        if (a.cli_set.count(f.canonical)) continue;
+        std::string v = ini.get(section, f.ini_key);
         if (v.empty()) continue;
         f.set(a, v);
     }
@@ -4192,6 +4227,22 @@ int main(int argc, char ** argv) {
                 args.config_path.c_str(), ini_err.c_str());
         }
         apply_ini_to_args(ini_config, args);
+
+        // Per-model overrides: find the best-matching [MODEL_<pattern>]
+        // section for the resolved model name and overlay its ENGINE keys.
+        // Resolve symlinks first so ai.gguf → Qwen3-Coder-Next-Q6_K_M.gguf
+        // matches [MODEL_Qwen3-Coder-Next] instead of [MODEL_ai].
+        // Precedence: CLI > MODEL_ > ENGINE > hardcoded.
+        {
+            std::string mn = args.model_path;
+            char resolved[PATH_MAX];
+            if (realpath(mn.c_str(), resolved)) mn = resolved;
+            auto slash = mn.find_last_of("/\\");
+            if (slash != std::string::npos) mn = mn.substr(slash + 1);
+            auto dot = mn.find_last_of('.');
+            if (dot != std::string::npos) mn = mn.substr(0, dot);
+            apply_model_overrides(ini_config, args, mn);
+        }
     }
 
     // -------- resolve system prompt --------------------------------------
@@ -6337,6 +6388,7 @@ int main(int argc, char ** argv) {
     if (args.max_tokens >= 0) ctx->engine.max_tokens(args.max_tokens);
     if (args.repeat_penalty > 0) ctx->engine.repeat_penalty(args.repeat_penalty);
     if (args.presence_penalty > -2.0f) ctx->engine.presence_penalty(args.presence_penalty);
+    if (args.frequency_penalty > -2.0f) ctx->engine.frequency_penalty(args.frequency_penalty);
     if (!args.cache_type_k.empty()) ctx->engine.cache_type_k(args.cache_type_k);
     if (!args.cache_type_v.empty()) ctx->engine.cache_type_v(args.cache_type_v);
     if (args.no_kv_offload)  ctx->engine.no_kv_offload(true);
@@ -6361,7 +6413,11 @@ int main(int argc, char ** argv) {
     if (args.flash_attn)     ctx->engine.flash_attn(true);
     if (args.mlock)          ctx->engine.use_mlock(true);
     if (args.no_mmap)        ctx->engine.use_mmap(false);
-    if (!args.numa.empty())  ctx->engine.numa(args.numa);
+    if (!args.numa.empty())       ctx->engine.numa(args.numa);
+    if (!args.split_mode.empty()) ctx->engine.split_mode(args.split_mode);
+    if (!args.rope_scaling.empty()) ctx->engine.rope_scaling(args.rope_scaling);
+    if (args.rope_freq_scale != 0.0f) ctx->engine.rope_freq_scale(args.rope_freq_scale);
+    if (args.yarn_orig_ctx > 0)   ctx->engine.yarn_orig_ctx(args.yarn_orig_ctx);
     if (!args.reasoning)     ctx->engine.enable_thinking(false);
     for (const auto & ov : args.kv_overrides) ctx->engine.add_kv_override(ov);
     for (const auto & t : ctx->default_tools) ctx->engine.add_tool(t);

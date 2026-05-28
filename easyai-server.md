@@ -44,13 +44,15 @@ service user, world-unreadable.
 ### Precedence
 
 ```
-   CLI flag    >    INI value    >    hardcoded default
-   (highest)         (this file)         (in the binary)
+   CLI flag  >  [MODEL_<match>]  >  [ENGINE]  >  hardcoded default
+   (highest)     (per-model)        (this file)     (in the binary)
 ```
 
-If the operator passed `--port 8080` in the systemd unit AND the INI
-says `port = 9090`, the server listens on **8080**. Drop the CLI flag
-and the INI value takes over.
+`[MODEL_<pattern>]` sections (see below) sit between CLI and
+`[ENGINE]` — they let per-model overrides apply without touching the
+global section. If the operator passed `--port 8080` in the systemd
+unit AND the INI says `port = 9090`, the server listens on **8080**.
+Drop the CLI flag and the INI value takes over.
 
 ### Sections
 
@@ -58,6 +60,7 @@ and the INI value takes over.
 | --- | --- | --- |
 | `[SERVER]` | HTTP layer, paths, tool gating, MCP auth posture | active |
 | `[ENGINE]` | Model loading + inference tunables | active |
+| `[MODEL_<pattern>]` | Per-model `[ENGINE]` overrides matched by model filename | active |
 | `[MCP_USER]` | Bearer-token auth for `/mcp` (one user per line) | active |
 | `[TOOLS]` | Per-tool ACL (`mcp_allowed = …`) | reserved for a future release |
 
@@ -130,8 +133,9 @@ Model loading and inference tunables.
 
 | Key | Type | CLI equivalent | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `context` | int | `-c`, `--ctx` | `4096` | Context window size in tokens. |
-| `ngl` | int | `--ngl` | `-1` (auto-fit) | GPU layers. `-1` = auto, `0` = CPU only, `99` = force all on GPU (will OOM if it doesn't fit). |
+| `context` | int | `-c`, `--ctx` | `262144` | Context window size in tokens. |
+| `ngl` | int | `--ngl` | `99` | GPU layers. `-1` = auto, `0` = CPU only, `99` = force all on GPU (will OOM if it doesn't fit). |
+| `split_mode` | string | `-sm`, `--split-mode` | `none` | Multi-GPU split strategy. `none` (single GPU), `layer` (split layers across GPUs, llama.cpp default), `row` (tensor parallelism), `tensor` (full tensor parallelism). |
 | `threads` | int | `-t`, `--threads` | `0` (lib default) | CPU threads for prompt processing. |
 | `threads_batch` | int | `-tb`, `--threads-batch` | `0` (lib default) | CPU threads for batched inference. |
 | `batch` | int | `--batch` | `0` (follows ctx) | Logical batch size. |
@@ -142,6 +146,9 @@ Model loading and inference tunables.
 | `no_mmap` | bool | `--no-mmap` | `off` | Required with `mlock` for portability. |
 | `no_kv_offload` | bool | `-nkvo`, `--no-kv-offload` | `off` | Keep KV cache on CPU even with GPU layers. |
 | `kv_unified` | bool | `--kv-unified` | `off` | Single unified KV buffer across sequences. |
+| `rope_scaling` | string | `--rope-scaling` | `yarn` | RoPE positional-encoding scaling for context extension beyond the model's training length. `none` (no scaling), `linear` (linear RoPE scaling), `yarn` (YaRN scaling). |
+| `rope_freq_scale` | float | `--rope-scale` | `2` | Scaling factor for RoPE frequencies. A value of 2 doubles the effective context window. |
+| `yarn_orig_ctx` | int | `--yarn-orig-ctx` | `131072` | The model's original training context length before YaRN extension. Needed when `rope_scaling=yarn` so the algorithm knows the boundary between trained and extended positions. |
 | `cache_type_k` | enum | `-ctk`, `--cache-type-k` | `f16` | `f32 / f16 / bf16 / q8_0 / q4_0 / q4_1 / q5_0 / q5_1 / iq4_nl`. |
 | `cache_type_v` | enum | `-ctv`, `--cache-type-v` | `f16` | Same options as K. Quantising V saves a lot of VRAM. |
 | `numa` | string | `--numa` | (none) | Llama-server compat. |
@@ -151,13 +158,14 @@ Model loading and inference tunables.
 | `spec_draft_model` | path | `--draft-model` | (empty) | GGUF path for the standalone draft model (`draft-simple` / `draft-eagle3`). Must share vocabulary with the target model. Ignored when `spec_type` is `none`, `draft-mtp`, or `ngram-*`. |
 | `chat_template_file` | path | `--chat-template-file` | (empty → embedded) | Override the chat template embedded in the GGUF with a Jinja file on disk. Mirrors `llama-server --chat-template-file`. The file is read once at load. Useful for shipping a tuned Qwen3 thinking template (e.g. `qwen3-think.jinja`) without rebuilding the GGUF. Read errors abort startup. |
 | `reasoning_format` | enum | `--reasoning-format` | `auto` | How to extract reasoning content: `none` (leave `<think>` inline), `auto` (default; currently behaves like `deepseek`), `deepseek` (extract `<think>…</think>` into `message.reasoning_content`, including during streaming — the Qwen3 / R1 default), `deepseek-legacy` (extract into `reasoning_content` for sync, leave inline for streaming — old behaviour). Unknown names fall back to `none`. |
-| `temperature` | float | `--temperature`, `--temp` | (preset) | Sampling override. |
-| `top_p` | float | `--top-p` | (preset) | Sampling override. |
-| `top_k` | int | `--top-k` | (preset) | Sampling override. |
-| `min_p` | float | `--min-p` | (preset) | Sampling override. |
-| `repeat_penalty` | float | `--repeat-penalty` | `1.15` | Repetition penalty — *multiplicative* on logits of recently-seen tokens. Anti-loop safety net for thinking models that lock into rephrasing their own intent ("I'll write X / Let me write X / OK, creating X" forever). Set `1.0` to disable. Pairs naturally with `presence_penalty=0`; the production AI box flips that pairing (see next row). |
-| `presence_penalty` | float | `--presence-penalty` | `0.0` (disabled) | Presence penalty (OpenAI semantics, range `[-2.0, 2.0]`) — *additive*, fixed cost per token that has appeared *at all* in the recent window, regardless of count. Discourages topic stickiness without penalising literal tool-name repetition. The installer ships `1.5` paired with `repeat_penalty=1.0` because long agentic flows (10+ tool hops) tested better with that pairing than with `repeat_penalty=1.15` alone — `repeat_penalty` was making the model paraphrase tool names like `fs` after the third call, breaking dispatch. See [`design.md` §4b](design.md#4b-sampling-and-the-penalty-stack) for the full rationale. Persists across requests (no per-request override path). |
-| `max_tokens` | int | `--max-tokens` | `-1` (until EOS / ctx full) | Per-turn cap. |
+| `temperature` | float | `--temperature`, `--temp` | `0.2` | Sampling temperature. |
+| `top_p` | float | `--top-p` | `0.92` | Nucleus sampling threshold. |
+| `top_k` | int | `--top-k` | `50` | Top-K sampling. |
+| `min_p` | float | `--min-p` | `0.03` | Minimum probability threshold. |
+| `repeat_penalty` | float | `--repeat-penalty` | `1.04` | Repetition penalty — *multiplicative* on logits of recently-seen tokens. Anti-loop safety net for thinking models that lock into rephrasing their own intent ("I'll write X / Let me write X / OK, creating X" forever). Set `1.0` to disable. Pairs naturally with `presence_penalty=0`; the production AI box flips that pairing (see next row). |
+| `presence_penalty` | float | `--presence-penalty` | `0.1` | Presence penalty (OpenAI semantics, range `[-2.0, 2.0]`) — *additive*, fixed cost per token that has appeared *at all* in the recent window, regardless of count. Discourages topic stickiness without penalising literal tool-name repetition. The installer ships `1.5` paired with `repeat_penalty=1.0` because long agentic flows (10+ tool hops) tested better with that pairing than with `repeat_penalty=1.15` alone — `repeat_penalty` was making the model paraphrase tool names like `fs` after the third call, breaking dispatch. See [`design.md` §4b](design.md#4b-sampling-and-the-penalty-stack) for the full rationale. Persists across requests (no per-request override path). |
+| `frequency_penalty` | float | `--frequency-penalty` | `0.05` | Per-token penalty proportional to how many times a token has already appeared (range `[0.0, 2.0]`). Unlike `presence_penalty` (flat cost per seen token), this scales with repetition count. `0.0` = disabled. |
+| `max_tokens` | int | `--max-tokens` | `12288` | Per-turn cap. |
 | `seed` | uint32 | `--seed` | `0` (random) | RNG seed. |
 | `max_incomplete_retries` | int | `--max-incomplete-retries` | `10` | How many times the engine discards + nudges + retries when the model finishes a turn with no tool_call and only an "announce" snippet ("Let me…", "I'll…"). `0` disables retries (equivalent to `retry_on_incomplete = off`). Bump to 15-20 for weak / 1-bit-quant models that keep announcing-without-acting. Each retry surfaces in the webui Thinking panel as `↻ Retry N/max`. |
 
@@ -204,6 +212,57 @@ installer's default config works — `preset` left commented, with
 explicit `temperature = 0.5` / `top_k = 64` / `presence_penalty =
 1.5` tuned for long agentic flows on the AI box (see
 [`design.md` §4b](design.md#4b-sampling-and-the-penalty-stack)).
+
+### `[MODEL_<pattern>]` — per-model ENGINE overrides
+
+A `[MODEL_<pattern>]` section lets you override any `[ENGINE]` key for
+a specific model without touching the global section. The server
+resolves the loaded model's filename (following symlinks), strips the
+path and extension to get the **model name**, then scans all
+`[MODEL_*]` sections. The `MODEL_` prefix is stripped to get a
+pattern, and a **case-insensitive substring match** is performed
+against the model name. When multiple sections match, the **longest
+matching pattern wins**.
+
+Keys inside a `MODEL_` section are the same as `[ENGINE]` keys — only
+include keys you want to override; omitted keys keep their `[ENGINE]`
+value.
+
+**Precedence:** `CLI flags > [MODEL_<match>] > [ENGINE] > hardcoded defaults`
+
+Example: loading `Qwen3-Coder-Next-Q6_K_M.gguf` with sections
+`[MODEL_Qwen3]` and `[MODEL_Qwen3-Coder-Next]` — the latter wins
+(longer match). The server logs:
+
+```
+[easyai-server] model profile: [MODEL_Qwen3-Coder-Next] matched for 'Qwen3-Coder-Next-Q6_K_M'
+```
+
+Worked example — aggressive context and conservative sampling for
+large Qwen3 models, plus a general fallback for all Qwen3 variants:
+
+```ini
+[ENGINE]
+context         = 262144
+temperature     = 0.2
+ngl             = 99
+
+[MODEL_Qwen3]
+temperature     = 0.3
+top_k           = 40
+
+[MODEL_Qwen3-Coder-Next]
+context         = 131072
+temperature     = 0.15
+rope_scaling    = yarn
+yarn_orig_ctx   = 131072
+rope_freq_scale = 2
+```
+
+Loading `Qwen3-Coder-Next-Q6_K_M.gguf` applies the
+`[MODEL_Qwen3-Coder-Next]` profile (longer match). Loading
+`Qwen3-8B-Q8_0.gguf` applies `[MODEL_Qwen3]`. Loading a non-Qwen
+model applies nothing — pure `[ENGINE]` values.
 
 ### `[MCP_USER]`
 
@@ -286,8 +345,8 @@ verbose         = off
 mcp_auth        = on
 
 [ENGINE]
-context         = 128000
-ngl             = -1
+context         = 262144
+ngl             = 99
 threads         = 16
 threads_batch   = 16
 preset = precise
@@ -296,6 +355,13 @@ cache_type_k    = q8_0
 cache_type_v    = q8_0
 mlock           = on
 no_mmap         = on
+rope_scaling    = yarn
+yarn_orig_ctx   = 131072
+rope_freq_scale = 2
+
+[MODEL_Qwen3-Coder]
+temperature     = 0.15
+context         = 131072
 
 [MCP_USER]
 gustavo  = REPLACE-WITH-OPENSSL-RAND-HEX-32

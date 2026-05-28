@@ -228,8 +228,8 @@ ExecStart=/bin/sh -c '...EASYAI_API_KEY=$(cat /etc/easyai/api_key) ...
                           -m /var/lib/easyai/models/current.gguf \
                           --host 0.0.0.0 --port 80 \
                           --alias EasyAi \
-                          -c 128000 \
-                          --ngl -1 \
+                          -c 262144 \
+                          --ngl 99 \
                           -t <jobs> -tb <jobs> \
                           --preset balanced \
                           --sandbox /var/lib/easyai/workspace \
@@ -339,18 +339,58 @@ plus the model path and the api-key plumbing — and **everything else**
 (host, port, alias, sandbox, memory dir, KV cache types, mlock, flash-attn,
 threads, MCP auth, …) lives in this file.
 
-Precedence: **CLI flag in the systemd unit > INI value > hardcoded
-default in the binary.** So tweak this file for the normal case;
-flip a CLI flag only for one-off overrides.
+Precedence: **CLI flag in the systemd unit > `[MODEL_<pattern>]` >
+`[ENGINE]` > hardcoded default in the binary.** So tweak this file for
+the normal case; flip a CLI flag only for one-off overrides.
 
 Sections:
 
 | Section | Purpose | Status |
 | --- | --- | --- |
 | `[SERVER]` | HTTP layer + paths + tool gating + MCP auth posture | active |
-| `[ENGINE]` | Model loading + inference tunables (context, ngl, KV, mlock, flash-attn, sampling) | active |
+| `[ENGINE]` | Model loading + inference tunables (context, ngl, KV, mlock, flash-attn, sampling, RoPE, split mode) | active |
+| `[MODEL_<pattern>]` | Per-model ENGINE overrides — same keys as `[ENGINE]`, matched by model filename substring | active |
 | `[MCP_USER]` | Bearer-token auth for `/mcp` (one user per line, `name = token`) | active |
 | `[TOOLS]` | Per-tool ACL (`mcp_allowed = …, mcp_denied = …`) | reserved for future |
+
+**New `[ENGINE]` keys** (added alongside existing sampling keys):
+
+| Key | Type | Range | Default | Description |
+| --- | --- | --- | --- | --- |
+| `frequency_penalty` | float | 0.0 -- 2.0 | 0.05 | Per-token penalty proportional to appearance count. 0.0 = disabled. |
+| `split_mode` | string | `none` / `layer` / `row` / `tensor` | `none` | GPU split strategy for multi-GPU setups. |
+| `rope_scaling` | string | `none` / `linear` / `yarn` | `yarn` | RoPE positional encoding scaling for context extension. |
+| `rope_freq_scale` | float | -- | 2 | Scaling factor for RoPE frequencies. |
+| `yarn_orig_ctx` | int | -- | 131072 | Model's original training context length before YaRN extension. |
+
+**`[MODEL_<pattern>]` — per-model ENGINE overrides**
+
+Allows per-model tuning based on the model filename. The server
+resolves the model path (follows symlinks), strips to basename
+without extension, then does case-insensitive substring matching
+against all `[MODEL_*]` section names (with the `MODEL_` prefix
+stripped). Longest match wins. Keys inside are the same as
+`[ENGINE]`.
+
+Precedence: **CLI flag > `[MODEL_<pattern>]` > `[ENGINE]` >
+hardcoded default.**
+
+Example: serving `Qwen3-Coder-Next-Q6_K_M.gguf` with two INI
+sections `[MODEL_Qwen3]` and `[MODEL_Qwen3-Coder-Next]` — the
+longer match `[MODEL_Qwen3-Coder-Next]` wins.
+
+```ini
+[ENGINE]
+temperature = 0.2
+top_p       = 0.92
+
+[MODEL_Qwen3-Coder-Next]
+temperature = 0.1
+top_k       = 30
+
+[MODEL_Qwen3]
+temperature = 0.3
+```
 
 The installer drops a fully-populated `easyai.ini` (every key
 documented inline). On `--upgrade` we **leave it alone** — your edits
@@ -525,11 +565,13 @@ sudo systemctl restart easyai-server
 ### Context size
 
 ```
--c 128000
+-c 262144
 ```
 
-128k tokens covers most chat sessions without reaching the cap. Keep
-in mind the KV cache scales linearly with context; see below.
+262k tokens (256k). Paired with YaRN RoPE scaling (`rope_scaling =
+yarn`, `rope_freq_scale = 2`, `yarn_orig_ctx = 131072`) to extend
+models trained on shorter contexts. Keep in mind the KV cache scales
+linearly with context; see below.
 
 ### KV cache quantisation
 
@@ -555,12 +597,13 @@ Metal, Vulkan ≥ recent). Required for some KV-quant combinations.
 ### GPU layers (`--ngl`)
 
 ```
---ngl -1
+--ngl 99
 ```
 
-Auto-fit. The installer uses this. Manually pinning `--ngl 99` can
-poison `common_fit_params` if it doesn't fit (it refuses to lower a
-user-pinned value), so let auto-fit decide.
+Offload up to 99 layers to the GPU (effectively "all of them" for any
+current model). The installer now pins this instead of auto-fit
+(`-1`). If the model doesn't fit in VRAM, llama.cpp falls back to
+partial offload at load time.
 
 ### `--mlock` and `--no-mmap`
 
@@ -624,6 +667,49 @@ To remove MTP later: re-run the installer **without** `--mtp` (the
 unit gets rewritten with the new flag set), or `systemctl edit
 easyai-server` and strip the two flags from the `ExecStart` line.
 
+### Installer CLI flags for sampling and engine tunables
+
+The installer accepts flags that land in the systemd unit's
+`ExecStart` and/or the generated `easyai.ini`. Override any of them
+on the installer command line:
+
+```bash
+./install_easyai_server.sh \
+    --ctx-size 262144 \
+    --ngl 99 \
+    --temperature 0.2 \
+    --top-p 0.92 \
+    --top-k 50 \
+    --min-p 0.03 \
+    --repeat-penalty 1.04 \
+    --presence-penalty 0.1 \
+    --frequency-penalty 0.05 \
+    --max-tokens 12288 \
+    --split-mode none \
+    --rope-scaling yarn \
+    --rope-scale 2 \
+    --yarn-orig-ctx 131072
+```
+
+Full flag table (showing current defaults):
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--ctx-size` | 262144 | Context window in tokens. |
+| `--ngl` | 99 | GPU layers to offload. |
+| `--temperature` | 0.2 | Sampling temperature. |
+| `--top-p` | 0.92 | Nucleus sampling cutoff. |
+| `--top-k` | 50 | Top-k sampling cutoff. |
+| `--min-p` | 0.03 | Min-p sampling threshold. |
+| `--repeat-penalty` | 1.04 | Repetition penalty. |
+| `--presence-penalty` | 0.1 | Presence penalty. |
+| `--frequency-penalty` | 0.05 | Frequency penalty (proportional to count). |
+| `--max-tokens` | 12288 | Max tokens per response. |
+| `--split-mode` | `none` | GPU split strategy (`none` / `layer` / `row` / `tensor`). |
+| `--rope-scaling` | `yarn` | RoPE scaling method (`none` / `linear` / `yarn`). |
+| `--rope-scale` | 2 | RoPE frequency scaling factor. |
+| `--yarn-orig-ctx` | 131072 | Original training context length for YaRN. |
+
 ---
 
 ## 8. Common gotchas
@@ -636,8 +722,8 @@ manually.
 
 ### `n_gpu_layers already set by user, abort`
 
-Something pinned `--ngl` to a value that doesn't fit. Reset to
-auto-fit (`--ngl -1`) and let llama.cpp decide.
+The pinned `--ngl` value doesn't fit. Lower it to match your VRAM, or
+set `--ngl -1` to let llama.cpp auto-fit.
 
 ### "model not found" on startup
 
@@ -1012,7 +1098,7 @@ ps -o rss,cmd -p $(systemctl show -p MainPID --value easyai-server)
 ```
 
 If RSS approaches your physical RAM, drop `-ctv q8_0` to `-ctv q4_0`,
-or shrink `-c 128000` to something smaller.
+or shrink `-c 262144` to something smaller.
 
 ### Webui seems to lose connection mid-stream
 

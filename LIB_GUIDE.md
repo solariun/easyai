@@ -55,9 +55,9 @@ Everything else stays the same.
 | Factories | `Session::local(path)` · `Session::local(LocalBackend::Config)` · `Session::remote(url, model="easyai")` | Pick the backend once; nothing else changes. |
 | System prompt | `.system(text)` · `.no_builtin_system()` · `.system_append(text)` · `.system_append(callable)` · `.preamble_options(opt)` | Layered composition — see §4. |
 | Tools | `.with_default_tools(bool)` · `.sandbox(dir)` · `.allow_bash()` · `.allow_python()` · `.no_web()` · `.use_google()` · `.tool_mode(Unified/Split/Both)` · `.memory(dir)` · `.external_tools(dir)` · `.add_tool(Tool)` | See §3. |
-| Sampling | `.preset(name)` · `.temperature/.top_p/.top_k/.min_p/.repeat_penalty/.max_tokens/.seed` | Same field names as OpenAI / llama-server. |
+| Sampling | `.preset(name)` · `.temperature/.top_p/.top_k/.min_p/.repeat_penalty/.frequency_penalty/.max_tokens/.seed` | Same field names as OpenAI / llama-server. |
 | Transport (remote only) | `.api_key` · `.model` · `.timeout_seconds` · `.tls_insecure` · `.ca_cert_path` | No-op when `Session::local`. |
-| Engine (local only) | `.context` · `.gpu_layers` · `.threads` · `.batch` | No-op when `Session::remote`. |
+| Engine (local only) | `.context` · `.gpu_layers` · `.threads` · `.batch` · `.split_mode` · `.rope_scaling` · `.rope_freq_scale` · `.yarn_orig_ctx` | No-op when `Session::remote`. |
 | Streaming | `.on_token(callable)` | One callback for both backends. |
 | Lifecycle | `.init(err)` · `.reset()` · `.refresh_system()` | `init` is once; `reset` clears history; `refresh_system` re-pushes the system prompt after a mid-session `.system_append`. |
 | Chat | `.chat(user_message)` | Runs the agentic loop, returns the final visible reply. |

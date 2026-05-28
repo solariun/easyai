@@ -136,6 +136,7 @@ class Engine {
     Engine & min_p         (float p);              // default 0.05
     Engine & repeat_penalty(float r);              // default 1.15 (anti-loop)
     Engine & presence_penalty(float p);            // default 0.0 (disabled, OpenAI [-2.0, 2.0])
+    Engine & frequency_penalty(float p);           // default 0.0 (disabled, range [0.0, 2.0])
     Engine & max_tokens    (int   n);              // per chat() call, -1 = until ctx
     Engine & tool_choice_auto    ();
     Engine & tool_choice_required();
@@ -244,6 +245,14 @@ class Engine {
     Engine & threads_batch(int n);
     // NUMA strategy: "distribute", "isolate", "numactl", "" (default off).
     Engine & numa         (const std::string & strategy);
+    // GPU split mode: "none" (single GPU), "layer" (default), "row", "tensor".
+    Engine & split_mode   (const std::string & mode);
+    // RoPE scaling type: "none", "linear", "yarn". Default unspecified.
+    Engine & rope_scaling (const std::string & type);
+    // RoPE frequency scale factor. 0.0 = default (no scaling).
+    Engine & rope_freq_scale(float scale);
+    // YaRN original context length. 0 = use model default.
+    Engine & yarn_orig_ctx(int ctx);
 
     // ---------------- reasoning / thinking ----------------------------------
     // Toggle the chat-template `enable_thinking` flag (used by Qwen3, R1,
