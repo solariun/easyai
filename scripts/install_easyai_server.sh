@@ -1446,7 +1446,7 @@ RAG_README
 model           = $service_model_dir/$service_model_link
 host            = $service_host
 port            = $service_port
-alias           = $service_alias
+# alias           = $service_alias
 sandbox         = $service_workspace
 
 # system_file: path to a custom persona that REPLACES the binary's
