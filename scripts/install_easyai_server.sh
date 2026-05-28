@@ -1667,7 +1667,7 @@ max_tokens       = $max_tokens
 # Research + coding agent profile for Qwen3-Coder-Next.
 # Low temperature, tight top_p/min_p, mild penalties — tuned for
 # deterministic code output and structured tool-calling.
-# KV K-cache at f16 for maximum attention precision on long contexts.
+# KV K-cache at bf16, V-cache at q8_0 for precision + memory balance.
 [MODEL_Qwen3-Coder-Next]
 temperature      = 0.2
 top_p            = 0.92
@@ -1678,7 +1678,8 @@ presence_penalty = 0.1
 frequency_penalty = 0.05
 max_tokens       = 12288
 context          = 262144
-cache_type_k     = f16
+cache_type_k     = bf16
+cache_type_v     = q8_0
 rope_scaling     = yarn
 rope_freq_scale  = 2
 yarn_orig_ctx    = 131072

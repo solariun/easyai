@@ -3324,20 +3324,18 @@ static bool require_auth(const ServerCtx & ctx, const httplib::Request & req,
         "                                NOT a hardened sandbox — the\n"
         "                                command runs with the server's\n"
         "                                user privileges.\n"
-        "      --no-python              Drop the `python3` tool. By default\n"
-        "                                it auto-registers when --sandbox is\n"
-        "                                set or --allow-bash is on. Stdlib-\n"
-        "                                only interpreter (no PYTHON* env,\n"
-        "                                no site-packages, no cwd on\n"
-        "                                sys.path); disk access is auto-\n"
-        "                                restricted to the sandbox root via\n"
-        "                                a Python preamble. NOT a hardened\n"
-        "                                sandbox — the interpreter has full\n"
-        "                                uid/gid and `import os` /\n"
-        "                                `import socket` / `import\n"
-        "                                subprocess` all work. Use\n"
-        "                                --no-python (or [SERVER]\n"
-        "                                allow_python = off) to opt out.\n"
+        "      --allow-python           Register the `evaluate` (python3)\n"
+        "                                tool. OFF by default. Stdlib-only\n"
+        "                                interpreter (no PYTHON* env, no\n"
+        "                                site-packages, no cwd on sys.path);\n"
+        "                                disk access is auto-restricted to\n"
+        "                                the sandbox root via a Python\n"
+        "                                preamble. NOT a hardened sandbox —\n"
+        "                                the interpreter has full uid/gid\n"
+        "                                and `import os` / `import socket`\n"
+        "                                / `import subprocess` all work.\n"
+        "                                Enable with --allow-python or\n"
+        "                                [SERVER] allow_python = on.\n"
         "      --use-google             Enable engine=\"google\" inside the\n"
         "                                unified `web` tool (Google Custom\n"
         "                                Search JSON API). Requires both\n"
@@ -3537,14 +3535,9 @@ struct ServerArgs {
     std::string sandbox;            // optional: scope `fs` / `bash` to this dir
     bool        allow_fs     = false; // explicit opt-in for the unified `fs` tool
     bool        allow_bash   = false; // explicit opt-in for the `bash` tool
-    // python3 defaults ON: stdlib-only interpreter with disk access
-    // auto-restricted to the sandbox root via a Python preamble.
-    // Auto-registers when sandbox is set OR allow_bash is on. The
-    // server's webui inherits it for free since the systemd unit
-    // ships with --sandbox /var/lib/easyai/workspace. Operators who
-    // want to disable it pass --no-python or set [SERVER]
-    // allow_python = off.
-    bool        allow_python = true;
+    // evaluate (python3) defaults OFF. Enable with --allow-python
+    // or [SERVER] allow_python = on.
+    bool        allow_python = false;
     bool        use_google = false; // enable engine="google" inside the unified
                                     // `web` tool (also requires GOOGLE_API_KEY +
                                     // GOOGLE_CSE_ID env vars)
@@ -3816,11 +3809,8 @@ static const std::vector<FlagDef> & kFlags() {
         { {"--show-system-prompt"},"",       "",               "show_system_prompt", false, SET_BOOL_TRUE(&ServerArgs::show_system_prompt) },
         { {"--allow-fs"},          "SERVER", "allow_fs",       "allow_fs",       false, SET_BOOL_TRUE(&ServerArgs::allow_fs) },
         { {"--allow-bash"},        "SERVER", "allow_bash",     "allow_bash",     false, SET_BOOL_TRUE(&ServerArgs::allow_bash) },
+        { {"--allow-python"},      "SERVER", "allow_python",   "allow_python",   false, SET_BOOL_TRUE(&ServerArgs::allow_python) },
         { {"--no-python"},         "",       "",               "no_python",      false, SET_BOOL_FALSE(&ServerArgs::allow_python) },
-        // [SERVER] allow_python = on/off — INI-only path. Defaults ON;
-        // CLI override path is --no-python (above). No --allow-python
-        // because the flag defaults on.
-        { {},                      "SERVER", "allow_python",   "allow_python",   true,  SET_BOOL_TRUE(&ServerArgs::allow_python) },
         { {"--use-google"},        "SERVER", "use_google",     "use_google",     false, SET_BOOL_TRUE(&ServerArgs::use_google) },
         // --no-local-tools (formerly --no-tools): disables only the
         // LOCAL built-in toolbelt; remote tools fetched via --mcp are
