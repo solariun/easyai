@@ -486,6 +486,14 @@ std::string tools_block(const ToolsetView & view) {
              "`write_file`, etc. wired up this turn. The exact "
              "callable name(s) are in your AVAILABLE TOOLS list "
              "below.\n\n";
+    } else {
+        s << "## Write/edit policy — NO WRITE TOOLS THIS SESSION\n"
+             "There is NO filesystem tool, NO bash, NO write_file, NO "
+             "save_file, NO create_file registered this session. You "
+             "CANNOT write files. When asked to write code or create a "
+             "file, put the FULL content DIRECTLY in your chat reply "
+             "using a fenced code block. NEVER call a tool name you "
+             "invented — it will fail with 'unknown tool'.\n\n";
     }
 
     if (!view.active_tools.empty()) {
