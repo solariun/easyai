@@ -3637,6 +3637,9 @@ struct ServerArgs {
     bool        verbose        = false;  // engine.verbose(true) — log model raw output
     bool        show_system_prompt = false;  // print resolved persona and exit
 
+    // Matched [MODEL_*] section after INI overlay (empty = no match).
+    std::string matched_profile;
+
     // webui rebrand
     std::string webui_title    = "Deep";   // the assistant's default name
     std::string webui_icon;              // optional path to .ico/.png/.svg
@@ -3949,11 +3952,11 @@ static void apply_ini_to_args(const easyai::config::Ini & ini, ServerArgs & a) {
 // Apply per-model overrides from the best-matching [MODEL_<pattern>]
 // section. Keys are the same ENGINE keys from kFlags().  MODEL_ wins
 // over [ENGINE] but CLI flags still take precedence (cli_set check).
-static void apply_model_overrides(const easyai::config::Ini & ini,
-                                  ServerArgs & a,
-                                  const std::string & model_name) {
+static std::string apply_model_overrides(const easyai::config::Ini & ini,
+                                         ServerArgs & a,
+                                         const std::string & model_name) {
     std::string section = easyai::config::find_model_section(ini, model_name);
-    if (section.empty()) return;
+    if (section.empty()) return {};
 
     std::fprintf(stderr, "[easyai-server] model profile: [%s] matched for '%s'\n",
                  section.c_str(), model_name.c_str());
@@ -3966,6 +3969,7 @@ static void apply_model_overrides(const easyai::config::Ini & ini,
         if (v.empty()) continue;
         f.set(a, v);
     }
+    return section;
 }
 
 // Graceful shutdown — flag set by SIGINT/SIGTERM, polled by main loop.
@@ -4241,7 +4245,7 @@ int main(int argc, char ** argv) {
             if (slash != std::string::npos) mn = mn.substr(slash + 1);
             auto dot = mn.find_last_of('.');
             if (dot != std::string::npos) mn = mn.substr(0, dot);
-            apply_model_overrides(ini_config, args, mn);
+            args.matched_profile = apply_model_overrides(ini_config, args, mn);
         }
     }
 
@@ -6448,6 +6452,13 @@ int main(int argc, char ** argv) {
     std::fprintf(stderr,
         "[easyai-server] %s loaded\n"
         "                backend=%s  ctx=%d  tools=%zu  preset=%s\n"
+        "                profile=%s\n"
+        "                sampling: temp=%.2f  top_p=%.2f  top_k=%d  min_p=%.2f\n"
+        "                penalties: repeat=%.2f  presence=%.2f  frequency=%.2f\n"
+        "                rope: scaling=%s  freq_scale=%.2f  yarn_orig_ctx=%d\n"
+        "                compute: ngl=%d  flash_attn=%s  mlock=%s  no_mmap=%s  split_mode=%s\n"
+        "                cache: type_k=%s  type_v=%s  no_kv_offload=%s\n"
+        "                generation: max_tokens=%d  seed=%u\n"
         "                listening on http://%s:%d  (webui at /)\n"
         "                inject_datetime=%s  cutoff=%s  verbose=%s\n"
         "                max_tool_hops=99999  retry_on_incomplete=ON\n"
@@ -6455,6 +6466,20 @@ int main(int argc, char ** argv) {
         ctx->model_id.c_str(), ctx->engine.backend_summary().c_str(),
         ctx->engine.n_ctx(), ctx->default_tools.size(),
         ctx->default_preset.name.c_str(),
+        args.matched_profile.empty() ? "(none)" : args.matched_profile.c_str(),
+        ctx->def_temperature, ctx->def_top_p, ctx->def_top_k, ctx->def_min_p,
+        args.repeat_penalty,
+        args.presence_penalty > -2.0f ? args.presence_penalty : 0.0f,
+        args.frequency_penalty > -2.0f ? args.frequency_penalty : 0.0f,
+        args.rope_scaling.empty() ? "default" : args.rope_scaling.c_str(),
+        args.rope_freq_scale, args.yarn_orig_ctx,
+        args.ngl, args.flash_attn ? "ON" : "OFF",
+        args.mlock ? "ON" : "OFF", args.no_mmap ? "ON" : "OFF",
+        args.split_mode.empty() ? "default" : args.split_mode.c_str(),
+        args.cache_type_k.empty() ? "default" : args.cache_type_k.c_str(),
+        args.cache_type_v.empty() ? "default" : args.cache_type_v.c_str(),
+        args.no_kv_offload ? "ON" : "OFF",
+        args.max_tokens, args.seed,
         args.host.c_str(), args.port,
         ctx->inject_datetime ? "ON" : "OFF",
         ctx->knowledge_cutoff.c_str(),
