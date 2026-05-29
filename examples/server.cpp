@@ -4180,34 +4180,14 @@ static std::mutex               g_metrics_mu;
 // tools will actually be registered. Naming an unregistered tool here makes
 // models try to call it ("bash"/"fs" hallucinations), so each bullet is
 // conditional on the same flag that controls registration.
-// Thin wrapper: build a ToolsetView from ServerArgs and ask libeasyai
-// to render the canonical builtin system prompt.  The ~180-line copy
-// that used to live here moved into easyai::preamble — see
-// build_builtin_system_prompt in src/preamble.cpp.  This keeps server,
-// local, and cli emitting the exact same text.
-static std::string build_builtin_system_prompt(const ServerArgs & args) {
-    const bool tools_on = args.local_tools;
-    easyai::preamble::ToolsetView view;
-    view.datetime_on    = tools_on;
-    view.web_on         = tools_on;
-    view.fs_on          = tools_on && args.allow_fs;
-    view.bash_on        = tools_on && args.allow_bash;
-    view.python_on      = tools_on && args.allow_python
-                       && (!args.sandbox.empty() || args.allow_bash);
-    view.memory_on      = !args.rag_dir.empty();
-    view.tool_lookup_on = tools_on;
-    std::string out = easyai::preamble::build_builtin_system_prompt(view);
-
-    out += "\n\n## Interface — Web UI\n"
-           "You are interfacing through a web UI. All requests must be "
-           "answered directly in your response text. Use ONLY the tools "
-           "listed above, exactly as described and within their stated "
-           "constraints. Do NOT assume, invent, or guess tool names — "
-           "if a tool is not in your AVAILABLE TOOLS list, it does not "
-           "exist.\n";
-
-    return out;
-}
+static const char kWebUIAppendix[] =
+    "\n\n## Interface — Web UI\n"
+    "You are interfacing through a web UI. All requests must be "
+    "answered directly in your response text. Use ONLY the tools "
+    "listed above, exactly as described and within their stated "
+    "constraints. Do NOT assume, invent, or guess tool names — "
+    "if a tool is not in your AVAILABLE TOOLS list, it does not "
+    "exist.\n";
 
 int main(int argc, char ** argv) {
     ServerArgs args = parse_args(argc, argv);
@@ -4265,7 +4245,9 @@ int main(int argc, char ** argv) {
                          args.system_path.c_str());
         }
     }
-    if (default_system.empty()) default_system = build_builtin_system_prompt(args);
+    // default_system is resolved after tool registration (below) so
+    // the built-in prompt can auto-derive tool guidance from the
+    // actual registered tools via ToolsetView::from_tools().
 
     // (--show-system-prompt is handled below, AFTER tool registration —
     // we want each registered tool's `system_addendum` (or its
@@ -4503,17 +4485,17 @@ int main(int argc, char ** argv) {
 
     // --show-system-prompt: dump the resolved persona + per-tool
     // addenda and exit before any model loads or any port binds.
-    // Composition delegates to the single library helper
-    // `preamble::compose_system_prompt` — same source of truth as
-    // Session / LocalBackend / RemoteBackend. The server's persona
-    // lives in `default_system` (not on the Engine yet — `Engine::
-    // system()` is rewritten per-request), so we hand both to the
-    // helper directly rather than going through `Engine::
-    // composed_system()`. RAG memory-vocab is appended afterwards
-    // as a preview of the dynamic per-request preamble (its
-    // date/time half is omitted; that's recomputed every request).
+    // Resolve default_system now that tools are registered. When the
+    // operator didn't supply a custom prompt, build the built-in one
+    // with tool guidance auto-derived from ctx->default_tools.
+    if (default_system.empty()) {
+        auto view = easyai::preamble::ToolsetView::from_tools(ctx->default_tools);
+        default_system = easyai::preamble::build_builtin_system_prompt(view);
+        default_system += kWebUIAppendix;
+    }
+
     if (args.show_system_prompt) {
-        std::string sys = easyai::preamble::compose_system_prompt(
+        std::string sys = easyai::preamble::compose_full_system(
             default_system, ctx->default_tools);
         if (!args.rag_dir.empty()) {
             std::string vocab = easyai::preamble::build({

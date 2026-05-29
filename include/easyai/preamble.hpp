@@ -70,19 +70,17 @@ struct ToolsetView {
     bool memory_on      = false;
     bool tool_lookup_on = false;
 
-    // Optional: the actual registered tool catalogue.  When present,
-    // the rendered "tools available" list uses these names + their
-    // wire_description() — strict ground truth, immune to the boolean
-    // flags drifting out of sync with what was actually registered.
-    // When empty, the renderer falls back to the booleans for naming.
+    // The actual registered tool catalogue. When present, the rendered
+    // "tools available" list uses these names + wire_description().
     std::vector<easyai::Tool> active_tools;
 
-    // True iff any flag is on (or active_tools is non-empty).  Used to
-    // suppress the "no tools" advisory when nothing's wired.
     bool any() const {
         return datetime_on || web_on || fs_on || bash_on || python_on
             || memory_on || tool_lookup_on || !active_tools.empty();
     }
+
+    // Auto-derive flags from a registered tool list by name matching.
+    static ToolsetView from_tools(const std::vector<easyai::Tool> & tools);
 };
 
 struct Options {
@@ -178,20 +176,29 @@ std::string build_session_info(const std::vector<easyai::Tool> & tools);
 // Side-effect-free; safe to call per-request.
 std::string tools_block(const ToolsetView & view);
 
-// One full default system prompt, shared by easyai-local and
-// easyai-server.  Previously each binary maintained its own ~180-line
-// copy that drifted whenever someone touched one and not the other —
-// see git blame on examples/server.cpp build_builtin_system_prompt and
-// examples/local.cpp build_builtin_system_prompt circa 2026-Q1.  The
-// renderer is now here; the binaries are 5-line wrappers.
-//
-// The output starts with the persona + reasoning rules, includes the
-// tools_block(view), the information pipeline (memory→web→answer or
-// web→answer), stop signals, scope discipline, and ends with the
-// cite_sources_block().  Date/time and memory-vocabulary blocks are
-// appended later by build() — this function builds only the STATIC
-// portion that doesn't change per-request.
+// Tool-free base persona: reasoning rules, tight-loop discipline,
+// stop-when-enough, stay-in-scope. No tool mentions at all.
+std::string build_base_system_prompt();
+
+// Tool-conditional guidance: tools_block, information pipeline,
+// bugs-to-avoid, save-knowledge timing, cite-sources. Returns ""
+// when the view has no tools.
+std::string build_tool_guidance(const ToolsetView & view);
+
+// Full default system prompt = build_base_system_prompt() +
+// build_tool_guidance(view). Backward-compatible wrapper.
 std::string build_builtin_system_prompt(const ToolsetView & view);
+
+// Full composition: base + tool guidance + per-tool addenda + appendix
+// + session info. Single entry point for all backends.
+// When `base` is empty, uses the built-in default (base + tool guidance).
+// When `base` is non-empty, it's treated as a custom prompt (no tool
+// guidance injected, but per-tool addenda still appended).
+std::string compose_full_system(
+    const std::string             & base,
+    const std::vector<easyai::Tool> & tools,
+    const std::string             & appendix = {},
+    bool                            include_session_info = false);
 
 // Sanitize a multi-paragraph addendum before splicing it into the
 // system prompt.  Strips C0 control bytes (0x00–0x1f) and DEL (0x7f)

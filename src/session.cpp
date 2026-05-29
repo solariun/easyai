@@ -70,25 +70,10 @@ struct Session::Impl {
     // algorithm runs at init() (where it seeds the Backend) and at
     // refresh_system() (where it re-pushes the result to the backend).
     std::string compose_system(const std::vector<Tool> & registered_tools) {
-        std::string out;
-        if (has_explicit_base) {
-            out = system_base;
-        } else if (use_builtin_system) {
-            preamble::ToolsetView view;
-            view.datetime_on    = !no_datetime;
-            view.web_on         = !no_web;
-            // Mirrors cli::Toolbelt::tools(): fs is on whenever the
-            // operator gave us a sandbox OR a subprocess executor.
-            view.fs_on          = !sandbox_dir.empty() || allow_bash;
-            view.bash_on        = allow_bash;
-            view.python_on      = allow_python && view.fs_on;
-            view.memory_on      = !memory_dir.empty();
-            view.tool_lookup_on = with_defaults;
-            // Source of truth: the actual registry once we have it.
-            view.active_tools   = registered_tools;
-            out = preamble::build_builtin_system_prompt(view);
-        }
-        return out;
+        if (has_explicit_base) return system_base;
+        if (!use_builtin_system) return {};
+        auto view = preamble::ToolsetView::from_tools(registered_tools);
+        return preamble::build_builtin_system_prompt(view);
     }
 
     // Dynamic addenda — datetime, knowledge cutoff, memory vocab.

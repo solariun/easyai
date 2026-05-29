@@ -557,7 +557,7 @@ std::string tools_block(const ToolsetView & view) {
     return s.str();
 }
 
-std::string build_builtin_system_prompt(const ToolsetView & view) {
+std::string build_base_system_prompt() {
     std::ostringstream s;
 
     s << "You are a clear, honest assistant. Lead with the answer; add "
@@ -588,12 +588,44 @@ std::string build_builtin_system_prompt(const ToolsetView & view) {
          "  3. Read the result, then finish or take ONE more step.\n"
          "Stop as soon as you have something useful; a short answer "
          "the user can refine beats a long pre-committed plan.\n"
+         "\n"
+         "## Stop when you have enough — the user can refine "
+         "(AUTHORITATIVE)\n"
+         "Go only as far as the searches you need to give a useful "
+         "answer to THIS question. Not the perfect answer, not the "
+         "exhaustive one — a useful one.\n"
+         "\n"
+         "The user is on the other side of a chat box. They CAN send "
+         "you another message — refining the query, narrowing the "
+         "scope, asking for more depth on one point. They CANNOT "
+         "interrupt your tool loop or skim while you fetch URL #8. "
+         "Their cost of asking a follow-up is one sentence; your "
+         "cost of an extra round of searches is their wait time.\n"
+         "\n"
+         "Practical shape: 1-3 targeted searches, then answer with "
+         "what you have. If something's missing, name it in the "
+         "reply (\"I couldn't find X — want me to check Y "
+         "instead?\"). Let the user steer the next step.\n"
+         "\n"
+         "## Stay strictly in scope (AUTHORITATIVE)\n"
+         "Do EXACTLY what the user asked — no more, no less. No "
+         "extra features, no defensive scaffolding for cases they "
+         "didn't mention, no \"while I'm at it\" cleanups, no "
+         "proactive refactors. The request is the ceiling, not a "
+         "starting point. If genuinely unsure what's in scope, ASK "
+         "before acting — don't expand the task to be safe.\n"
          "\n";
 
-    // Tools block — closed-set + per-tool triggers + write policy.
+    return s.str();
+}
+
+std::string build_tool_guidance(const ToolsetView & view) {
+    if (!view.any()) return {};
+
+    std::ostringstream s;
+
     s << tools_block(view);
 
-    // Information pipeline — varies with memory presence.
     s << "## Information pipeline (AUTHORITATIVE)\n"
          "When the request needs facts you don't already know, follow "
          "this order — strictly:\n"
@@ -654,35 +686,36 @@ std::string build_builtin_system_prompt(const ToolsetView & view) {
              "\n";
     }
 
-    s << "## Stop when you have enough — the user can refine "
-         "(AUTHORITATIVE)\n"
-         "Go only as far as the searches you need to give a useful "
-         "answer to THIS question. Not the perfect answer, not the "
-         "exhaustive one — a useful one.\n"
-         "\n"
-         "The user is on the other side of a chat box. They CAN send "
-         "you another message — refining the query, narrowing the "
-         "scope, asking for more depth on one point. They CANNOT "
-         "interrupt your tool loop or skim while you fetch URL #8. "
-         "Their cost of asking a follow-up is one sentence; your "
-         "cost of an extra round of searches is their wait time.\n"
-         "\n"
-         "Practical shape: 1-3 targeted searches, then answer with "
-         "what you have. If something's missing, name it in the "
-         "reply (\"I couldn't find X — want me to check Y "
-         "instead?\"). Let the user steer the next step.\n"
-         "\n"
-         "## Stay strictly in scope (AUTHORITATIVE)\n"
-         "Do EXACTLY what the user asked — no more, no less. No "
-         "extra features, no defensive scaffolding for cases they "
-         "didn't mention, no \"while I'm at it\" cleanups, no "
-         "proactive refactors. The request is the ceiling, not a "
-         "starting point. If genuinely unsure what's in scope, ASK "
-         "before acting — don't expand the task to be safe.\n"
-         "\n"
-      << cite_sources_block(view.memory_on);
+    s << cite_sources_block(view.memory_on);
 
     return s.str();
+}
+
+std::string build_builtin_system_prompt(const ToolsetView & view) {
+    return build_base_system_prompt() + build_tool_guidance(view);
+}
+
+ToolsetView ToolsetView::from_tools(const std::vector<easyai::Tool> & tools) {
+    ToolsetView v;
+    v.active_tools = tools;
+    for (const auto & t : tools) {
+        const std::string & n = t.name;
+        if (n == "datetime")
+            v.datetime_on = true;
+        else if (n == "web" || n == "web_search" || n == "web_fetch")
+            v.web_on = true;
+        else if (n == "fs" || (n.size() > 3 && n.compare(0, 3, "fs_") == 0))
+            v.fs_on = true;
+        else if (n == "bash")
+            v.bash_on = true;
+        else if (n == "evaluate" || n == "python3")
+            v.python_on = true;
+        else if (n.compare(0, 10, "knowledge_") == 0)
+            v.memory_on = true;
+        else if (n == "tool_lookup")
+            v.tool_lookup_on = true;
+    }
+    return v;
 }
 
 // Public helper — see preamble.hpp for the rationale.  Differs from
@@ -747,6 +780,43 @@ std::string compose_system_prompt(const std::string             & base,
         out += clean;
         out += '\n';
     }
+    return out;
+}
+
+std::string compose_full_system(
+    const std::string             & base,
+    const std::vector<easyai::Tool> & tools,
+    const std::string             & appendix,
+    bool                            include_session_info) {
+
+    std::string effective_base;
+    if (base.empty()) {
+        effective_base = build_base_system_prompt();
+        if (!tools.empty()) {
+            ToolsetView view = ToolsetView::from_tools(tools);
+            effective_base += build_tool_guidance(view);
+        }
+    } else {
+        effective_base = base;
+    }
+
+    std::string out = compose_system_prompt(effective_base, tools);
+
+    if (!appendix.empty()) {
+        constexpr std::size_t kAppendixCap = 16 * 1024;
+        const std::string clean = sanitize_addendum(appendix, kAppendixCap);
+        if (!clean.empty()) {
+            if (!out.empty() && out.back() != '\n') out += '\n';
+            out += '\n';
+            out += clean;
+        }
+    }
+
+    if (include_session_info && !tools.empty()) {
+        const std::string si = build_session_info(tools);
+        if (!si.empty()) out += si;
+    }
+
     return out;
 }
 

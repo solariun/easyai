@@ -142,46 +142,13 @@ bool LocalBackend::init(std::string & err) {
             r.content.size() > 200 ? "…" : "");
     });
 
-    // Compose the final system prompt:
-    //
-    //   base (cfg.system_prompt)
-    //     + concatenated Tool::system_addendum from every registered tool
-    //     + cfg.system_appendix (caller-supplied static text)
-    //     + AVAILABLE TOOLS + VERIFY-BEFORE-YOU-CALL block
-    //
-    // Done once at init (the registry doesn't change after this point),
-    // so every LocalBackend caller — local one-shot, embedded REPL,
-    // anything wiring up a LocalBackend directly — gets the same
-    // composition without having to do it themselves. Mirrors the
-    // per-request injection server.cpp does on the first user turn.
-    //
-    // Both addenda and the appendix are run through
-    // `preamble::sanitize_addendum` before splicing — see
-    // SECURITY_AUDIT §25.1.  Today the fields are operator-controlled,
-    // but the sanitizer keeps the door closed against a future
-    // external-tools / MCP plumbing where the source is less trusted,
-    // and it also defends the operator's TTY from rogue ANSI when
-    // `--show-system-prompt` is invoked.
+    // Compose the final system prompt via the library's single entry
+    // point: base + tool guidance + per-tool addenda + appendix +
+    // session info catalogue. All sanitization handled internally.
     {
-        // Per-tool addendum cap (8 KB) is now centralised in
-        // `preamble::compose_system_prompt`; only the operator-static
-        // appendix cap stays here.
-        constexpr std::size_t kAppendixCap = 16 * 1024;
-        std::string sys = preamble::compose_system_prompt(
-            cfg.system_prompt, engine.tools());
-        if (!cfg.system_appendix.empty()) {
-            const std::string clean = preamble::sanitize_addendum(
-                cfg.system_appendix, kAppendixCap);
-            if (!clean.empty()) {
-                if (!sys.empty() && sys.back() != '\n') sys += '\n';
-                sys += '\n';
-                sys += clean;
-            }
-        }
-        if (cfg.load_tools && !engine.tools().empty()) {
-            const std::string si = preamble::build_session_info(engine.tools());
-            if (!si.empty()) sys += si;
-        }
+        std::string sys = preamble::compose_full_system(
+            cfg.system_prompt, engine.tools(),
+            cfg.system_appendix, cfg.load_tools);
         if (sys != cfg.system_prompt) engine.system(sys);
     }
 
