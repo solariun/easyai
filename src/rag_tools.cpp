@@ -690,12 +690,37 @@ struct RagStore {
 // args::get_string handles flat strings; arrays we parse with
 // nlohmann directly so the model can pass proper structured input.
 //
-// Lenient on one common small-model mistake: the array escaped into a
-// JSON string — `"keywords": "[\"a\", \"b\"]"` instead of the spec
-// form `"keywords": ["a", "b"]`. We unwrap one level: if the value is
-// a string that itself parses to a JSON array, we use that. Mirrors
-// args::get_array()'s stringified-array tolerance (see src/tool.cpp).
+// Lenient keyword/title-list parser. Accepts ANY of these shapes:
+//
+//   1. JSON array:      "keywords": ["a", "b", "c"]
+//   2. Stringified arr: "keywords": "[\"a\", \"b\"]"
+//   3. Plain string:    "keywords": "a, b, c"
+//                        "keywords": "a b c"
+//                        "keywords": "a/b/c"
+//                        "keywords": "a.b.c"
+//
+// Shape 3 splits on comma, space, slash, or dot — the delimiters
+// weaker models naturally reach for. Mixed delimiters work too
+// ("a, b/c d.e" → ["a","b","c","d","e"]). Empty tokens after
+// splitting are silently dropped.
 // ---------------------------------------------------------------------------
+static std::vector<std::string> split_delimited(const std::string & s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : s) {
+        if (c == ',' || c == ' ' || c == '/' || c == '.') {
+            auto t = trim_inline(cur);
+            if (!t.empty()) out.push_back(std::move(t));
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    auto t = trim_inline(cur);
+    if (!t.empty()) out.push_back(std::move(t));
+    return out;
+}
+
 bool parse_string_array(const std::string & args_json,
                         const std::string & key,
                         std::vector<std::string> & out,
@@ -709,31 +734,35 @@ bool parse_string_array(const std::string & args_json,
         if (!j.contains(key)) return true;          // absent → empty
         json v = j[key];
         if (v.is_null()) return true;
-        // Stringified-array unwrap: a quoted JSON array becomes a real
-        // one. If the string isn't JSON we leave it alone and let the
-        // is_array() check below produce the proper error.
+
+        // Plain string → split on delimiters (comma, space, slash, dot).
+        // Also handles stringified arrays: if the string parses as a
+        // JSON array we use that instead.
         if (v.is_string()) {
+            std::string s = v.get<std::string>();
             try {
-                json reparsed = json::parse(v.get<std::string>());
-                if (reparsed.is_array()) v = std::move(reparsed);
-            } catch (const std::exception &) {
-                // not JSON — fall through to the array-type error
-            }
+                json reparsed = json::parse(s);
+                if (reparsed.is_array()) { v = std::move(reparsed); goto as_array; }
+            } catch (const std::exception &) {}
+            out = split_delimited(s);
+            return true;
         }
+
+    as_array:
         if (!v.is_array()) {
-            err = "argument " + key + ": expected an array of strings, "
-                  "e.g. [\"alpha\", \"beta\"] — pass a real JSON array, "
-                  "not a quoted string";
+            err = "argument " + key + ": expected a string like "
+                  "\"alpha, beta\" or an array [\"alpha\", \"beta\"]";
             return false;
         }
         out.clear();
         out.reserve(v.size());
         for (const auto & e : v) {
-            if (!e.is_string()) {
+            if (e.is_string()) {
+                out.push_back(e.get<std::string>());
+            } else {
                 err = "argument " + key + ": every element must be a string";
                 return false;
             }
-            out.push_back(e.get<std::string>());
         }
         return true;
     } catch (const std::exception & e) {
@@ -806,9 +835,10 @@ ToolHandler make_save_handler(std::shared_ptr<RagStore> store) {
         }
         if (keywords_raw.empty()) {
             return ToolResult::error(
-                "keywords must be a non-empty array (1.."
+                "keywords must not be empty (1.."
                 + std::to_string(kMaxKeywordsPerEntry)
-                + " short keywords). Why: keywords are how rag_search finds this "
+                + " short keywords, comma-separated, e.g. \"python, async\"). "
+                  "Why: keywords are how rag_search finds this "
                   "entry later — an entry with no keywords is unreachable by "
                   "keyword search (only rag_list can find it).");
         }
@@ -1138,7 +1168,8 @@ ToolHandler make_search_handler(std::shared_ptr<RagStore> store) {
         }
         if (keywords_raw.empty()) {
             return ToolResult::error(
-                "missing required argument: keywords (non-empty array)");
+                "missing required argument: keywords "
+                "(e.g. \"python, async\")");
         }
         if (keywords_raw.size() > kMaxKeywordsPerEntry) {
             return ToolResult::error(
@@ -1355,7 +1386,7 @@ ToolHandler make_load_handler(std::shared_ptr<RagStore> store) {
         }
         if (titles.empty()) {
             return ToolResult::error("missing required argument: titles "
-                                     "(non-empty array)");
+                                     "(e.g. \"my_notes, project_x\")");
         }
         if (titles.size() > kMaxLoadAtOnce) {
             return ToolResult::error(
@@ -1699,7 +1730,7 @@ Tool make_rag_tool(std::string root_dir) {
             "  save     — create/overwrite. Needs: title, keywords, content.\n"
             "  append   — add to existing (or create if new). Needs: title, content.\n"
             "  search   — find by keyword. Needs: keywords (first is required match).\n"
-            "  load     — read full content. Needs: titles (array).\n"
+            "  load     — read full content. Needs: titles (comma-separated).\n"
             "  list     — all titles. Optional: prefix, max.\n"
             "  delete   — remove by title. fix-easyai-* are protected.\n"
             "  keywords — show all keywords in use.\n"
@@ -1710,10 +1741,10 @@ Tool make_rag_tool(std::string root_dir) {
                "save|append|search|load|list|delete|keywords.", true)
         .param("title",       "string",
                "Short name (save/append/delete).", false)
-        .param("titles",      "array",
-               "Exact titles to load (1..20).", false)
-        .param("keywords",    "array",
-               "Search terms (first is required match).", false)
+        .param("titles",      "string",
+               "Titles to load, comma-separated (e.g. \"my_notes, project_x\").", false)
+        .param("keywords",    "string",
+               "Keywords, comma-separated (e.g. \"python, async, sockets\").", false)
         .param("content",     "string",
                "Body text (save/append).", false)
         .param("fix",         "boolean",
@@ -1855,7 +1886,7 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
             "model's persistent store for mental notes, skills, facts, "
             "and information to recall in future conversations.")
         .param("title",    "string", "Short name (spaces become _).", true)
-        .param("keywords", "array",  "Search terms (first is primary).", true)
+        .param("keywords", "string", "Comma-separated keywords, e.g. \"python, async, sockets\".", true)
         .param("content",  "string", "Body text.", true)
         .param("fix",      "boolean", "Make immutable. Default false.", false)
         .handle(h_save)
@@ -1867,7 +1898,7 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
             "Creates it if new (keywords required).")
         .param("title",    "string", "Entry title.", true)
         .param("content",  "string", "Text to append.", true)
-        .param("keywords", "array",  "Search terms (required if new).", false)
+        .param("keywords", "string", "Comma-separated keywords (required if new).", false)
         .handle(h_append)
         .build());
 
@@ -1875,7 +1906,7 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
         .describe(
             "Recall knowledge — find entries by keyword. Returns "
             "ranked matches with previews.")
-        .param("keywords",    "array",   "Search terms (first is required match).", true)
+        .param("keywords",    "string",  "Comma-separated keywords, e.g. \"python, async\".", true)
         .param("max_results", "integer", "Results per page (default 10, max 20).", false)
         .param("page",        "integer", "Page number (default 1).", false)
         .handle(h_search)
@@ -1883,7 +1914,7 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
 
     out.push_back(Tool::builder("knowledge_load")
         .describe("Load knowledge — read full content of entries by title.")
-        .param("titles", "array", "Exact titles (1..20).", true)
+        .param("titles", "string", "Comma-separated titles, e.g. \"my_notes, project_x\".", true)
         .handle(h_load)
         .build());
 
