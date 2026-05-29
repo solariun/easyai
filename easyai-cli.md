@@ -213,7 +213,7 @@ prepended (see [§7](#7-system-prompt--injected-blocks)).
 | `--allow-bash` | Register `bash`. **Implies `fs`** (bash subsumes it). cwd = `--sandbox` if given, else the binary's CWD. WARNING: not a hardened sandbox. |
 | `--no-python` | Drop the auto-registered compute tool (model-facing name **`evaluate`**, runtime `python3`; renamed 2026-05-26 with `python3` retained as a back-compat alias). By default ON whenever `--sandbox` or `--allow-bash` is set. Stdlib-only interpreter (no PYTHON* env, no site-packages, no cwd on `sys.path`). **READ-ONLY disk surface**: any path outside the sandbox AND any write-mode `open()` regardless of path is rejected. The model is told to send writes through the filesystem write tool registered this session (it discovers the exact callable name from its AVAILABLE TOOLS list). WARNING: defense-in-depth, not a hardened sandbox — `import os` / `import socket` / `import subprocess` / `import ctypes` still work at the Python layer (closure-cell introspection also bypasses — SECURITY_AUDIT §23.2). |
 | `--use-google` | Enable `engine="google"` inside the unified `web` tool (Google Custom Search JSON API), and let the default `engine="auto"` cascade try google as its first hop. Requires `GOOGLE_API_KEY` and `GOOGLE_CSE_ID` env vars. Without this flag (or env vars), the auto cascade silently falls through to brave → ddg-lite → bing → ddg. |
-| `--memory DIR` | Enable persistent memory rooted at DIR — a passive RAG technique. Registers ONE `memory(action=...)` tool, AND appends a compact `# MEMORY VOCABULARY` block to the system prompt prefix so the remote model sees the current keyword index without having to call `memory(action="keywords")`. `--RAG` is still accepted as a back-compat alias. See `RAG.md` §5 "Automatic vocabulary injection". |
+| `--memory DIR` | Enable persistent knowledge rooted at DIR — a passive RAG technique. Registers seven split `knowledge_*` tools (`knowledge_save`, `knowledge_append`, `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords`), AND appends a compact `# MEMORY VOCABULARY` block to the system prompt prefix so the remote model sees the current keyword index without having to call `knowledge_keywords`. `--RAG` is still accepted as a back-compat alias. See `RAG.md` §5 "Automatic vocabulary injection". |
 | `--external-tools DIR` | Load every `EASYAI-*.tools` manifest in DIR. See `EXTERNAL_TOOLS.md`. |
 | `--no-plan` | Don't auto-register the `plan` tool. |
 
@@ -476,7 +476,7 @@ system_meminfo, system_loadavg, system_cpu_usage, system_swaps
 | `--allow-bash` | `bash` (and bumps the agentic loop's `max_tool_hops` to 99999) |
 | `--no-python` | drops the auto-on `python3` tool (otherwise on whenever fs is on) |
 | `--use-google` (+ env vars set) | Enables `engine="google"` inside the unified `web` tool, and lets the default `engine="auto"` cascade try google first (otherwise auto starts at bing) |
-| `--memory DIR` (alias `--RAG`) | `memory` (single-tool dispatcher; sub-actions save / append / search / load / list / delete / keywords) |
+| `--memory DIR` (alias `--RAG`) | `knowledge_save`, `knowledge_append`, `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords` |
 | `--external-tools DIR` | every tool from each loaded `EASYAI-*.tools` manifest |
 
 ### Why `--sandbox` and `--allow-bash` both register `fs`
@@ -502,12 +502,13 @@ Pass `--tools LIST` to override the auto-catalog. Valid names:
 ```
 datetime, plan, web, fs, bash,
 system_meminfo, system_loadavg, system_cpu_usage, system_swaps,
-memory
+knowledge_save, knowledge_append, knowledge_search, knowledge_load,
+knowledge_list, knowledge_delete, knowledge_keywords
 ```
 
-(`rag` is still accepted as a back-compat alias for `memory`.)
+(`rag` and `memory` are still accepted as back-compat aliases that register all seven knowledge tools.)
 
-`bash` / `memory` still require their respective opt-in flags even when
+`bash` / knowledge tools still require their respective opt-in flags even when
 explicitly listed; `engine="google"` inside `web` likewise depends on
 `--use-google` plus the env vars.
 
@@ -782,12 +783,14 @@ dirs have two independent sessions.
 
 ## 12. memory — persistent memory
 
-`--memory <dir>` mounts a directory as the agent's long-term memory.
-It exposes ONE `memory` tool with seven sub-actions (`save`, `append`,
-`search`, `load`, `list`, `delete`, `keywords`); under the hood it's a
-passive RAG technique — each memory is a single keyword-indexed
-Markdown file in `<dir>` that the operator can hand-edit. The legacy
-flag `--RAG` is still accepted as a back-compat alias.
+`--memory <dir>` mounts a directory as the agent's long-term knowledge.
+It registers seven split tools — `knowledge_save`, `knowledge_append`,
+`knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`,
+`knowledge_keywords`; under the hood it's a passive RAG technique — each
+entry is a single keyword-indexed Markdown file in `<dir>` that the
+operator can hand-edit. Keywords are the identifier: sorted and joined
+by `_` they become the filename. The legacy flag `--RAG` is still
+accepted as a back-compat alias.
 
 **Vocabulary auto-injection.** `--memory` also appends a compact
 `# MEMORY VOCABULARY` block to the system prompt prefix (the same
@@ -795,8 +798,8 @@ prefix that carries `[environment]`, `[guidance]`, the tools_block,
 and the cite-sources rule). The block lists every distinct keyword
 in the store + its count, sorted count desc / name asc, capped at
 top 40. The remote model now sees what it has tagged on every
-turn — `memory(action="search", keywords=[...])` becomes
-actionable without first calling `memory(action="keywords")`.
+turn — `knowledge_search(keywords=[...])` becomes
+actionable without first calling `knowledge_keywords`.
 Empty store → block omitted, no wasted tokens.
 
 The builder is shared with `easyai-server` and `easyai-local`
@@ -812,8 +815,8 @@ server's own system prompt (rendered by
 lists them, and duplicating that catalogue in the cli prefix would
 waste tokens and risk drift.
 
-Memories whose title starts with `fix-easyai-` are immutable: save /
-append / delete refuse them. Pass `fix=true` (sub-action `save`) to
+Entries whose keywords resolve to a `fix-` prefix are immutable: save /
+append / delete refuse them. Pass `fix=true` (`knowledge_save`) to
 mint one.
 
 See [`RAG.md`](RAG.md) for the full guide, including §5 "Automatic
@@ -844,7 +847,7 @@ runs.
 | Flag | What it does |
 | --- | --- |
 | `--list-tools` | Print every LOCAL tool (the catalog the CLI sends to the server in `tools[]`) with name + full description. The fastest way to confirm what the model will see. |
-| `--list-remote-tools` | `GET /v1/tools`. easyai-server extension — lists tools the *server* registered (its built-ins + the `memory` tool + external + MCP-fetched). May 404 against other OpenAI-compat servers. |
+| `--list-remote-tools` | `GET /v1/tools`. easyai-server extension — lists tools the *server* registered (its built-ins + the `knowledge_*` tools + external + MCP-fetched). May 404 against other OpenAI-compat servers. |
 | `--list-models` | `GET /v1/models`. Standard. |
 | `--health` | `GET /health`. Prints `ok` / `unhealthy: <reason>`. |
 | `--props` | `GET /props`. Server-side configuration dump. |

@@ -1577,16 +1577,12 @@ void register_tools(easyai::Client & cli,
     if (wants("system_swaps"))     cli.add_tool(systools::make_system_swaps());
 
     // Persistent memory — the agent's long-term store.
-    // One `knowledge(action=...)` tool registered when --memory <dir> is
-    // given. The dir does not need to exist yet; the tool creates it on
-    // first save. See RAG.md.
+    // Seven knowledge_* tools registered when --memory <dir> is given.
+    // The dir does not need to exist yet; the tools create it on first save.
     if (!o.rag_dir.empty()) {
         if (o.tools_enabled.empty() || o.tools_enabled.count("knowledge")) {
-            if (tm_unified) cli.add_tool(easyai::tools::make_rag_tool(o.rag_dir));
-            if (tm_split) {
-                for (auto & t : easyai::tools::knowledge_split_tools(o.rag_dir)) {
-                    cli.add_tool(std::move(t));
-                }
+            for (auto & t : easyai::tools::knowledge_split_tools(o.rag_dir)) {
+                cli.add_tool(std::move(t));
             }
         }
     }

@@ -51,7 +51,7 @@
 #include "easyai/external_tools.hpp"    // EASYAI-*.tools loader
 #include "easyai/log.hpp"               // optional log tee
 #include "easyai/mcp.hpp"               // JSON-RPC dispatcher
-#include "easyai/rag_tools.hpp"         // make_rag_tool
+#include "easyai/rag_tools.hpp"         // knowledge_split_tools
 #include "easyai/tool.hpp"
 
 #include "httplib.h"                    // vendored by llama.cpp

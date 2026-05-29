@@ -302,23 +302,27 @@ Mandatory workflow when both memory and web tools are available:
 
 Enforced in three places: system preamble (preamble.cpp), memory tool description (rag_tools.cpp), web tool descriptions (builtin_tools.cpp).
 
-## memory_load / memory_search Limits
+## Knowledge Tool Limits
 
 | Operation | Default | Max |
 |-----------|---------|-----|
-| load (titles per call) | — | 20 |
 | search (results per page) | 10 | 20 |
 | list (entries) | 50 | 200 |
 | keywords (vocabulary) | 200 | 500 |
 
-## memory_append Tool Behavior
+## Entry Identity
 
-| Title exists? | Behavior | Return message |
+Keywords are the sole identifier. Sorted + joined by `_` = filename stem.
+Example: `"python async sockets"` → file `async_python_sockets.md`.
+Files starting with `fix-` are immutable (cannot overwrite or delete).
+
+## knowledge_append Behavior
+
+| Entry exists? | Behavior | Return message |
 |--------------|----------|----------------|
-| Yes | Append content after `---` separator | `updated "title.md" (+N B → M B total, K keywords)` |
-| No (keywords given) | Create new memory (save semantics) | `new memory saved as "title.md" (N bytes, K keywords)` |
-| No (no keywords) | Error | Explains keywords are required for new memories |
-| Fixed (`fix-easyai-*`) | Error | Immutable, cannot append |
+| Yes | Append content after `---` separator | `updated "key.md" (+N B → M B total)` |
+| No | Create new entry | `created "key.md" (N bytes)` |
+| Fixed (`fix-*`) | Error | Immutable, cannot append |
 
 ## Tools-in-prompt Contract
 

@@ -239,7 +239,7 @@ std::string cite_sources_block(bool has_memory) {
         "\n"
         "  Sources:\n"
         "  - https://example.com/article-you-actually-fetched\n"
-        "  - knowledge: \"Title_of_loaded_entry\"\n"
+        "  - knowledge: \"keyword1 keyword2\"\n"
         "\n"
         "Rules:\n"
         "  - One entry per line, prefixed `- `.\n"
@@ -251,7 +251,7 @@ std::string cite_sources_block(bool has_memory) {
         "first listed).\n"
         "  - For web content: cite the URL.\n"
         "  - For knowledge content: cite as "
-        "`knowledge: \"<title>\"` using the exact entry title.\n"
+        "`knowledge: \"<keywords>\"` using the entry keywords.\n"
         "  - If outside tools returned nothing useful AND you "
         "answered from your own knowledge, OMIT the block entirely "
         "— do not fabricate one.\n";
@@ -528,11 +528,10 @@ std::string tools_block(const ToolsetView & view) {
                  "(action=search|fetch). Reply MUST end with a "
                  "`Sources:` block listing URLs used.\n";
         if (view.memory_on)
-            s << "  - knowledge — persistent knowledge store for saving "
-                 "and recalling mental notes, skills, facts, and "
-                 "information across conversations "
-                 "(action=search|load|append|save|list|delete|keywords). "
-                 "Search BEFORE answering from knowledge.\n";
+            s << "  - knowledge — persistent knowledge store "
+                 "(knowledge_save, knowledge_search, knowledge_load, "
+                 "knowledge_append, knowledge_list, knowledge_delete, "
+                 "knowledge_keywords). Search BEFORE answering.\n";
         if (view.fs_on)
             s << "  - fs — filesystem: read/write/edit/list/glob/grep/"
                  "cwd/sandbox in sandbox. Batch with action=\"ops\" "

@@ -113,20 +113,14 @@ constexpr std::size_t kKeywordsResultsDflt = 200;
 constexpr char        kEntrySuffix[]      = ".md";
 constexpr std::size_t kEntrySuffixLen     = sizeof(kEntrySuffix) - 1;
 
-// Title prefix that marks a memory as IMMUTABLE. Memories with a
-// title starting `fix-easyai-` cannot be overwritten by rag_save and
-// cannot be removed by rag_delete — they survive every session until
-// the operator deletes the file from disk by hand. Used to seed the
-// agent with system designs, hard rules, domain knowledge that must
-// not drift. The prefix is part of the title (so it shows in every
-// search/list/load result) and lives in the keyword namespace
-// `[A-Za-z0-9._+-]` so existing validation still applies.
-constexpr char        kFixedTitlePrefix[]    = "fix-easyai-";
-constexpr std::size_t kFixedTitlePrefixLen   = sizeof(kFixedTitlePrefix) - 1;
+// Filename prefix that marks an entry as IMMUTABLE. Files starting
+// with `fix-` cannot be overwritten or deleted by the model.
+constexpr char        kFixedPrefix[]    = "fix-";
+constexpr std::size_t kFixedPrefixLen   = sizeof(kFixedPrefix) - 1;
 
-bool title_is_fixed(const std::string & title) {
-    return title.size() > kFixedTitlePrefixLen
-        && title.compare(0, kFixedTitlePrefixLen, kFixedTitlePrefix) == 0;
+bool key_is_fixed(const std::string & key) {
+    return key.size() > kFixedPrefixLen
+        && key.compare(0, kFixedPrefixLen, kFixedPrefix) == 0;
 }
 
 // Render a unix timestamp as "YYYY-MM-DD HH:MM:SS" in local time. Used
@@ -276,6 +270,57 @@ std::string normalize_title(const std::string & s, std::size_t max_len) {
         }
     }
     return has_alnum ? n : std::string();
+}
+
+// ---------------------------------------------------------------------------
+// Keyword normalization — the new entry-identity model.
+// ---------------------------------------------------------------------------
+// Keywords are the sole identifier: sorted + joined by `_` = filename stem.
+// Input is split on `_ , / <space> \t`, each token lowercased and stripped
+// to alphanumeric + `-.+`.
+
+std::string normalize_keyword(const std::string & s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        if (std::isalnum(c))                       out += (char) std::tolower(c);
+        else if (c == '-' || c == '.' || c == '+')  out += (char) c;
+    }
+    while (!out.empty() && !std::isalnum((unsigned char) out.back()))
+        out.pop_back();
+    return out;
+}
+
+std::vector<std::string> split_and_normalize_keywords(const std::string & raw) {
+    std::vector<std::string> out;
+    auto is_sep = [](char c) {
+        return c == '_' || c == ' ' || c == ',' || c == '/'
+            || c == '\t' || c == '\r' || c == '\n';
+    };
+    std::string cur;
+    for (char c : raw) {
+        if (is_sep(c)) {
+            std::string n = normalize_keyword(cur);
+            if (!n.empty()) out.push_back(std::move(n));
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    std::string n = normalize_keyword(cur);
+    if (!n.empty()) out.push_back(std::move(n));
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+std::string keywords_to_key(const std::vector<std::string> & kw) {
+    std::string key;
+    for (std::size_t i = 0; i < kw.size(); ++i) {
+        if (i > 0) key += '_';
+        key += kw[i];
+    }
+    return key;
 }
 
 // ---------------------------------------------------------------------------
@@ -485,7 +530,7 @@ struct EntryMeta {
 // doesn't serialise on the write path (rag_save, rag_delete). Readers
 // take std::shared_lock; writers take std::unique_lock.
 //
-// The index is populated EAGERLY by `make_rag_tools()` under a unique
+// The index is populated EAGERLY by `build_rag_store()` under a unique
 // lock so every subsequent reader can rely on `index_loaded == true`
 // without the upgrade dance. Single-process is the supported model
 // (header §"Concurrency"), so we never re-scan the directory after
@@ -786,667 +831,272 @@ std::string make_preview(const std::string & content, std::size_t max_bytes) {
     return out;
 }
 
+// Parse keywords from tool arguments: handles JSON arrays, stringified
+// arrays, and plain strings. Returns sorted, deduped, normalized keywords.
+bool parse_keywords_arg(const std::string & args_json,
+                        std::vector<std::string> & out,
+                        std::string & err) {
+    std::vector<std::string> raw;
+    if (!parse_string_array(args_json, "keywords", raw, err)) return false;
+    out.clear();
+    for (const auto & r : raw) {
+        for (const auto & kw : split_and_normalize_keywords(r))
+            out.push_back(kw);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Tool handler factories
 // ---------------------------------------------------------------------------
 
 ToolHandler make_save_handler(std::shared_ptr<RagStore> store) {
     return [store](const ToolCall & c) -> ToolResult {
-        std::string title_raw;
-        if (!args::get_string(c.arguments_json, "title", title_raw) || title_raw.empty()) {
-            return ToolResult::error("missing required argument: title");
-        }
-
-        // Normalize first so the model can pass natural strings
-        // ("BitNet ternary research") without bouncing on regex.
-        // The normalised form is what lives on disk; we report any
-        // change back in the success message so the model knows the
-        // canonical key for a later append / search / load.
-        std::string title = normalize_title(title_raw, kMaxTitleBytes);
-        if (title.empty()) {
+        std::vector<std::string> keywords;
+        std::string err;
+        if (!parse_keywords_arg(c.arguments_json, keywords, err))
+            return ToolResult::error(err);
+        if (keywords.empty())
             return ToolResult::error(
-                "title \"" + title_raw + "\" could not be normalised to a "
-                "valid identifier (alphanumerics + .-_+ only). Try a title "
-                "with at least one letter or digit.");
-        }
+                "keywords required (e.g. \"python async sockets\").");
+        if (keywords.size() > kMaxKeywordsPerEntry)
+            keywords.resize(kMaxKeywordsPerEntry);
 
-        // `fix=true` promotes the memory to immutable. Two ways to ask
-        // for it: (a) pass fix=true and any title — we auto-prepend the
-        // kFixedTitlePrefix so the immutability invariant lives in the
-        // filename itself. (b) pass a title that already starts with
-        // kFixedTitlePrefix — we honour that, fix=true is implied. The
-        // invariant we maintain: an entry is fixed IFF its title starts
-        // with kFixedTitlePrefix, so search / load / delete only need
-        // the title to know.
+        std::string key = keywords_to_key(keywords);
+
         bool fix = false;
         args::get_bool(c.arguments_json, "fix", fix);
-        if (fix && !title_is_fixed(title)) {
-            title = std::string(kFixedTitlePrefix) + title;
-            if (title.size() > kMaxTitleBytes) {
-                title.resize(kMaxTitleBytes);
-                while (!title.empty() && title.back() == '_') title.pop_back();
-            }
-        }
-
-        std::vector<std::string> keywords_raw;
-        std::string err;
-        if (!parse_string_array(c.arguments_json, "keywords", keywords_raw, err)) {
-            return ToolResult::error(err);
-        }
-        if (keywords_raw.empty()) {
-            return ToolResult::error(
-                "keywords must not be empty (1.."
-                + std::to_string(kMaxKeywordsPerEntry)
-                + " short keywords, comma-separated, e.g. \"python, async\"). "
-                  "Why: keywords are how rag_search finds this "
-                  "entry later — an entry with no keywords is unreachable by "
-                  "keyword search (only rag_list can find it).");
-        }
-        // Normalize each keyword. Drop empties (e.g. "???" → ""),
-        // dedup after normalisation, cap at kMaxKeywordsPerEntry.
-        std::vector<std::string> keywords;
-        std::vector<std::pair<std::string,std::string>> kw_changes;  // (orig → norm)
-        std::vector<std::string>                         kw_dropped;
-        keywords.reserve(keywords_raw.size());
-        for (const auto & raw : keywords_raw) {
-            std::string n = normalize_id(raw, kMaxKeywordBytes);
-            if (n.empty()) {
-                kw_dropped.push_back(raw);
-                continue;
-            }
-            if (std::find(keywords.begin(), keywords.end(), n) != keywords.end()) {
-                // already present (post-normalisation duplicate)
-                if (raw != n) kw_changes.emplace_back(raw, n);
-                continue;
-            }
-            if (raw != n) kw_changes.emplace_back(raw, n);
-            keywords.push_back(std::move(n));
-            if (keywords.size() >= kMaxKeywordsPerEntry) break;
-        }
-        if (keywords.empty()) {
-            return ToolResult::error(
-                "no usable keywords after normalisation (every one was empty "
-                "or pure punctuation). Try keywords like \"bitnet\", "
-                "\"ternary\", \"quantization\" — alphanumerics plus .-_+.");
-        }
+        if (fix && !key_is_fixed(key))
+            key = std::string(kFixedPrefix) + key;
 
         std::string content;
-        if (!args::get_string(c.arguments_json, "content", content)) {
+        if (!args::get_string(c.arguments_json, "content", content))
             return ToolResult::error("missing required argument: content");
-        }
-        if (content.size() > kMaxContentBytes) {
+        if (content.size() > kMaxContentBytes)
             return ToolResult::error(
                 "content exceeds " + std::to_string(kMaxContentBytes)
-                + " bytes; split into multiple memories");
-        }
+                + " bytes; split into multiple entries.");
 
-        // WRITE: takes unique_lock so concurrent readers can't observe a
-        // half-updated index. The on-disk write inside save_locked is
-        // already atomic (tempfile + rename) so reads through the
-        // FILESYSTEM are tear-free regardless of this lock.
         std::unique_lock<std::shared_mutex> lock(store->mu);
 
-        // Immutability gate: an existing fixed entry can never be
-        // overwritten — not even by another fix=true save. The check
-        // runs UNDER the unique_lock so the index is authoritative
-        // (load_index_locked ran at startup; saves keep it in sync).
-        if (title_is_fixed(title) && store->index.count(title) > 0) {
+        if (key_is_fixed(key) && store->index.count(key) > 0)
             return ToolResult::error(
-                "entry \"" + title + "\" is fixed (immutable) — cannot "
-                "overwrite. To replace it, the operator must remove the "
-                "file from disk manually. Pick a different title for a "
-                "new entry.");
-        }
+                "\"" + key + "\" is fixed (immutable) — cannot overwrite.");
 
-        if (!store->save_locked(title, keywords, content, err)) {
+        if (!store->save_locked(key, keywords, content, err))
             return ToolResult::error(err);
-        }
 
         std::ostringstream o;
-        o << "saved \"" << title << kEntrySuffix << "\" ("
+        o << "saved \"" << key << kEntrySuffix << "\" ("
           << content.size() << " bytes, "
           << keywords.size() << " keyword" << (keywords.size() == 1 ? "" : "s")
-          << (title_is_fixed(title) ? ", FIXED — immutable from now on" : "")
-          << ")";
-        // Surface what we changed so the model can address the entry
-        // by its canonical key later. Silent normalisation is friendly
-        // for the first hop but invisible drift is bad over a session.
-        const bool title_changed = (title_raw != title)
-            && (std::string(kFixedTitlePrefix) + title_raw != title);
-        if (title_changed || !kw_changes.empty() || !kw_dropped.empty()) {
-            o << "\nnormalised:";
-            if (title_changed) {
-                o << "\n  title \"" << title_raw << "\" -> \"" << title << "\"";
-            }
-            for (const auto & ch : kw_changes) {
-                o << "\n  keyword \"" << ch.first << "\" -> \"" << ch.second << "\"";
-            }
-            if (!kw_dropped.empty()) {
-                o << "\n  dropped (empty after normalising):";
-                for (const auto & d : kw_dropped) o << " \"" << d << "\"";
-            }
-        }
+          << (key_is_fixed(key) ? ", FIXED" : "") << ")";
         return ToolResult::ok(o.str());
     };
 }
 
-// rag_append — read-modify-write an existing memory.
-//
-// Concurrency contract (this is the part that has to be right):
-//   * The whole RMW (existence check + load_one + merge +
-//     save_locked) runs under ONE std::unique_lock<shared_mutex>,
-//     same writer-discipline as rag_save / rag_delete. So all
-//     four scenarios serialise correctly:
-//       - two threads appending to the SAME title  → ordered;
-//         both appendices land, last writer's appendix is last.
-//       - two threads appending to DIFFERENT titles → still
-//         serialised (one shared_mutex per RagStore); cheap
-//         compared to disk I/O.
-//       - append vs concurrent rag_save / rag_delete → also
-//         under unique_lock; whichever lands first wins, the
-//         other sees the post-state (not-found or merged-content).
-//       - append vs concurrent reads (rag_search / rag_load /
-//         rag_list / rag_keywords) → readers hold shared_lock,
-//         block until our write commits, then proceed.
-//   * save_locked writes via tempfile + rename(2), so a reader
-//     that obtains the file path some other way (e.g. another
-//     process slurp_capped'ing the .md directly) sees either the
-//     old full body or the new merged body — never a half-applied
-//     append. The single-process invariant in the header
-//     ("Concurrency: ... single-process is the supported model")
-//     means cross-process semantics are best-effort, not contract.
-//   * load_one and save_locked are designed to be called WITH the
-//     unique_lock already held — they don't re-acquire, so there
-//     is no upgrade dance and no risk of self-deadlock.
 ToolHandler make_append_handler(std::shared_ptr<RagStore> store) {
     return [store](const ToolCall & c) -> ToolResult {
-        std::string title_raw;
-        if (!args::get_string(c.arguments_json, "title", title_raw) || title_raw.empty()) {
-            return ToolResult::error("missing required argument: title");
-        }
-        // Apply the same normalisation as rag_save so the model can
-        // reach the existing entry without exact-match anxiety.
-        std::string title = normalize_title(title_raw, kMaxTitleBytes);
-        if (title.empty()) {
+        std::vector<std::string> keywords;
+        std::string err;
+        if (!parse_keywords_arg(c.arguments_json, keywords, err))
+            return ToolResult::error(err);
+        if (keywords.empty())
             return ToolResult::error(
-                "title \"" + title_raw + "\" could not be normalised to a "
-                "valid identifier.");
-        }
+                "keywords required (e.g. \"python async\").");
+        if (keywords.size() > kMaxKeywordsPerEntry)
+            keywords.resize(kMaxKeywordsPerEntry);
+
+        std::string key = keywords_to_key(keywords);
 
         std::string suffix;
-        if (!args::get_string(c.arguments_json, "content", suffix)) {
+        if (!args::get_string(c.arguments_json, "content", suffix))
             return ToolResult::error("missing required argument: content");
-        }
-        if (suffix.empty()) {
-            return ToolResult::error(
-                "content is empty — nothing to append. If you want to "
-                "replace the whole entry, use rag_save with the same title.");
-        }
+        if (suffix.empty())
+            return ToolResult::error("content is empty — nothing to append.");
 
-        // Optional: extra keywords to merge into the existing list.
-        // Normalised + deduped the same way rag_save does.
-        std::vector<std::string> extra_raw;
-        std::string err;
-        if (args::has(c.arguments_json, "keywords")
-                && !parse_string_array(c.arguments_json, "keywords",
-                                       extra_raw, err)) {
-            return ToolResult::error(err);
-        }
-        std::vector<std::string> extra_keywords;
-        std::vector<std::pair<std::string,std::string>> kw_changes;
-        std::vector<std::string>                         kw_dropped;
-        for (const auto & raw : extra_raw) {
-            std::string n = normalize_id(raw, kMaxKeywordBytes);
-            if (n.empty()) { kw_dropped.push_back(raw); continue; }
-            if (std::find(extra_keywords.begin(), extra_keywords.end(), n)
-                    != extra_keywords.end()) {
-                if (raw != n) kw_changes.emplace_back(raw, n);
-                continue;
-            }
-            if (raw != n) kw_changes.emplace_back(raw, n);
-            extra_keywords.push_back(std::move(n));
-        }
-
-        // WRITE: unique_lock for the whole RMW so a concurrent
-        // rag_save (also unique_lock) can't slip between our read of
-        // the existing body and the rewrite of the merged content.
         std::unique_lock<std::shared_mutex> lock(store->mu);
 
-        // If the title doesn't exist yet, create it as a new memory
-        // (save semantics) instead of erroring — the caller's intent
-        // is clearly "make sure this content ends up under this title".
-        const bool is_new = (store->index.count(title) == 0);
+        const bool is_new = (store->index.count(key) == 0);
         if (is_new) {
-            // keywords are required for a brand-new memory (search
-            // needs at least one). If the caller didn't supply any,
-            // error with a helpful message.
-            if (extra_keywords.empty()) {
+            if (suffix.size() > kMaxContentBytes)
                 return ToolResult::error(
-                    "no entry titled \"" + title + "\" — knowledge_append "
-                    "can create it, but keywords[] is required for new "
-                    "entries (search needs at least one).");
-            }
-            if (suffix.size() > kMaxContentBytes) {
-                return ToolResult::error(
-                    "content exceeds " + std::to_string(kMaxContentBytes)
-                    + " bytes; split into multiple memories");
-            }
-            if (!store->save_locked(title, extra_keywords, suffix, err)) {
+                    "content exceeds " + std::to_string(kMaxContentBytes) + " bytes.");
+            if (!store->save_locked(key, keywords, suffix, err))
                 return ToolResult::error(err);
-            }
             std::ostringstream o;
-            o << "new entry saved as \"" << title << kEntrySuffix << "\" ("
-              << suffix.size() << " bytes, "
-              << extra_keywords.size() << " keyword"
-              << (extra_keywords.size() == 1 ? "" : "s") << ")";
-            const bool title_changed = (title_raw != title);
-            if (title_changed || !kw_changes.empty() || !kw_dropped.empty()) {
-                o << "\nnormalised:";
-                if (title_changed)
-                    o << "\n  title \"" << title_raw << "\" -> \"" << title << "\"";
-                for (const auto & ch : kw_changes)
-                    o << "\n  keyword \"" << ch.first << "\" -> \"" << ch.second << "\"";
-                if (!kw_dropped.empty()) {
-                    o << "\n  dropped (empty after normalising):";
-                    for (const auto & d : kw_dropped) o << " \"" << d << "\"";
-                }
-            }
+            o << "created \"" << key << kEntrySuffix << "\" ("
+              << suffix.size() << " bytes)";
             return ToolResult::ok(o.str());
         }
 
-        // Immutability gate: fixed memories live forever as written.
-        if (title_is_fixed(title)) {
+        if (key_is_fixed(key))
             return ToolResult::error(
-                "entry \"" + title + "\" is fixed (immutable) — cannot "
-                "append. Pick a different title for a related entry, "
-                "or have the operator remove the file from disk first.");
-        }
+                "\"" + key + "\" is fixed (immutable) — cannot append.");
 
-        // Read the existing body + keywords back from disk via the
-        // store helper (slurp + parse_entry, capped at
-        // kMaxContentBytes + 4 KiB header room — same cap rag_load
-        // uses, so an oversized hand-edited file is rejected with
-        // the same message the rest of the surface produces).
         std::vector<std::string> old_keywords;
         std::string              old_body;
-        std::int64_t             old_mtime = 0;   // unused but required by the API
-        if (!store->load_one(title, old_keywords, old_body, old_mtime, err)) {
+        std::int64_t             old_mtime = 0;
+        if (!store->load_one(key, old_keywords, old_body, old_mtime, err))
             return ToolResult::error(err);
-        }
 
-        // Compose the merged body. We insert a Markdown horizontal
-        // rule as the separator so the operator opening the .md file
-        // sees exactly where the appendix begins. Trim any trailing
-        // newlines from the existing body first so the rule sits on
-        // a clean blank line regardless of how the previous save
-        // happened to terminate.
         std::string merged = old_body;
-        while (!merged.empty() && (merged.back() == '\n' || merged.back() == '\r')) {
+        while (!merged.empty() && (merged.back() == '\n' || merged.back() == '\r'))
             merged.pop_back();
-        }
         if (!merged.empty()) merged += "\n\n---\n\n";
         merged += suffix;
 
-        if (merged.size() > kMaxContentBytes) {
+        if (merged.size() > kMaxContentBytes)
             return ToolResult::error(
-                "appended entry would exceed " + std::to_string(kMaxContentBytes)
-                + " bytes (existing " + std::to_string(old_body.size())
-                + " B + appendix " + std::to_string(suffix.size())
-                + " B + separator). Split into a new entry with rag_save "
-                  "instead, or condense the appendix.");
-        }
+                "merged content would exceed "
+                + std::to_string(kMaxContentBytes) + " bytes.");
 
-        // Merge keywords: keep the existing order (the model relies on
-        // search ranking that's stable across appends), then append any
-        // extras the model passed that weren't already there. Cap at
-        // kMaxKeywordsPerEntry; oldest stays.
-        std::vector<std::string> merged_keywords = old_keywords;
-        for (const auto & k : extra_keywords) {
-            const bool already = std::find(merged_keywords.begin(),
-                                           merged_keywords.end(), k)
-                                 != merged_keywords.end();
-            if (!already && merged_keywords.size() < kMaxKeywordsPerEntry) {
-                merged_keywords.push_back(k);
-            }
-        }
-        if (merged_keywords.empty()) {
-            // Defensive — every saved memory has at least one keyword
-            // (rag_save enforces it). If somehow we read back an entry
-            // with none (operator hand-edited the keywords: header out),
-            // require the model to supply them on append rather than
-            // writing a search-invisible memory.
-            return ToolResult::error(
-                "existing entry has no keywords (someone may have hand-"
-                "edited it); pass keywords[] to rag_append so the merged "
-                "entry remains searchable.");
-        }
-
-        if (!store->save_locked(title, merged_keywords, merged, err)) {
+        if (!store->save_locked(key, old_keywords, merged, err))
             return ToolResult::error(err);
-        }
 
         std::ostringstream o;
-        o << "updated \"" << title << kEntrySuffix << "\" ("
-          << "+" << suffix.size() << " B → " << merged.size() << " B total, "
-          << merged_keywords.size() << " keyword"
-          << (merged_keywords.size() == 1 ? "" : "s") << ")";
-        const bool title_changed = (title_raw != title);
-        if (title_changed || !kw_changes.empty() || !kw_dropped.empty()) {
-            o << "\nnormalised:";
-            if (title_changed) {
-                o << "\n  title \"" << title_raw << "\" -> \"" << title << "\"";
-            }
-            for (const auto & ch : kw_changes) {
-                o << "\n  keyword \"" << ch.first << "\" -> \"" << ch.second << "\"";
-            }
-            if (!kw_dropped.empty()) {
-                o << "\n  dropped (empty after normalising):";
-                for (const auto & d : kw_dropped) o << " \"" << d << "\"";
-            }
-        }
+        o << "updated \"" << key << kEntrySuffix << "\" (+"
+          << suffix.size() << " B → " << merged.size() << " B total)";
         return ToolResult::ok(o.str());
     };
 }
 
 ToolHandler make_search_handler(std::shared_ptr<RagStore> store) {
     return [store](const ToolCall & c) -> ToolResult {
-        // Multi-keyword search.
-        //   - keywords[0] is REQUIRED: every result is guaranteed to
-        //     carry the first keyword the model passed.
-        //   - keywords[1..] are OPTIONAL: they never exclude a result,
-        //     they only lift its rank (more overlap → higher).
-        //
-        // So a result is returned iff it carries keyword[0]; the rest
-        // just sort the matches. Each result reports how many of the
-        // queried keywords it matched (`[matched N/M]`) so the model
-        // can see the overlap and pick. A single-keyword query is the
-        // degenerate case — that one keyword is the required one.
-        std::vector<std::string> keywords_raw;
-        std::string err;
-        if (!parse_string_array(c.arguments_json, "keywords", keywords_raw, err)) {
-            return ToolResult::error(err);
-        }
-        if (keywords_raw.empty()) {
-            return ToolResult::error(
-                "missing required argument: keywords "
-                "(e.g. \"python, async\")");
-        }
-        if (keywords_raw.size() > kMaxKeywordsPerEntry) {
-            return ToolResult::error(
-                "too many keywords (max "
-                + std::to_string(kMaxKeywordsPerEntry) + " per query)");
-        }
-        // Normalise the query keywords with the same rules rag_save
-        // uses, so "neural network" finds entries indexed under
-        // "neural_network". Order-preserving dedup — keywords[0] is
-        // the required keyword and must keep its slot.
         std::vector<std::string> keywords;
-        keywords.reserve(keywords_raw.size());
-        for (const auto & raw : keywords_raw) {
-            std::string n = normalize_id(raw, kMaxKeywordBytes);
-            if (n.empty()) continue;
-            if (std::find(keywords.begin(), keywords.end(), n) == keywords.end()) {
-                keywords.push_back(std::move(n));
-            }
-        }
-        if (keywords.empty()) {
+        std::string err;
+        if (!parse_keywords_arg(c.arguments_json, keywords, err))
+            return ToolResult::error(err);
+        if (keywords.empty())
             return ToolResult::error(
-                "no usable keywords after normalisation — try alphanumerics "
-                "plus .-_+ (e.g. \"bitnet\", \"ternary\").");
-        }
-        const std::string & required_kw = keywords.front();
+                "keywords required (e.g. \"python async\").");
 
         long long max_results = (long long) kSearchResultsDflt;
         args::get_int(c.arguments_json, "max_results", max_results);
         if (max_results < 1) max_results = 1;
-        if ((std::size_t) max_results > kSearchResultsMax) {
+        if ((std::size_t) max_results > kSearchResultsMax)
             max_results = (long long) kSearchResultsMax;
-        }
 
         struct Hit {
-            std::string title;
+            std::string key;
             EntryMeta   meta;
             std::size_t matched = 0;
-            bool        has_required = false;
             std::vector<std::string> matched_keywords;
         };
         std::vector<Hit> hits;
         {
-            // READ: shared_lock — many concurrent searches can iterate
-            // the index in parallel. The index was populated eagerly by
-            // make_rag_tools() under a unique lock, so we never need to
-            // upgrade here.
             std::shared_lock<std::shared_mutex> lock(store->mu);
-            for (const auto & [t, m] : store->index) {
+            for (const auto & [k, m] : store->index) {
                 Hit h;
-                h.title = t;
-                h.meta  = m;
-                for (std::size_t qi = 0; qi < keywords.size(); ++qi) {
-                    const auto & q = keywords[qi];
-                    for (const auto & et : m.keywords) {
-                        if (et == q) {
+                h.key  = k;
+                h.meta = m;
+                for (const auto & q : keywords) {
+                    for (const auto & ek : m.keywords) {
+                        if (ek == q) {
                             h.matched_keywords.push_back(q);
-                            if (qi == 0) h.has_required = true;
                             break;
                         }
                     }
                 }
                 h.matched = h.matched_keywords.size();
-                // keywords[0] is mandatory; the rest only rank.
-                if (h.has_required) {
+                if (h.matched > 0)
                     hits.push_back(std::move(h));
-                }
             }
         }
-        // Rank: more overlap first, ties broken by recency.
         std::sort(hits.begin(), hits.end(), [](const Hit & a, const Hit & b) {
             if (a.matched != b.matched) return a.matched > b.matched;
             return a.meta.modified_unix > b.meta.modified_unix;
         });
 
-        // Pagination — the model can ask for `page=N` to walk the rest
-        // of a large result set without re-issuing a different query.
-        // We compute totals on the FULL ranked list, then slice.
         long long page = 1;
         args::get_int(c.arguments_json, "page", page);
         if (page < 1) page = 1;
 
-        const std::size_t total       = hits.size();
-        const std::size_t per_page    = (std::size_t) max_results;
-        const std::size_t total_pages =
+        const std::size_t total    = hits.size();
+        const std::size_t per_page = (std::size_t) max_results;
+        const std::size_t pages    =
             total == 0 ? 0 : (total + per_page - 1) / per_page;
-        const std::size_t offset      =
+        const std::size_t off      =
             (std::size_t)((page - 1) * (long long) per_page);
 
-        // Build a "queried [a, b, c]" string once for the response prose.
-        std::string queried_str;
-        for (std::size_t i = 0; i < keywords.size(); ++i) {
-            queried_str += (i ? ", " : "");
-            queried_str += keywords[i];
-        }
-
         if (hits.empty()) {
-            std::ostringstream o;
-            o << "total_entries: 0\n";
-            o << "page: " << page << " of 0\n\n";
-            o << "no entries carry the required keyword \""
-              << required_kw << "\"";
-            if (keywords.size() > 1) {
-                o << " (the other queried keywords only affect ranking, "
-                     "they don't broaden the match)";
-            }
-            o << ". Use rag_list to browse, or rag_save to add new entries.";
-            return ToolResult::ok(o.str());
+            return ToolResult::ok(
+                "no matches. Use knowledge_list to browse entries.");
+        }
+        if (off >= total) {
+            return ToolResult::ok(
+                "page " + std::to_string(page) + " is past the end ("
+                + std::to_string(pages) + " pages).");
         }
 
-        if (offset >= total) {
-            std::ostringstream o;
-            o << "total_entries: " << total << "\n";
-            o << "page: " << page << " of " << total_pages
-              << "  (past the end)\n\n";
-            o << "page " << page << " is past the last page ("
-              << total_pages << "). The full result set is "
-              << total << " entr" << (total == 1 ? "y" : "ies")
-              << " — use page=1.." << total_pages << ".";
-            return ToolResult::ok(o.str());
-        }
+        const std::size_t end     = std::min(off + per_page, total);
+        const bool        more    = end < total;
 
-        const std::size_t slice_end = std::min(offset + per_page, total);
-        const std::size_t shown     = slice_end - offset;
-        const bool        has_more  = slice_end < total;
-
-        // Render plain-text + structured (markdown-friendly) output.
-        // The model parses this with no JSON dependency on its side
-        // and the operator can `cat` it from a journal log.
-        //
-        // Header layout (machine-readable lines first, then prose) so
-        // the model can grep `total_entries:` / `page:` / `has_more:`
-        // without parsing the body.
         std::ostringstream o;
-        o << "total_entries: " << total << "\n";
-        o << "page: "          << page << " of " << total_pages << "\n";
-        o << "showing: "       << shown
-          << "  (entries " << (offset + 1) << ".." << slice_end << ")\n";
-        o << "has_more: "      << (has_more ? "true" : "false") << "\n\n";
+        o << "results: " << total
+          << "  page: " << page << "/" << pages << "\n\n";
 
-        if (keywords.size() == 1) {
-            o << "match keyword \"" << queried_str
-              << "\" (newest first):\n\n";
-        } else {
-            o << "required keyword \"" << required_kw
-              << "\" — queried [" << queried_str
-              << "], ranked by overlap (best first, then newest):\n\n";
-        }
-        for (std::size_t i = offset; i < slice_end; ++i) {
+        for (std::size_t i = off; i < end; ++i) {
             const auto & h = hits[i];
-            std::vector<std::string> body_keywords;
-            std::string              body_text;
-            std::int64_t             mtime = 0;
-            std::string              load_err;
-            std::string              preview;
-            if (store->load_one(h.title, body_keywords, body_text, mtime, load_err)) {
-                preview = make_preview(body_text, kSearchPreviewBytes);
-            } else {
-                preview = "(could not read body: " + load_err + ")";
-            }
+            std::vector<std::string> bk;
+            std::string              body;
+            std::int64_t             mt = 0;
+            std::string              le;
+            std::string preview;
+            if (store->load_one(h.key, bk, body, mt, le))
+                preview = make_preview(body, kSearchPreviewBytes);
+            else
+                preview = "(read error)";
 
-            // Number entries by their absolute position in the ranked
-            // list so the model can correlate across pages.
-            o << (i + 1) << ". " << h.title;
-            if (title_is_fixed(h.title)) o << "  [FIXED]";
-            if (keywords.size() > 1) {
-                o << "  [matched " << h.matched << "/" << keywords.size()
-                  << ": ";
-                for (std::size_t k = 0; k < h.matched_keywords.size(); ++k) {
-                    if (k) o << ", ";
-                    o << h.matched_keywords[k];
-                }
-                o << "]";
-            }
-            o << "\n";
+            o << (i + 1) << ". [" << h.key << "]";
+            if (key_is_fixed(h.key)) o << " FIXED";
+            o << "  matched " << h.matched << "/" << keywords.size()
+              << "  (" << h.meta.content_bytes << " B)\n";
             o << "   keywords: ";
             for (std::size_t k = 0; k < h.meta.keywords.size(); ++k) {
-                if (k) o << ", ";
+                if (k) o << " ";
                 o << h.meta.keywords[k];
             }
-            o << "  (" << h.meta.content_bytes << " bytes)\n";
-            o << "   modified: " << format_local_time(h.meta.modified_unix)
-              << "  (unix=" << h.meta.modified_unix << ")\n";
-            // Indent preview lines by 3 so it's easy to skim.
-            std::string preview_in;
-            preview_in.reserve(preview.size() + preview.size() / 60 * 3);
-            for (char ch : preview) {
-                preview_in += ch;
-                if (ch == '\n') preview_in += "   ";
-            }
-            o << "   " << preview_in << "\n\n";
+            o << "\n   " << preview << "\n\n";
         }
-        if (has_more) {
-            o << "Use rag_search with the same keywords + page="
-              << (page + 1) << " to see the next "
-              << std::min(per_page, total - slice_end)
-              << " result" << (total - slice_end == 1 ? "" : "s")
-              << " (page " << (page + 1) << " of " << total_pages << ").\n";
-        }
-        o << "Use rag_load with up to " << kMaxLoadAtOnce
-          << " of these titles for full content.\n"
-          << "\n[CITE: if you use any of these results in your reply, "
-             "end with a Sources: block citing knowledge: \"<title>\" "
-             "per entry used.]\n";
+        if (more)
+            o << "next: knowledge_search with page=" << (page + 1) << "\n";
+        o << "load full content: knowledge_load with the same keywords.\n";
         return ToolResult::ok(o.str());
     };
 }
 
 ToolHandler make_load_handler(std::shared_ptr<RagStore> store) {
     return [store](const ToolCall & c) -> ToolResult {
-        std::vector<std::string> titles;
+        std::vector<std::string> keywords;
         std::string err;
-        if (!parse_string_array(c.arguments_json, "titles", titles, err)) {
+        if (!parse_keywords_arg(c.arguments_json, keywords, err))
             return ToolResult::error(err);
-        }
-        if (titles.empty()) {
-            return ToolResult::error("missing required argument: titles "
-                                     "(e.g. \"my_notes, project_x\")");
-        }
-        if (titles.size() > kMaxLoadAtOnce) {
+        if (keywords.empty())
             return ToolResult::error(
-                "too many titles requested (max "
-                + std::to_string(kMaxLoadAtOnce)
-                + " per call); narrow your rag_search first");
-        }
-        // Normalise titles silently so the model can ask for
-        // "BitNet ternary research" and reach the on-disk
-        // "BitNet_ternary_research". A title that can't normalise
-        // (pure punctuation, "..") errors out — that's a real
-        // mistake, not just a formatting nit.
-        for (auto & t : titles) {
-            std::string n = normalize_title(t, kMaxTitleBytes);
-            if (n.empty()) {
-                return ToolResult::error(
-                    "title \"" + t + "\" could not be normalised to a valid "
-                    "identifier (alphanumerics + .-_+; not '.' / '..').");
-            }
-            t = std::move(n);
+                "keywords required (e.g. \"python async\").");
+
+        std::string key = keywords_to_key(keywords);
+
+        std::vector<std::string> file_kw;
+        std::string body;
+        std::int64_t mtime = 0;
+        {
+            std::shared_lock<std::shared_mutex> lock(store->mu);
+            if (!store->load_one(key, file_kw, body, mtime, err))
+                return ToolResult::error(err);
         }
 
         std::ostringstream o;
-        o << "loaded " << titles.size() << " entr"
-          << (titles.size() == 1 ? "y" : "ies") << ":\n";
-        for (const auto & title : titles) {
-            std::vector<std::string> keywords;
-            std::string body;
-            std::int64_t mtime = 0;
-            std::string e_err;
-            // READ: shared_lock — load_one() reads the file off disk
-            // (atomic-rename guarantees a consistent view) and never
-            // touches the index. Multiple parallel rag_load calls run
-            // concurrently with no contention on the mutex itself.
-            std::shared_lock<std::shared_mutex> lock(store->mu);
-            if (!store->load_one(title, keywords, body, mtime, e_err)) {
-                o << "\n--- " << title << " ---\n"
-                  << "ERROR: " << e_err << "\n";
-                continue;
-            }
-            o << "\n--- " << title << " ---\n";
-            o << "keywords: ";
-            for (std::size_t i = 0; i < keywords.size(); ++i) {
-                if (i) o << ", ";
-                o << keywords[i];
-            }
-            o << "\nmodified: " << format_local_time(mtime)
-              << "  (unix=" << mtime << ")\n";
-            o << "fixed: " << (title_is_fixed(title) ? "yes" : "no") << "\n";
-            if (title_is_fixed(title)) {
-                o << "note: this entry is immutable — rag_save and rag_delete "
-                     "will refuse to change or remove it.\n";
-            }
-            o << "\n";
-            o << body;
-            if (!body.empty() && body.back() != '\n') o << '\n';
-        }
-        o << "\n[CITE: if you use loaded content in your reply, end "
-             "with a Sources: block citing knowledge: \"<title>\" per "
-             "entry used.]\n";
+        o << "--- " << key << " ---\n";
+        o << "keywords:";
+        for (const auto & k : file_kw) o << " " << k;
+        o << "\nmodified: " << format_local_time(mtime) << "\n";
+        if (key_is_fixed(key)) o << "fixed: yes\n";
+        o << "\n" << body;
+        if (!body.empty() && body.back() != '\n') o << '\n';
         return ToolResult::ok(o.str());
     };
 }
@@ -1455,62 +1105,46 @@ ToolHandler make_list_handler(std::shared_ptr<RagStore> store) {
     return [store](const ToolCall & c) -> ToolResult {
         std::string prefix_raw;
         args::get_string(c.arguments_json, "prefix", prefix_raw);
-        std::string prefix;
-        if (!prefix_raw.empty()) {
-            // normalize_id (not normalize_title) — a prefix may end
-            // partway through a title and the FS-safety rules
-            // (no leading dot, must contain alnum) don't apply to
-            // a partial match. Empty after normalisation = ignore
-            // the filter entirely.
-            prefix = normalize_id(prefix_raw, kMaxTitleBytes);
-        }
+        std::string prefix = normalize_keyword(prefix_raw);
+
         long long max = (long long) kListResultsDflt;
         args::get_int(c.arguments_json, "max", max);
         if (max < 1) max = 1;
         if ((std::size_t) max > kListResultsMax) max = (long long) kListResultsMax;
 
-        struct Row { std::string title; EntryMeta meta; };
+        struct Row { std::string key; EntryMeta meta; };
         std::vector<Row> rows;
         {
-            // READ: shared_lock — same justification as rag_search.
             std::shared_lock<std::shared_mutex> lock(store->mu);
-            for (const auto & [t, m] : store->index) {
+            for (const auto & [k, m] : store->index) {
                 if (!prefix.empty() &&
-                    (t.size() < prefix.size() ||
-                     t.compare(0, prefix.size(), prefix) != 0)) {
+                    (k.size() < prefix.size() ||
+                     k.compare(0, prefix.size(), prefix) != 0))
                     continue;
-                }
-                rows.push_back({ t, m });
+                rows.push_back({ k, m });
                 if ((long long) rows.size() >= max) break;
             }
         }
 
-        if (rows.empty()) {
+        if (rows.empty())
             return ToolResult::ok(prefix.empty()
-                ? "Memory is empty. Use rag_save to add entries."
-                : "no titles match prefix \"" + prefix + "\".");
-        }
+                ? "no entries. Use knowledge_save to add."
+                : "no entries match prefix \"" + prefix + "\".");
 
         std::ostringstream o;
-        o << rows.size() << " entr" << (rows.size() == 1 ? "y" : "ies");
-        if (!prefix.empty()) o << " matching prefix \"" << prefix << "\"";
-        o << ":\n\n";
+        o << rows.size() << " entr" << (rows.size() == 1 ? "y" : "ies")
+          << ":\n\n";
         for (std::size_t i = 0; i < rows.size(); ++i) {
             const auto & r = rows[i];
-            o << (i + 1) << ". " << r.title;
-            if (title_is_fixed(r.title)) o << "  [FIXED]";
-            if (!r.meta.keywords.empty()) {
-                o << "  [";
-                for (std::size_t k = 0; k < r.meta.keywords.size(); ++k) {
-                    if (k) o << ", ";
-                    o << r.meta.keywords[k];
-                }
-                o << "]";
-            } else {
-                o << "  (no keywords)";
+            o << (i + 1) << ". " << r.key;
+            if (key_is_fixed(r.key)) o << " FIXED";
+            o << "  [";
+            for (std::size_t k = 0; k < r.meta.keywords.size(); ++k) {
+                if (k) o << " ";
+                o << r.meta.keywords[k];
             }
-            o << "  " << r.meta.content_bytes << " bytes";
-            o << "  modified=" << format_local_time(r.meta.modified_unix) << "\n";
+            o << "]  " << r.meta.content_bytes << " B  "
+              << format_local_time(r.meta.modified_unix) << "\n";
         }
         return ToolResult::ok(o.str());
     };
@@ -1518,61 +1152,32 @@ ToolHandler make_list_handler(std::shared_ptr<RagStore> store) {
 
 ToolHandler make_delete_handler(std::shared_ptr<RagStore> store) {
     return [store](const ToolCall & c) -> ToolResult {
-        std::string title_raw;
-        if (!args::get_string(c.arguments_json, "title", title_raw) || title_raw.empty()) {
-            return ToolResult::error("missing required argument: title");
-        }
-        std::string title = normalize_title(title_raw, kMaxTitleBytes);
-        if (title.empty()) {
+        std::vector<std::string> keywords;
+        std::string err;
+        if (!parse_keywords_arg(c.arguments_json, keywords, err))
+            return ToolResult::error(err);
+        if (keywords.empty())
             return ToolResult::error(
-                "title \"" + title_raw + "\" could not be normalised to a "
-                "valid identifier.");
-        }
-        // Fixed memories are immutable by design — refuse the delete
-        // before we even take the write lock. The operator can still
-        // remove the file from disk by hand if they truly need to;
-        // exposing that path through a tool defeats the whole point of
-        // the prefix.
-        if (title_is_fixed(title)) {
+                "keywords required (e.g. \"python async\").");
+
+        std::string key = keywords_to_key(keywords);
+
+        if (key_is_fixed(key))
             return ToolResult::error(
-                "entry \"" + title + "\" is fixed (immutable) — cannot "
-                "be forgotten through this tool. The operator can remove "
-                "the file from disk manually if it really needs to go.");
-        }
-        // WRITE: unique_lock — delete_locked mutates the index AND
-        // removes the on-disk file. fs::remove is itself atomic, so
-        // parallel readers either see the entry or don't, never a
-        // half-deleted state.
+                "\"" + key + "\" is fixed (immutable) — cannot delete.");
+
         std::unique_lock<std::shared_mutex> lock(store->mu);
         bool existed = false;
-        std::string err;
-        if (!store->delete_locked(title, existed, err)) {
+        if (!store->delete_locked(key, existed, err))
             return ToolResult::error(err);
-        }
-        if (!existed) {
+        if (!existed)
             return ToolResult::ok(
-                "no entry titled \"" + title + "\" — nothing to forget");
-        }
-        return ToolResult::ok(
-            "forgot \"" + title + kEntrySuffix + "\"");
+                "no entry \"" + key + "\" — nothing to delete.");
+        return ToolResult::ok("deleted \"" + key + kEntrySuffix + "\"");
     };
 }
 
-// rag_keywords — vocabulary overview. Returns each distinct
-// keyword used across the RAG together with how many entries
-// reference it. The model uses this to:
-//
-//   - learn its own vocabulary before saving (avoid creating a
-//     new keyword like `user_pref` when `user-prefs` already
-//     exists)
-//   - discover dimensions of stored knowledge it forgot about
-//   - frame rag_search queries against keywords that actually
-//     return results
-//
-// Output: header lines (`total_keywords:`, `total_entries:`,
-// `showing:`) followed by sorted rows. Sort order: count
-// descending, then keyword name ascending so the response is
-// stable across calls.
+// Vocabulary overview — keyword usage counts across all entries.
 ToolHandler make_keywords_handler(std::shared_ptr<RagStore> store) {
     return [store](const ToolCall & c) -> ToolResult {
         long long min_count = 1;
@@ -1631,7 +1236,7 @@ ToolHandler make_keywords_handler(std::shared_ptr<RagStore> store) {
 
         if (rows.empty()) {
             if (total_entries == 0) {
-                o << "Memory is empty. Use rag_save to add the first entry.";
+                o << "no entries. Use knowledge_save to add.";
             } else if (min_count > 1) {
                 o << "no keywords reach min_count=" << min_count
                   << ". Memory has " << total_entries
@@ -1641,7 +1246,7 @@ ToolHandler make_keywords_handler(std::shared_ptr<RagStore> store) {
             } else {
                 o << "no keywords found. Some entries may be untagged "
                   << "(no `keywords:` header) — those don't appear here. "
-                  << "Use rag_list to see them.";
+                  << "Use knowledge_list to see them.";
             }
             return ToolResult::ok(o.str());
         }
@@ -1687,262 +1292,79 @@ std::shared_ptr<RagStore> build_rag_store(std::string root_dir) {
 // read every other parameter directly out of `arguments_json`, so the
 // dispatcher just picks the right closure by `action` and forwards the
 // original ToolCall.
-//
-// Schema is a kitchen sink (every parameter optional except `action`)
-// because JSON Schema's discriminated-union shapes (oneOf with a
-// discriminator) trip up smaller / quantised tool-callers far more
-// often than a flat "everything optional" schema does. Validation
-// stays runtime: each handler rejects calls missing its required
-// fields with a crisp message naming the dispatch form.
-//
-// (Until 2026-05-09 there was also a seven-tool split factory
-// `make_rag_tools` exposed behind `--split-rag`. It was removed
-// alongside the unification of the web and fs tool surfaces. The
-// on-disk format and locking discipline are unchanged.)
-Tool make_rag_tool(std::string root_dir) {
-    auto store = build_rag_store(std::move(root_dir));
-
-    // Capture each per-action handler once; the dispatcher closes
-    // over the resulting std::function set. Same store is shared, so
-    // index updates from `save` / `delete` are visible to subsequent
-    // `search` / `load` / `list` / `keywords` calls inside the same
-    // process.
-    auto h_save     = make_save_handler    (store);
-    auto h_append   = make_append_handler  (store);
-    auto h_search   = make_search_handler  (store);
-    auto h_load     = make_load_handler    (store);
-    auto h_list     = make_list_handler    (store);
-    auto h_delete   = make_delete_handler  (store);
-    auto h_keywords = make_keywords_handler(store);
-
-    return Tool::builder("knowledge")
-        .short_describe(
-            "Knowledge store — save & recall knowledge, skills, "
-            "mental notes. Only save AFTER answering the user.")
-        .describe(
-            "Persistent knowledge store for the model — save and recall "
-            "mental notes, skills, facts, preferences, and pieces of "
-            "information for future use across conversations. Only save "
-            "knowledge, skills, and mental notes for later retrieval — "
-            "NOT output content (code, text meant for the user); write "
-            "those directly in your response.\n"
-            "\n"
-            "IMPORTANT: only save/append AFTER you have answered the "
-            "user. Answer first, then persist knowledge as a final step.\n"
-            "\n"
-            "One tool, seven actions:\n"
-            "  save     — create/overwrite. Needs: title, keywords, content.\n"
-            "  append   — add to existing (or create if new). Needs: title, content.\n"
-            "  search   — find by keyword. Needs: keywords (first is required match).\n"
-            "  load     — read full content. Needs: titles (comma-separated).\n"
-            "  list     — all titles. Optional: prefix, max.\n"
-            "  delete   — remove by title. fix-easyai-* are protected.\n"
-            "  keywords — show all keywords in use.\n"
-            "\n"
-            "One entry per topic — append to existing rather than duplicating."
-        )
-        .param("action",      "string",
-               "save|append|search|load|list|delete|keywords.", true)
-        .param("title",       "string",
-               "Short name (save/append/delete).", false)
-        .param("titles",      "string",
-               "Titles to load, comma-separated (e.g. \"my_notes, project_x\").", false)
-        .param("keywords",    "string",
-               "Keywords, comma-separated (e.g. \"python, async, sockets\").", false)
-        .param("content",     "string",
-               "Body text (save/append).", false)
-        .param("fix",         "boolean",
-               "Make immutable (save only, default false).", false)
-        .param("prefix",      "string",
-               "Filter by prefix (list only).", false)
-        .param("max",         "integer",
-               "Result cap (list/keywords).", false)
-        .param("max_results", "integer",
-               "Page size for search (default 10).", false)
-        .param("page",        "integer",
-               "Page number for search (default 1).", false)
-        .param("min_count",   "integer",
-               "Min uses to show (keywords only).", false)
-        .handle([h_save, h_append, h_search, h_load, h_list, h_delete, h_keywords]
-                (const ToolCall & c) -> ToolResult {
-            std::string action;
-            if (!args::get_string(c.arguments_json, "action", action)
-                    || action.empty()) {
-                return ToolResult::error(
-                    "missing required argument: action. Use one of "
-                    "\"save\", \"append\", \"search\", \"load\", "
-                    "\"list\", \"delete\", \"keywords\".");
-            }
-            // Each branch forwards the original ToolCall — the per-
-            // action handlers parse their own params out of
-            // arguments_json with the same helpers (args::get_string,
-            // parse_string_array, etc.) the legacy seven-tool flow uses,
-            // so error messages and validation stay byte-identical.
-            ToolResult r;
-            if      (action == "save")     r = h_save(c);
-            else if (action == "append")   r = h_append(c);
-            else if (action == "search")   r = h_search(c);
-            else if (action == "load")     r = h_load(c);
-            else if (action == "list")     r = h_list(c);
-            else if (action == "delete")   r = h_delete(c);
-            else if (action == "keywords") r = h_keywords(c);
-            else {
-                return ToolResult::error(
-                    "unknown action \"" + action + "\". Valid: \"save\", "
-                    "\"append\", \"search\", \"load\", \"list\", "
-                    "\"delete\", \"keywords\".");
-            }
-
-            // The inner handlers still cite the legacy seven-tool
-            // names (rag_save, rag_append, rag_search, ...) in their
-            // guidance prose. The model only has `knowledge` in its
-            // catalog, so any literal `rag_<verb>` reference would be
-            // a dangling identifier. Rewrite each occurrence in place
-            // to the dispatch form the model can actually call.
-            struct Sub { const char * from; const char * to; };
-            static const Sub kSubs[] = {
-                { "rag_append",   "knowledge(action=\"append\")"   },
-                { "rag_delete",   "knowledge(action=\"delete\")"   },
-                { "rag_keywords", "knowledge(action=\"keywords\")" },
-                { "rag_list",     "knowledge(action=\"list\")"     },
-                { "rag_load",     "knowledge(action=\"load\")"     },
-                { "rag_save",     "knowledge(action=\"save\")"     },
-                { "rag_search",   "knowledge(action=\"search\")"   },
-            };
-            for (const auto & s : kSubs) {
-                std::string from = s.from;
-                std::string to   = s.to;
-                size_t pos = 0;
-                while ((pos = r.content.find(from, pos)) != std::string::npos) {
-                    r.content.replace(pos, from.size(), to);
-                    pos += to.size();
-                }
-            }
-            return r;
-        })
-        .build();
-}
-
 // ----------------------------------------------------------------------------
-// knowledge_split_tools — focused alternative to the unified `knowledge` tool.
+// knowledge_split_tools — seven single-responsibility knowledge tools.
 // ----------------------------------------------------------------------------
-// Same per-action handlers, same on-disk store; the only difference is
-// surface. Smaller models avoid the "unknown action" / "wrong action for
-// these args" failure mode when the verb IS the tool name.
 std::vector<Tool> knowledge_split_tools(std::string root_dir) {
     auto store = build_rag_store(std::move(root_dir));
-    auto h_save     = make_save_handler    (store);
-    auto h_append   = make_append_handler  (store);
-    auto h_search   = make_search_handler  (store);
-    auto h_load     = make_load_handler    (store);
-    auto h_list     = make_list_handler    (store);
-    auto h_delete   = make_delete_handler  (store);
-    auto h_keywords = make_keywords_handler(store);
-
-    // Inner handlers cite the legacy seven-tool names (rag_save,
-    // rag_append, rag_search, ...) in their guidance prose because
-    // those were the original tool names. With knowledge_split_tools
-    // registered, the actual callable names are knowledge_save /
-    // knowledge_search / etc. — leaving rag_<verb> in handler output
-    // would point the model at non-existent tool names. Wrap every
-    // handler with a substitution that rewrites occurrences in place.
-    struct Sub { const char * from; const char * to; };
-    static const Sub kSubs[] = {
-        { "rag_append",   "knowledge_append"   },
-        { "rag_delete",   "knowledge_delete"   },
-        { "rag_keywords", "knowledge_keywords" },
-        { "rag_list",     "knowledge_list"     },
-        { "rag_load",     "knowledge_load"     },
-        { "rag_save",     "knowledge_save"     },
-        { "rag_search",   "knowledge_search"   },
-    };
-    auto rewrite_for_split = [](ToolResult r) -> ToolResult {
-        for (const auto & s : kSubs) {
-            std::string from = s.from;
-            std::string to   = s.to;
-            size_t pos = 0;
-            while ((pos = r.content.find(from, pos)) != std::string::npos) {
-                r.content.replace(pos, from.size(), to);
-                pos += to.size();
-            }
-        }
-        return r;
-    };
-    auto wrap = [&](auto inner) {
-        return [inner, rewrite_for_split](const ToolCall & c) -> ToolResult {
-            return rewrite_for_split(inner(c));
-        };
-    };
-    h_save     = wrap(h_save);
-    h_append   = wrap(h_append);
-    h_search   = wrap(h_search);
-    h_load     = wrap(h_load);
-    h_list     = wrap(h_list);
-    h_delete   = wrap(h_delete);
-    h_keywords = wrap(h_keywords);
 
     std::vector<Tool> out;
     out.reserve(7);
 
     out.push_back(Tool::builder("knowledge_save")
         .describe(
-            "Save knowledge — create or overwrite an entry. Only save "
-            "knowledge, skills, and mental notes for later retrieval — "
-            "not output content. Only save AFTER you have answered the "
-            "user.")
-        .param("title",    "string", "Short name (spaces become _).", true)
-        .param("keywords", "string", "Comma-separated keywords, e.g. \"python, async, sockets\".", true)
-        .param("content",  "string", "Body text.", true)
-        .param("fix",      "boolean", "Make immutable. Default false.", false)
-        .handle(h_save)
+            "Save a knowledge entry. Keywords identify the entry and "
+            "enable search. Save AFTER answering the user.\n"
+            "Example: {\"keywords\": \"python async\", "
+            "\"content\": \"Use asyncio for concurrent IO.\"}")
+        .param("keywords", "string",  "Entry keywords, e.g. \"python async sockets\".", true)
+        .param("content",  "string",  "Body text.", true)
+        .param("fix",      "boolean", "Make immutable (default false).", false)
+        .handle(make_save_handler(store))
         .build());
 
     out.push_back(Tool::builder("knowledge_append")
         .describe(
-            "Append to knowledge — add text to an existing entry. "
-            "Creates it if new (keywords required). Only save "
-            "knowledge, skills, and mental notes — not output content. "
-            "Only append AFTER you have answered the user.")
-        .param("title",    "string", "Entry title.", true)
+            "Append text to a knowledge entry. Creates if new.\n"
+            "Example: {\"keywords\": \"python async\", "
+            "\"content\": \"Also supports gather().\"}")
+        .param("keywords", "string", "Entry keywords.", true)
         .param("content",  "string", "Text to append.", true)
-        .param("keywords", "string", "Comma-separated keywords (required if new).", false)
-        .handle(h_append)
+        .handle(make_append_handler(store))
         .build());
 
     out.push_back(Tool::builder("knowledge_search")
         .describe(
-            "Recall knowledge — find entries by keyword. Returns "
-            "ranked matches with previews.")
-        .param("keywords",    "string",  "Comma-separated keywords, e.g. \"python, async\".", true)
+            "Search knowledge by keywords. Returns ranked matches.\n"
+            "Example: {\"keywords\": \"python\"}")
+        .param("keywords",    "string",  "Search keywords, e.g. \"python async\".", true)
         .param("max_results", "integer", "Results per page (default 10, max 20).", false)
         .param("page",        "integer", "Page number (default 1).", false)
-        .handle(h_search)
+        .handle(make_search_handler(store))
         .build());
 
     out.push_back(Tool::builder("knowledge_load")
-        .describe("Load knowledge — read full content of entries by title.")
-        .param("titles", "string", "Comma-separated titles, e.g. \"my_notes, project_x\".", true)
-        .handle(h_load)
+        .describe(
+            "Load full content of a knowledge entry.\n"
+            "Example: {\"keywords\": \"python async\"}")
+        .param("keywords", "string", "Entry keywords (same used to save).", true)
+        .handle(make_load_handler(store))
         .build());
 
     out.push_back(Tool::builder("knowledge_list")
-        .describe("List all knowledge entry titles.")
-        .param("prefix", "string",  "Filter by title prefix.", false)
+        .describe(
+            "List all knowledge entries.\n"
+            "Example: {}")
+        .param("prefix", "string",  "Filter entries by prefix.", false)
         .param("max",    "integer", "Max results (default 50).", false)
-        .handle(h_list)
+        .handle(make_list_handler(store))
         .build());
 
     out.push_back(Tool::builder("knowledge_delete")
-        .describe("Delete a knowledge entry. Immutable (fix-easyai-*) entries are protected.")
-        .param("title", "string", "Exact title.", true)
-        .handle(h_delete)
+        .describe(
+            "Delete a knowledge entry. Fixed entries are protected.\n"
+            "Example: {\"keywords\": \"python async\"}")
+        .param("keywords", "string", "Entry keywords.", true)
+        .handle(make_delete_handler(store))
         .build());
 
     out.push_back(Tool::builder("knowledge_keywords")
-        .describe("Show all keywords in use across knowledge entries.")
+        .describe(
+            "Show all keywords in use across entries.\n"
+            "Example: {}")
         .param("min_count", "integer", "Hide below N uses (default 1).", false)
         .param("max",       "integer", "Max results (default 200).", false)
-        .handle(h_keywords)
+        .handle(make_keywords_handler(store))
         .build());
 
     return out;

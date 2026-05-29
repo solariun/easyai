@@ -56,35 +56,18 @@
 
 namespace easyai::tools {
 
-// Build the RAG tool rooted at `root_dir`. Single-tool dispatcher:
-// exposes one `rag` tool with an `action` parameter selecting one of
-// "save" / "append" / "search" / "load" / "list" / "delete" /
-// "keywords"; remaining params (title, keywords, content, fix,
-// titles, prefix, max, max_results, page, min_count) are routed to
-// the matching action's handler internally.
+// Seven knowledge tools: knowledge_save, knowledge_append,
+// knowledge_search, knowledge_load, knowledge_list, knowledge_delete,
+// knowledge_keywords.
 //
-// The directory is created on demand at first save; missing-directory
-// at registration time is NOT an error (operator may not have
-// provisioned it yet).
+// Entry identity: sorted keywords joined by `_` = filename stem.
+// No separate title — keywords ARE the identifier.
 //
-// `root_dir` must not be empty; an empty path is a programmer error
-// and the tool will reject every call with a clear message.
+// Fixed entries: files starting with `fix-` on disk are immutable.
+// knowledge_save with `fix=true` prepends the prefix automatically.
 //
-// Fixed memories: action="save" accepts a `fix=true` argument that
-// promotes the saved entry to immutable. Immutable memories have a
-// `fix-easyai-` title prefix; save refuses to overwrite them and
-// delete refuses to remove them. Use this to seed system designs /
-// domain knowledge / hard rules the model must not rewrite mid-
-// conversation. action="search" / action="load" always see fixed
-// entries.
-Tool make_rag_tool(std::string root_dir);
-
-// Focused per-action variants of the `knowledge` tool: knowledge_save,
-// knowledge_append, knowledge_search, knowledge_load, knowledge_list,
-// knowledge_delete, knowledge_keywords. Same on-disk store and handlers
-// as the unified surface; for smaller tool-callers that handle
-// one-verb-per-tool more reliably than a discriminated `action`
-// string. The Toolbelt exposes this via tool_mode(Split | Both).
+// The directory is created on demand at first save.
+// `root_dir` must not be empty.
 std::vector<Tool> knowledge_split_tools(std::string root_dir);
 
 // Compact one-line vocabulary snapshot — every distinct keyword in

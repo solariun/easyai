@@ -1,8 +1,8 @@
 # easyai-mcp-server — standalone Model Context Protocol provider
 
 > **A model-free MCP server for thousands of parallel clients.** Same
-> tool catalogue `easyai-server` exposes (built-ins + the `memory`
-> tool + operator-defined `EASYAI-*.tools`), wired through the same
+> tool catalogue `easyai-server` exposes (built-ins + the `knowledge_*`
+> tools + operator-defined `EASYAI-*.tools`), wired through the same
 > lib-level factories — but no GGUF loaded, no `/v1/chat/completions`,
 > no webui. Just `POST /mcp`, sized for high concurrency and fail-fast
 > backpressure when the host runs out of headroom.
@@ -13,7 +13,7 @@
 > `[MCP_USER]`) on the chat server and the `easyai-mcp-server`'s
 > entire tool catalogue gets merged into the chat agent's toolbox.
 > Pattern: many lightweight chat servers, one shared
-> `easyai-mcp-server` exposing the `memory` tool + your
+> `easyai-mcp-server` exposing the `knowledge_*` tools + your
 > operator-defined tool packs centrally. See [`MCP.md`](MCP.md) §9.5.
 
 ---
@@ -92,9 +92,9 @@ The HTTP layer, paths, tool gating, concurrency, MCP auth.
 | `allow_fs` | bool | `--allow-fs` | `off` | Register the unified `fs` tool (action=`read` / `write` / `list` / `glob` / `grep` / `check_path` / `cwd` / `sandbox`), scoped to the sandbox. |
 | `allow_bash` | bool | `--allow-bash` | `off` | Register the `bash` tool. **Not** a hardened sandbox — runs with this process's user privileges. Per-call timeouts + output cap remain. |
 | `allow_python` | bool | (no `--allow-python`; `--no-python` flips off) | `on` | Register the compute tool (model-facing name **`evaluate`**, runtime `python3`) — runs snippets via `python3 -I -S -E -c <code>`. Renamed from `python3` → `evaluate` on 2026-05-26; legacy name still aliased. **Defaults ON**, auto-registers when `--sandbox` is set or `--allow-bash` is on. Isolated stdlib-only interpreter (no PYTHON* env, no site-packages, no cwd on `sys.path`). **READ-ONLY disk surface**: the Python preamble rejects any path outside the sandbox AND any write-mode `open()` regardless of path. The same policy is echoed in the `initialize.instructions` response field so MCP clients can surface it to their model. Defense-in-depth, **not** a hardened sandbox — `import os` / `import socket` / `import subprocess` / `import ctypes` all still work. Same per-call timeout + output cap as bash. Pass `--no-python` (or `[SERVER] allow_python = off`) to skip registration. |
-| `load_tools` | bool | `--no-tools` (negative) | `on` | Master switch for the built-in toolbelt. Set `off` to register zero default tools and rely on `external_tools` + `memory` only. |
+| `load_tools` | bool | `--no-tools` (negative) | `on` | Master switch for the built-in toolbelt. Set `off` to register zero default tools and rely on `external_tools` + knowledge tools only. |
 | `external_tools` | path | `--external-tools` | (none) | Directory of `EASYAI-*.tools` manifests. Per-file fault isolation. See [`EXTERNAL_TOOLS.md`](EXTERNAL_TOOLS.md). |
-| `memory` | path | `--memory` | (none) | Directory of `memory`-tool entries — enables the unified `memory(action=...)` tool (a passive RAG technique). The legacy key `rag` (CLI `--RAG`) is still read for back-compat. See [`RAG.md`](RAG.md). |
+| `memory` | path | `--memory` | (none) | Directory of knowledge entries — enables the seven split `knowledge_*` tools (a passive RAG technique). The legacy key `rag` (CLI `--RAG`) is still read for back-compat. See [`RAG.md`](RAG.md). |
 | `api_key` | string | `--api-key` | (none — open) | Bearer token for `/health`, `/metrics`, `/v1/tools`. `/health` is intentionally NOT gated even when set, so liveness probes don't need a credential. The `/mcp` endpoint uses `[MCP_USER]` instead. |
 | `mcp_auth` | enum | (no CLI; `--no-mcp-auth` overrides) | `auto` | `auto` (Bearer required iff `[MCP_USER]` non-empty), `on` (force require — invalid against an empty table), `off` (force open). |
 | `threads` | int | `-t`, `--threads` | `256` | cpp-httplib worker pool size. Each worker handles one request at a time; excess queues. |
@@ -133,7 +133,7 @@ port   = 8089
 memory = /home/me/.easyai/rag
 ```
 
-Localhost only, the `memory` tool enabled, no fs/bash, no auth. Fits on a laptop.
+Localhost only, knowledge tools enabled, no fs/bash, no auth. Fits on a laptop.
 
 #### Production high-concurrency deployment
 
@@ -197,7 +197,7 @@ No required arguments. Pass `--help` for the live list.
 | `--no-python` | `allow_python = off` | python3 on | Drop the default-on compute tool (model-facing `evaluate`, runtime `python3`). |
 | `--no-tools` | `load_tools = off` | n/a | Skip built-in toolbelt entirely. |
 | `--external-tools <dir>` | `external_tools` | (none) | Load `EASYAI-*.tools`. |
-| `--memory <dir>` | `memory` | (none) | Enable the unified `memory(action=...)` tool. `--RAG` is still accepted as a back-compat alias. |
+| `--memory <dir>` | `memory` | (none) | Enable the seven split `knowledge_*` tools. `--RAG` is still accepted as a back-compat alias. |
 | `--api-key <token>` | `api_key` | (none — open) | Bearer for `/metrics`, `/v1/tools`. |
 | `--no-mcp-auth` | (n/a) | `false` | Force `/mcp` open. Emergency override. |
 | `-t`, `--threads <n>` | `threads` | `256` | cpp-httplib worker pool size. |
@@ -239,7 +239,7 @@ curl -fsS http://localhost:8089/mcp \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer YOUR-TOKEN' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
-       "params":{"name":"memory","arguments":{"action":"search","keywords":["user-prefs"]}}}'
+       "params":{"name":"knowledge_search","arguments":{"keywords":["user-prefs"]}}}'
 ```
 
 ### `initialize.instructions` — closed-set + write/edit policy
@@ -343,10 +343,10 @@ parse + serialise. Only `tools/call` enters the limiter.
 
 Tools that share state synchronise themselves at the lib level:
 
-- **`memory` tool** (`src/rag_tools.cpp`): `RagStore::mu` is a
-  `std::shared_mutex`. The `search` / `load` / `list` / `keywords`
-  actions take `std::shared_lock` — many parallel readers; `save` /
-  `delete` take `std::unique_lock`. The index is eager-loaded
+- **Knowledge tools** (`src/rag_tools.cpp`): `RagStore::mu` is a
+  `std::shared_mutex`. `knowledge_search` / `knowledge_load` / `knowledge_list` / `knowledge_keywords`
+  take `std::shared_lock` — many parallel readers; `knowledge_save` /
+  `knowledge_delete` take `std::unique_lock`. The index is eager-loaded
   under a unique lock at startup so readers never need to upgrade.
   Atomic-rename writes (tempfile + `rename(2)`) make on-disk reads
   tear-free regardless of the lock.
@@ -403,12 +403,12 @@ A 1000-client burst with default config:
 | Small team (5-20 clients) | 64 | 64 |
 | Large team / public-facing | 256 (default) | 256 (default) |
 | Heavy fork pressure (lots of bash / external-tools) | 256 | 64-128 (cap fork rate) |
-| Light tools (`memory` tool only, no fork) | 512 | 512 |
+| Light tools (knowledge tools only, no fork) | 512 | 512 |
 
 Watch `easyai_mcp_in_flight` (gauge) and `easyai_mcp_rejected_total`
 (counter) on `/metrics`. If `rejected_total` is climbing, either
 raise `--max-concurrent-calls` or right-size the host (more cores,
-faster disk for the `memory` tool, larger libcurl connection pool for
+faster disk for the knowledge tools, larger libcurl connection pool for
 `web_fetch`).
 
 ---
@@ -428,7 +428,7 @@ just one consumer of those factories.
 | `fs` (action=`read` / `write` / `list` / `glob` / `grep` / `check_path` / `cwd` / `sandbox`) | `easyai::tools::fs(sandbox)` | `--allow-fs` |
 | `bash` | `easyai::tools::bash(sandbox)` | `--allow-bash` |
 | `evaluate` (legacy alias: `python3`) | `easyai::tools::python3(sandbox)` | default ON when sandbox set or `--allow-bash`; `--no-python` to skip |
-| `memory` (action=`save` / `append` / `search` / `load` / `list` / `delete` / `keywords`) | `easyai::tools::make_rag_tool(dir)` | `--memory <dir>` (alias `--RAG`) |
+| `knowledge_save`, `knowledge_append`, `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords` | `easyai::tools::knowledge_split_tools(dir)` | `--memory <dir>` (alias `--RAG`) |
 | (any `EASYAI-*.tools` manifest) | `easyai::load_external_tools_from_dir(dir, reserved)` | `--external-tools <dir>` |
 
 The `plan` tool is **deliberately omitted** in `easyai-mcp-server` —
@@ -452,7 +452,8 @@ std::vector<easyai::Tool> tools;
 auto tb = easyai::cli::Toolbelt().sandbox("/srv/work").allow_fs();
 for (auto & t : tb.tools()) tools.push_back(std::move(t));
 
-tools.push_back(easyai::tools::make_rag_tool("/var/lib/myapp/rag"));
+for (auto & t : easyai::tools::knowledge_split_tools("/var/lib/myapp/rag"))
+    tools.push_back(std::move(t));
 
 // Your custom tools, side by side with the built-ins:
 tools.push_back(easyai::Tool::builder("my_internal_query")
@@ -513,7 +514,7 @@ Bearer realm="easyai-mcp"` header.
    old tokens are immediately invalid. There is no in-memory token
    cache that would survive a config change.
 4. **Don't enable `--allow-bash` with auth-open mode** — the worst
-   `/mcp` can dispatch is the `memory` tool + read-only `web_*` + your
+   `/mcp` can dispatch is the knowledge tools + read-only `web_*` + your
    `--external-tools` allowlist.
 
 ---
@@ -619,7 +620,7 @@ journalctl -u easyai-mcp-server | grep -E '\[mcp\]|external-tools|RAG'
 - `[mcp] request from user 'gustavo'` — every authenticated request.
 - `easyai-mcp-server: MCP auth ENABLED — N user(s) loaded from <path>`
   — startup posture confirmation.
-- `easyai-mcp-server: memory enabled (single memory tool), root = <path>` — the `memory` tool wired.
+- `easyai-mcp-server: knowledge enabled (7 split tools), root = <path>` — the knowledge tools wired.
 - `easyai-mcp-server: loaded N external tool(s) from M file(s)` —
   external-tools dir scan.
 - `easyai-mcp-server: [external-tools] error: <path>: ...` — manifest
@@ -677,7 +678,7 @@ the agent process can do.
 | Serves a webui? | Yes (embedded SvelteKit) | No |
 | Speaks `/mcp` (JSON-RPC 2.0)? | Yes | Yes |
 | Designed for thousands of parallel MCP clients? | No (single engine, mutex-serialised) | Yes (256+ workers, in-flight limiter) |
-| `memory` tool, external-tools, fs_*, bash | Yes | Yes (same factories) |
+| `knowledge_*` tools, external-tools, fs_*, bash | Yes | Yes (same factories) |
 | systemd unit ships with the installer | Yes (`scripts/install_easyai_server.sh`) | No (run under your own supervisor) |
 | Right binary when… | …you want one process to BOTH chat AND expose tools to other AI apps | …you want a dedicated tool API for thousands of parallel clients without the model in the loop |
 
@@ -691,9 +692,9 @@ the agent process can do.
   consumer drives its own model and just needs the tool catalogue.
 
 Tools registered in both servers come from the **same lib factories**
-and operate on the **same on-disk data** (memory dir, sandbox dir,
-external-tools manifests). A `memory(action="save")` from the chat
-server is visible to a `memory(action="search")` from the MCP server
+and operate on the **same on-disk data** (knowledge dir, sandbox dir,
+external-tools manifests). A `knowledge_save` from the chat
+server is visible to a `knowledge_search` from the MCP server
 immediately — filesystem ACLs are the boundary, not process identity.
 
 ---
@@ -725,11 +726,11 @@ What's planned next, roughly in priority order:
    image (Claude Desktop spawns the binary directly).
 5. **Per-tool ACL via `[TOOLS]`.** The section is reserved in the
    parser; populating it currently does nothing. A future release
-   wires `mcp_allowed = memory, datetime` etc. so `[MCP_USER]
-   gustavo` can dispatch the `memory` tool but not `bash`.
-6. **MCP resources surface.** Expose `memory` entries as MCP resources
+   wires `mcp_allowed = knowledge_*, datetime` etc. so `[MCP_USER]
+   gustavo` can dispatch the knowledge tools but not `bash`.
+6. **MCP resources surface.** Expose knowledge entries as MCP resources
    at URIs like `rag://entry-name`, so a client can `resources/read`
-   without going through `tools/call memory` with `action="load"`.
+   without going through `tools/call knowledge_load`.
 7. **Installer + systemd unit.** Today the binary is positioned as
    a tool for "other environments" (containers, custom supervisors,
    non-Linux). If demand for a Debian/Ubuntu installer materialises,
@@ -747,8 +748,8 @@ What's planned next, roughly in priority order:
   upgrade / backup).
 - [`MCP.md`](MCP.md) — the MCP protocol surface, per-client
   connection cookbook, security model.
-- [`RAG.md`](RAG.md) — persistent registry, the unified `memory(action=...)`
-  tool, workflows.
+- [`RAG.md`](RAG.md) — persistent registry, the split
+  `knowledge_*` tools, workflows.
 - [`EXTERNAL_TOOLS.md`](EXTERNAL_TOOLS.md) — operator-defined
   external tools (`EASYAI-*.tools` JSON manifests).
 - [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md) — seven audit passes,

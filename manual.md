@@ -849,8 +849,7 @@ example, and has been told what NOT to use this for.
 
 A single tool that dispatches on a top-level `action` field. Reach for
 this when you have N closely-related operations that share state and
-parameters: `plan` (add / update / delete / list), `memory` (save / append
-/ search / load / list / delete / keywords). Recipe:
+parameters: `plan` (add / update / delete / list). Recipe:
 
 1. Open with the purpose sentence + `Pick an action; the parameters
    needed depend on which action you choose. N actions are supported:`
@@ -1494,26 +1493,27 @@ for (const auto & t : loaded.tools) {
   state, write a C++ tool with a captured `std::shared_ptr` to a
   state object.
 
-### 3.3.6 memory — persistent registry / long-term memory
+### 3.3.6 knowledge — persistent registry / long-term memory
 
 > The authoritative guide is [`RAG.md`](RAG.md). The summary below
 > is a quick reference.
 
-The `memory` tool gives the agent a tool surface for remembering
-things across sessions. Under the hood it uses **a passive RAG
+The knowledge tools give the agent a tool surface for remembering
+things across sessions. Under the hood they use **a passive RAG
 technique** — keyword-indexed Markdown files the agent saves and
-searches itself, with no embedding model or vector store. One tool
-with seven sub-actions:
+searches itself, with no embedding model or vector store. Seven
+independent tools:
 
 ```cpp
-engine.add_tool(easyai::tools::make_rag_tool("/var/lib/easyai/rag"));
-// memory(action="save",     title, keywords[], content, fix?)
-// memory(action="append",   title, content, keywords?)        — grow existing or create new (keywords required if new)
-// memory(action="search",   keywords[], max_results=10)
-// memory(action="load",     titles[1..4])
-// memory(action="list",     prefix?, max=50)
-// memory(action="delete",   title)
-// memory(action="keywords", min_count=1, max=200)
+for (auto & t : easyai::tools::knowledge_split_tools("/var/lib/easyai/rag"))
+    engine.add_tool(std::move(t));
+// knowledge_save      keywords[], content, fix?
+// knowledge_append    keywords[], content
+// knowledge_search    keywords[], max_results=10
+// knowledge_load      keywords[][1..4]
+// knowledge_list      prefix?, max=50
+// knowledge_delete    keywords[]
+// knowledge_keywords  min_count=1, max=200
 ```
 
 Or via the `--memory <dir>` flag in `easyai-server`, `easyai-cli`, and
@@ -1521,26 +1521,29 @@ Or via the `--memory <dir>` flag in `easyai-server`, `easyai-cli`, and
 alias). The systemd-installed server passes
 `--memory /var/lib/easyai/rag` by default.
 
-Each entry is one Markdown file `<title>.md` in the configured
-directory:
+Keywords ARE the identifier — there is no separate `title` parameter.
+Sorted keywords joined by `_` become the filename.
+`"python async"` produces `async_python.md`. Immutable entries use
+the `fix-` prefix (e.g. `fix-async_python.md`).
+
+Each entry is one Markdown file in the configured directory:
 
 ```
-keywords: user-prefs, hardware, radv
+keywords: async, python
 
 Body content here. Free-form UTF-8 up to 256 KB.
 Operator-readable, hand-editable, grep-able.
 ```
 
-Constraints: title and keywords match `^[A-Za-z0-9._+-]+$` (≤ 64 / 32
+Constraints: keywords match `^[A-Za-z0-9._+-]+$` (≤ 32
 bytes), 1..8 keywords per entry, content ≤ 256 KiB, max 4 loads per
 call.
 
 The model is encouraged (in the tool descriptions) to save
 aggressively, search before assuming it doesn't know something, and
-delete stale entries to keep the index sharp. A model that emits
-`rag(action=...)` is routed to `memory` as a back-compat alias. See
-`RAG.md` for the full workflow including document ingestion, the
-positive cycle, and the operator's audit / backup recipes.
+delete stale entries to keep the index sharp. See `RAG.md` for the
+full workflow including document ingestion, the positive cycle, and
+the operator's audit / backup recipes.
 
 ### 3.4 Streaming token output
 
@@ -3126,7 +3129,7 @@ state. To run `easyai-local` without any tools at all:
 For the server: `--no-local-tools` (renamed from `--no-tools` so the
 flag's scope is unambiguous now that `easyai-server` can also be an
 MCP client — `--no-local-tools` skips the LOCAL toolbelt only,
-leaving the `memory` tool, external-tools, and any tools fetched via
+leaving the `knowledge_*` tools, external-tools, and any tools fetched via
 `--mcp` intact).
 
 ### 9.4 Production deployment — replacing `llama-server`
@@ -3269,8 +3272,8 @@ The preamble has up to three blocks:
 * `# KNOWLEDGE CUTOFF` — training-cutoff hint + rule to verify
   post-cutoff facts.
 * `# MEMORY VOCABULARY` — top-40 keyword index when `--memory`
-  is set (so the model can dispatch `memory(action="search")`
-  without first calling `memory(action="keywords")`).
+  is set (so the model can dispatch `knowledge_search`
+  without first calling `knowledge_keywords`).
 
 For regression testing the preamble can be disabled per-request
 without restarting the server:

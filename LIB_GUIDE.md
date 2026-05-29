@@ -81,7 +81,7 @@ chained statement. None of them throw.
 | `fs` (or split `fs_read`/`fs_write`/…) | `.sandbox(dir)` set OR `.allow_bash` / `.allow_python` | Read/write/edit/list/glob/grep, scoped to the sandbox root. |
 | `bash` | `.allow_bash()` | Shell command via `/bin/sh -c`. Not a hardened sandbox. |
 | `evaluate` (legacy name `python3`) | `.allow_python()` (default ON when fs is on) | Read-only Python 3 stdlib evaluator, sandboxed. |
-| `memory(action=…)` (or split `memory_save`/`memory_search`/…) | `.memory(dir)` | Persistent registry (markdown per entry). |
+| `knowledge_save`/`knowledge_search`/`knowledge_load`/… (7 tools) | `.memory(dir)` | Persistent registry (markdown per entry). |
 | External tools | `.external_tools(dir)` | Loads every `EASYAI-*.tools` manifest. |
 | `tool_lookup` | always on when `with_default_tools()` | Catalogue + per-tool manual access. |
 

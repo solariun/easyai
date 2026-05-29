@@ -617,7 +617,7 @@ Vague or under-described tools produce malformed calls, the wrong action,
 or silent loops where the model retries variants until the budget runs
 out. Two patterns are used in-tree:
 
-**Multi-action tools** (`plan`, `memory`) dispatch on a top-level `action`
+**Multi-action tools** (`plan`) dispatch on a top-level `action`
 field. The description must enumerate every action and state, per action,
 what is Required and what is Optional. The shape:
 
@@ -964,7 +964,7 @@ training cutoff.  Without a fresh wall-clock signal each turn, the
 model will happily insist that "this year" is the year it was
 trained, and confidently misreport leaders, prices, scores, and
 weather.  And without a hint of what's in its persistent memory,
-the model either burns a `memory(action="keywords")` hop on every
+the model either burns a `knowledge_keywords` hop on every
 question or skips memory entirely and goes to the web.  The fix
 is well known but worth describing as it lives in this codebase,
 because it interacts subtly with client-supplied system prompts.
@@ -1022,7 +1022,7 @@ Never present a post-cutoff fact as known.
 # MEMORY VOCABULARY (the keywords your private memory currently
 has tagged — the FIRST place to look for anything you might
 already know)
-12 entries (most-common first; call memory(action="search",
+12 entries (most-common first; call knowledge_search(
 keywords=["<name>", ...]) to recall):
 easyai(8) claude(5) bitnet(3) build(3) iteration(2) …
 ```
@@ -1036,7 +1036,7 @@ Each block is conditional:
 **Block ordering (2026-05-26).** The vocab block is positioned at
 the **tail** of the preamble, AFTER the KNOWLEDGE LOOP and CITE
 SOURCES rules. The vocab is the only block that mutates between
-requests (a `memory(action="save")` shifts the keyword count map),
+requests (a `knowledge_save` shifts the keyword count map),
 so putting it last means a memory write only invalidates the
 SUFFIX of the prompt-eval KV cache. The stable date/cutoff/rules
 prefix stays warm across writes.
@@ -1047,7 +1047,7 @@ prefix stays warm across writes.
 filesystems with second-resolution mtime can serve up to one
 second of stale vocab on rapid same-second writes that net to
 zero file-count change — accepted because vocab is advisory; the
-actual `memory(action="search")` always hits the live index. See
+actual `knowledge_search` always hits the live index. See
 SECURITY_AUDIT §23.3.
 
 Cutoff date comes from `--knowledge-cutoff YYYY-MM` (default
@@ -1092,7 +1092,7 @@ forward the field to the model.
 (`easyai::tools::render_memory_vocabulary`) does a fresh disk scan
 on every call (~10-50ms for typical stores, up to ~200ms for very
 large ones). No persistent state — safe to call concurrently with
-memory-tool writes (the underlying `RagStore` uses `shared_mutex`).
+knowledge-tool writes (the underlying `RagStore` uses `shared_mutex`).
 Scan cost is rounding error against inference latency, so the
 server pays it per request; `local` and `cli` pay it once.
 
@@ -1134,7 +1134,7 @@ and aggregates results.
 ### The trust boundary
 
 Built-in tools (`datetime`, the unified `web` and `fs` tools, `bash`,
-the unified `memory` dispatcher, …) are C++ code we wrote and reviewed. Adding a new built-in is a code change,
+the `knowledge_*` tools, …) are C++ code we wrote and reviewed. Adding a new built-in is a code change,
 goes through review, ships in a binary release. That's the right
 process for tools that the agent's *author* controls.
 
@@ -1313,7 +1313,7 @@ the trust surface in ways the operator didn't sign up for.
 Lives in `src/rag_tools.cpp` and `include/easyai/rag_tools.hpp`.
 User-facing documentation: [`RAG.md`](RAG.md). Operator guide:
 [`LINUX_SERVER.md`](LINUX_SERVER.md). This section describes *why*
-the subsystem is shaped the way it is. The `memory` tool is **a
+the subsystem is shaped the way it is. The knowledge tools are **a
 passive RAG technique** — keyword-indexed Markdown files the agent
 saves and searches itself, no embedding model or vector store.
 
@@ -1322,10 +1322,11 @@ saves and searches itself, no embedding model or vector store.
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                            MODEL                                 │
-│            (sees ONE `memory` tool with seven actions)           │
+│          (sees SEVEN keyword-only knowledge tools)               │
 │                                                                  │
-│   memory(action="save" | "append" | "search" | "load" |         │
-│          "list" | "delete" | "keywords", …)                      │
+│   knowledge_save, knowledge_append, knowledge_search,            │
+│   knowledge_load, knowledge_list, knowledge_delete,              │
+│   knowledge_keywords                                             │
 └─────────────────────────────────────────────────────────────────┘
                                 │
                                 │  tool_call(name, arguments_json)
@@ -1340,8 +1341,10 @@ saves and searches itself, no embedding model or vector store.
 │                src/rag_tools.cpp — RagStore                      │
 │                                                                  │
 │   ┌──────────────────┐       ┌────────────────────────────────┐ │
-│   │   std::mutex mu  │ ◄───► │ std::map<title, EntryMeta>     │ │
+│   │   std::mutex mu  │ ◄───► │ std::map<key, EntryMeta>       │ │
 │   │  (one per store) │       │   keywords + mtime + bytes     │ │
+│   │                  │       │   key = sorted keywords joined │ │
+│   │                  │       │   by "_" → filename             │ │
 │   │                  │       │   lazy-loaded from disk on     │ │
 │   │                  │       │   first call, refreshed by     │ │
 │   │                  │       │   every save / delete           │ │
@@ -1357,35 +1360,36 @@ saves and searches itself, no embedding model or vector store.
 ┌─────────────────────────────────────────────────────────────────┐
 │             /var/lib/easyai/rag/    (filesystem)                 │
 │                                                                  │
-│   <title>.md           one file per entry, plain Markdown        │
-│   <title>.md.tmp.<pid> transient — only during a save            │
-│   README.md            operator-readable, no `keywords:` header  │
+│   <sorted_keywords>.md  one file per entry, plain Markdown       │
+│   <sorted_keywords>.md.tmp.<pid> transient — only during a save  │
+│   README.md             operator-readable, no `keywords:` header │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 The flow has four invariants worth calling out:
 
-1. **The model is the only writer.** The `save` and `delete`
-   actions are called from the model's tool-call loop; the operator
-   may hand-edit files but the runtime never auto-writes from the
-   server side. This makes "what's in memory" a function of "what
-   the agent decided to remember", which is the part vector
-   stores get wrong.
-2. **The index is small.** Every search / list / keywords call
-   stays in memory — no disk read. The body is only read when the
-   model commits to one specific entry via the `load` action. A
-   1000-entry store with avg 200-byte body uses ~200 KiB on disk and
-   a few hundred bytes per entry in the index.
+1. **The model is the only writer.** The `knowledge_save` and
+   `knowledge_delete` tools are called from the model's tool-call
+   loop; the operator may hand-edit files but the runtime never
+   auto-writes from the server side. This makes "what's in memory"
+   a function of "what the agent decided to remember", which is the
+   part vector stores get wrong.
+2. **The index is small.** Every `knowledge_search` /
+   `knowledge_list` / `knowledge_keywords` call stays in memory —
+   no disk read. The body is only read when the model commits to
+   one specific entry via `knowledge_load`. A 1000-entry store with
+   avg 200-byte body uses ~200 KiB on disk and a few hundred bytes
+   per entry in the index.
 3. **Atomic-rename writes.** The tempfile + rename pattern means a
-   concurrent reader (another `load` while a save is in flight)
-   sees the OLD body or the NEW body but never a torn write. No
-   locking needed on the read path.
-4. **Path-safety by regex.** Title and keyword identifiers must
-   match `^[A-Za-z0-9._+-]+$`. The title is concatenated with `.md`
-   to form the on-disk path — the regex closes path-traversal at
-   parse time. There is no other access-control layer; the
-   filesystem ACL on `/var/lib/easyai/rag/` is the deployment
-   boundary.
+   concurrent reader (another `knowledge_load` while a save is in
+   flight) sees the OLD body or the NEW body but never a torn write.
+   No locking needed on the read path.
+4. **Path-safety by regex.** Keyword identifiers must match
+   `^[A-Za-z0-9._+-]+$`. Keywords are sorted and joined by `_` to
+   form the filename (concatenated with `.md`) — the regex closes
+   path-traversal at parse time. There is no other access-control
+   layer; the filesystem ACL on `/var/lib/easyai/rag/` is the
+   deployment boundary.
 
 ### Why a tag registry, not a vector store
 
@@ -1397,10 +1401,10 @@ us look up entries in O(1) per lookup with zero embedding inference.
 
 When we later want progressive recall (auto-inject the K most
 relevant entries on session start), THAT layer can do similarity
-scoring on top. The `memory` tool itself stays simple: just files
-and keywords. The composition order matters: vector store on top of
-the `memory` tool works fine; the `memory` tool on top of a vector
-store would be either redundant or fighting the index.
+scoring on top. The knowledge tools themselves stay simple: just
+files and keywords. The composition order matters: vector store on
+top of the knowledge tools works fine; the knowledge tools on top of
+a vector store would be either redundant or fighting the index.
 
 ### Why one Markdown file per entry, not a database
 
@@ -1415,41 +1419,33 @@ from `rename(2)`. We get indexing from a 200-line in-memory map
 that's rebuilt on first use (cost: parse N small files once per
 process — fast).
 
-### One tool with seven sub-actions
+### Seven keyword-only tools
 
-The surface is **one** `memory(action=...)` tool with seven sub-actions
-(save / append / search / load / list / delete / keywords). This
-keeps the model's tool catalog short — one entry instead of seven —
-which most modern tool-callers handle cleanly and which saves a few
-hundred tokens per turn that would otherwise go to schema
-definitions in the prompt. (A model emitting `rag(action=...)` is
-routed to `memory` as a back-compat alias.)
+The surface is **seven separate tools**: `knowledge_save`,
+`knowledge_append`, `knowledge_search`, `knowledge_load`,
+`knowledge_list`, `knowledge_delete`, `knowledge_keywords`. There
+is no unified `memory(action=...)` dispatcher — each tool has its
+own flat schema and handler.
 
-The schema is flat (every parameter optional except `action`) because
-JSON Schema's discriminated-union shapes (`oneOf` with a
-discriminator) trip up smaller / quantised tool-callers far more
-often than a flat "everything optional" schema does. Validation
-stays runtime: each handler rejects calls missing its required
-fields with a crisp message naming the dispatch form.
+Keywords ARE the identifier. There is no `title` parameter — the
+sorted keywords joined by `_` become the filename. This makes the
+naming deterministic and search-friendly: any subset of keywords
+finds related entries.
 
-Behind the discriminator the seven handlers are still distinct
-closures with the same validation messages and the same audit shape
-— just multiplexed through one entry point. `memory(action="save",
-...)` and `memory(action="search", ...)` are still distinguishable in
-hooks / logs by their `action` argument, so curating by intent
-remains possible.
+Immutable entries use the `fix-` prefix (e.g. `fix-easyai_design`).
+Pass `fix=true` on `knowledge_save` to mint one;
+`knowledge_save` refuses to overwrite it and `knowledge_delete`
+refuses to remove it.
 
-(Until 2026-05-09 a `--split-rag` flag opted back into a legacy
-layout that exposed the seven actions as seven separate tools. That
-flag was removed alongside the unification of the web and fs tool
-surfaces; the dispatcher above is the only layout now.)
+The factory `knowledge_split_tools(dir)` returns a
+`std::vector<Tool>` containing all seven tools.
 
 The natural workflow is: save (write a new memory), append (grow an
 existing one without losing its body), search + load (read in two
 steps because previewing keeps the prompt slim), list (browse),
 delete (curate), keywords (vocabulary review).
 
-### Why max 4 entries per `memory(action="load")`
+### Why max 4 entries per `knowledge_load`
 
 Past 4, the model is almost always trying to drown the prompt in
 stale content. The cap forces "preview first, narrow second" —
@@ -1468,16 +1464,16 @@ This is the same lever the system prompt uses, but at finer
 granularity — one tool's behaviour at a time. As we accumulate
 operational experience we'll tune the descriptions further.
 
-### Where the `memory` tool fits in the four-tier API rule
+### Where the knowledge tools fit in the four-tier API rule
 
-| Tier | Audience | `memory` surface |
+| Tier | Audience | knowledge surface |
 | --- | --- | --- |
-| 1 — façade | beginner | `easyai::Agent` could opt into the `memory` tool with a single setter (future). |
-| 2 — fluent | intermediate | One factory: `make_rag_tool(dir)` returns the `memory(action=...)` dispatcher. |
+| 1 — façade | beginner | `easyai::Agent` could opt into the knowledge tools with a single setter (future). |
+| 2 — fluent | intermediate | One factory: `knowledge_split_tools(dir)` returns `std::vector<Tool>` with all seven tools. |
 | 3 — operator | deployment | `--memory <dir>` flag on all three CLIs (legacy alias `--RAG`); systemd unit passes `--memory` for free. |
 | 4 — escape hatch | extension | The `RagStore` private class is replaceable: a future variant could swap files for SQLite or a vector store while keeping the same handler signatures. |
 
-### What the `memory` tool is not
+### What the knowledge tools are not
 
 - **Not a knowledge base.** The agent decides what goes in. Stale
   entries persist until the agent (or operator) deletes them.
@@ -1511,10 +1507,10 @@ A multi-action shape (vs. four separate tools) is deliberate:
    per action.
 
 The trade-off — one less informative tool name in audit logs — is
-worth it for catalogue compactness.  The `memory` tool (§5g) is the
-same single-tool shape; for both, the `action` argument is what
+worth it for catalogue compactness.  The knowledge tools (§5g), by
+contrast, are split into seven separate tools — the tool name itself
 distinguishes calls in hooks / logs, and operators read the rendered
-checklist (plan) or the on-disk Markdown (`memory`), not the raw
+checklist (plan) or the on-disk Markdown (knowledge), not the raw
 tool calls.
 
 ### Statuses encode display intent, not workflow
@@ -1598,7 +1594,7 @@ The callback runs synchronously on the dispatching thread
 default rendered path is one `ostringstream` build + a single
 `spinner_.write()` and that's it.
 
-### Plan vs. `memory` vs. external-tools
+### Plan vs. knowledge tools vs. external-tools
 
 Three persistence-shaped tool families coexist; their roles
 are distinct:
@@ -1606,16 +1602,16 @@ are distinct:
 | Tool      | Lifetime          | Audience       | Writer |
 |-----------|-------------------|----------------|--------|
 | Plan      | one chat session  | the user, live | model  |
-| `memory`  | across sessions   | the model     | model  |
+| `knowledge_*` | across sessions | the model    | model  |
 | Manifest  | across deploys    | the operator  | operator |
 
-A plan item is the next ten minutes of work.  A `memory` entry is
+A plan item is the next ten minutes of work.  A knowledge entry is
 "things the model wants to remember next time."  A manifest
 tool is "binaries the operator pre-authorised."  Confusing them
-produces predictable failure modes (`memory` entries that are stale
+produces predictable failure modes (knowledge entries that are stale
 within an hour because the model used them as a plan; manifest
 tools the model never calls because it expects them to behave
-like the `memory` tool).  Keeping the surfaces distinct keeps the
+like the knowledge tools).  Keeping the surfaces distinct keeps the
 model oriented.
 
 ---
@@ -1712,7 +1708,7 @@ The agent loop has two consumers of the tool catalogue:
    OpenWebUI, custom clients) over MCP.
 
 Both consume the SAME `ctx->default_tools` vector. The work that
-went into wiring `Toolbelt` + the `memory` tool + external-tools is
+went into wiring `Toolbelt` + the knowledge tools + external-tools is
 reused verbatim — no second serialiser, no second registry, no second
 auth surface. Adding a new tool means one C++ change (or one
 manifest file) and every consumer sees it on next restart.
@@ -1799,7 +1795,7 @@ with the same `inputSchema` declared in the manifest. An operator
 who declares `git_log` in `EASYAI-internal.tools` exposes it
 simultaneously to:
 
-- The local model (which calls `memory(action="search")` and dispatches).
+- The local model (which calls `knowledge_search` and dispatches).
 - Cursor's chat (via MCP `tools/call`).
 - Claude Desktop (via the stdio bridge).
 

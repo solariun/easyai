@@ -25,7 +25,7 @@ the lib surface.
 | `easyai-local`       | Local-only REPL: loads a GGUF in-process via `easyai::Engine` (driven through `easyai::Session`). Drop-in `llama-cli` replacement — one-shot scripting (`-p`), tools, presets, optional `<think>` strip, sandboxed `fs_*` tools, opt-in `bash` tool. |
 | `easyai-cli`         | Agentic OpenAI-protocol client — no local model.  REPL, `--shell` (hybrid AI shell), or `-p` one-shot.  Full sampling control (`--temperature`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--frequency-penalty`, `--presence-penalty`, `--seed`, `--max-tokens`, `--stop`), plan tool, server-management subcommands (`--list-models`, `--list-tools`, `--health`, `--props`, `--metrics`, `--set-preset`).  HTTPS via OpenSSL; `--insecure-tls` / `--ca-cert` for dev/internal CAs.  Full doc: [`easyai-cli.md`](easyai-cli.md). |
 | `easyai-server`      | Drop-in `llama-server` replacement: OpenAI-compat HTTP **with full SSE streaming**, embedded SvelteKit webui, Bearer auth, Prometheus `/metrics`, KV-cache controls, flash-attn, mlock.  Speaks MCP, OpenAI, Ollama from one process.  Full doc: [`easyai-server.md`](easyai-server.md). |
-| `easyai-mcp-server`  | **Standalone Model Context Protocol provider — no model loaded.** Same tool catalogue as `easyai-server` (built-ins + the `memory` tool + external-tools), exposed over `POST /mcp` with a configurable cpp-httplib worker pool (`--threads`) and an in-flight `tools/call` cap (`--max-concurrent-calls`) for thousands-of-clients deployments.  Full doc: [`easyai-mcp-server.md`](easyai-mcp-server.md). |
+| `easyai-mcp-server`  | **Standalone Model Context Protocol provider — no model loaded.** Same tool catalogue as `easyai-server` (built-ins + knowledge tools + external-tools), exposed over `POST /mcp` with a configurable cpp-httplib worker pool (`--threads`) and an in-flight `tools/call` cap (`--max-concurrent-calls`) for thousands-of-clients deployments.  Full doc: [`easyai-mcp-server.md`](easyai-mcp-server.md). |
 | `easyai-library-demo`| Five-line `easyai::Session` template — pair with [`LIB_GUIDE.md`](LIB_GUIDE.md).  The smallest "build an agent, register a tool, chat" program in the repo. |
 | `easyai-agent`       | A demo agent showing every built-in tool plus an inline custom tool.                                                                                |
 | `easyai-recipes`     | Tutorial agent paired with `manual.md` — implements `today_is` and `weather` (HTTP-calling) from scratch.                                          |
@@ -209,14 +209,14 @@ need a separate model file. The old installer compat lines for
 
 Every binary that loads `--memory <dir>` now auto-injects a compact
 keyword-vocabulary block into the system prompt so the model knows
-what it has tagged without having to call `memory(action="keywords")`
+what it has tagged without having to call `knowledge_keywords`
 first. The block looks like:
 
 ```
 # MEMORY VOCABULARY (the keywords your private memory currently
 has tagged — the FIRST place to look for anything you might
 already know)
-12 entries (most-common first; call memory(action="search",
+12 entries (most-common first; call knowledge_search(
 keywords=["<name>", ...]) to recall):
 easyai(8) claude(5) bitnet(3) build(3) iteration(2) …
 ```
@@ -269,7 +269,7 @@ worth it for everyone, surprising for nobody.
 
 | Surface | Registered out of the box | Old behaviour | New default |
 | --- | --- | --- | --- |
-| Multi-action families | `fs`, `web`, `memory` | 3 dispatchers | `fs_read`, `fs_write`, `fs_append`, `fs_edit`, `fs_list`, `fs_glob`, `fs_grep`, `fs_check_path`, `fs_cwd`, `fs_sandbox`, `web_search`, `web_fetch`, `memory_save`, `memory_append`, `memory_search`, `memory_load`, `memory_list`, `memory_delete`, `memory_keywords` — 19 focused tools |
+| Multi-action families | `fs`, `web` | 2 dispatchers + 7 knowledge tools | `fs_read`, `fs_write`, `fs_append`, `fs_edit`, `fs_list`, `fs_glob`, `fs_grep`, `fs_check_path`, `fs_cwd`, `fs_sandbox`, `web_search`, `web_fetch`, `knowledge_save`, `knowledge_append`, `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords` — 19 focused tools |
 
 ```bash
 # new default (no flag)
@@ -290,7 +290,7 @@ INI: `[cli] tools_mode = unified|split|both` (default `split`).
 
 ### 2026-05-15 — `--tools-mode` lets small models work with one-verb-per-tool
 
-`fs`, `web`, and `memory` ship as **unified dispatchers** with an
+`fs` and `web` ship as **unified dispatchers** with an
 `action` parameter (e.g. `fs(action="read", ...)`).  That shape keeps
 the system prompt small and lets a large model batch many actions, but
 **smaller / quantised tool-callers** (Llama 3 8B, Qwen 2.5 7B, Phi-3.5,
@@ -309,8 +309,8 @@ easyai-cli --tools-mode both        # register both surfaces side-by-side
 
 | Mode | Tools registered (with `--sandbox` + `--memory`) |
 | --- | --- |
-| `unified` | `fs`, `web`, `memory` — 3 dispatchers |
-| `split` (new default) | `fs_read`, `fs_write`, `fs_append`, `fs_edit`, `fs_list`, `fs_glob`, `fs_grep`, `fs_check_path`, `fs_cwd`, `fs_sandbox`, `web_search`, `web_fetch`, `memory_save`, `memory_append`, `memory_search`, `memory_load`, `memory_list`, `memory_delete`, `memory_keywords` — 19 focused tools |
+| `unified` | `fs`, `web` — 2 dispatchers + 7 `knowledge_*` tools |
+| `split` (new default) | `fs_read`, `fs_write`, `fs_append`, `fs_edit`, `fs_list`, `fs_glob`, `fs_grep`, `fs_check_path`, `fs_cwd`, `fs_sandbox`, `web_search`, `web_fetch`, `knowledge_save`, `knowledge_append`, `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords` — 19 focused tools |
 | `both` | unified + split, same handlers under both names |
 
 Same handlers under the hood — behaviour is identical to the unified
@@ -801,9 +801,10 @@ mirrors the rag dispatcher introduced 2026-05-04.
   individual `easyai::tools::web_search()` / `web_fetch()` /
   `web_google()` / `fs_read_file()` / `fs_write_file()` / `fs_list_dir()`
   / `fs_glob()` / `fs_grep()` / `fs_check_path()` / `get_current_dir()`
-  / `get_sandbox_path()` / `make_rag_tools()` / `RagTools` factories
-  are removed. Switch to `easyai::tools::web(google_enabled)`,
-  `easyai::tools::fs(root)`, and `easyai::tools::make_rag_tool(root)`.
+  / `get_sandbox_path()` factories are removed. Switch to
+  `easyai::tools::web(google_enabled)`,
+  `easyai::tools::fs(root)`, and
+  `easyai::tools::knowledge_split_tools(root)`.
 * **Why.** Three matching surfaces with the same shape make the
   catalogue smaller (one entry per capability instead of nine), tool
   prose can use one consolidated description style across all three,
@@ -877,11 +878,11 @@ and the build.
   host metrics) are removed entirely. Same fix in
   easyai-local's built-in prompt.
 * **RAG tool descriptions spell out "model-only store".** Added a
-  `PRIVATE — MODEL-ONLY STORE` paragraph to `rag_save` / `rag_append`
-  / the unified `rag` dispatcher, telling the model that the user
-  has no UI / command / API to read what's saved there. Forbids
-  `"check the rag for the code"` / `"I saved it to memory"` answers
-  and tells the model to `rag_load` and put the body inline when
+  `PRIVATE — MODEL-ONLY STORE` paragraph to `knowledge_save` /
+  `knowledge_append`, telling the model that the user has no UI /
+  command / API to read what's saved there. Forbids `"check the
+  knowledge for the code"` / `"I saved it to memory"` answers and
+  tells the model to `knowledge_load` and put the body inline when
   the user asks for stored content.
 * **Stay-in-scope replaces "PROTOTYPE FIRST".** The old 1./2./3.
   ritual ("build → verify → ASK which next step") was making the
@@ -1102,33 +1103,34 @@ default prompts, and the CLI flag wiring at once.
   prompt's length while keeping the no-announce-without-call rule
   and the search → fetch discipline.
 
-### 2026-05-02 (later) — RAG `rag_append` + user-focus prompts
+### 2026-05-02 (later) — RAG `knowledge_append` + user-focus prompts
 
-* **`rag_append` — new RAG tool.** Adds new content to the end of
-  an existing memory without losing the previous body. Read-modify-
+* **`knowledge_append` — new RAG tool.** Adds new content to the end
+  of an existing memory without losing the previous body. Read-modify-
   write under one `unique_lock` on the store's `shared_mutex`, so
   concurrent appenders queue cleanly (no lost appendix, no torn
   merge for any reader); on disk the new content is separated from
   the old by a Markdown horizontal rule (`---`) so the operator
   reading the `.md` file sees exactly where each appendix starts.
-  Refuses on titles that don't exist (use `rag_save`), on fixed
-  memories (`fix-easyai-*`), and when the merged size would exceed
+  Refuses on entries that don't exist (use `knowledge_save`), on
+  fixed memories (`fix-*`), and when the merged size would exceed
   256 KiB. Optional `keywords[]` parameter merges into the existing
   keyword list (deduped, capped at 8). Wired into every consumer
-  (server, MCP server, CLI, local backend) and the experimental
-  single-tool dispatcher (`rag(action="append", ...)`). Full doc:
+  (server, MCP server, CLI, local backend). Full doc:
   [`RAG.md`](RAG.md) §4.
-* **User-focus prompt update.** `rag_save` and `rag_append` tool
-  descriptions now explicitly tell the model to prioritise notes
-  about the user themselves — name, role, hardware, projects,
-  working style, corrections, likes, dislikes — and to grow that
-  memory across sessions with `rag_append` instead of rewriting it
-  with `rag_save`. The next conversation (tomorrow, three months
-  from now) starts with the user already known, so they don't have
-  to explain themselves twice. The lib went from 5/6 RAG tools to
-  the canonical seven (`rag_save`, `rag_append`, `rag_search`,
-  `rag_load`, `rag_list`, `rag_delete`, `rag_keywords`); all CLI
-  help text, help comments, and docs updated to match.
+* **User-focus prompt update.** `knowledge_save` and
+  `knowledge_append` tool descriptions now explicitly tell the model
+  to prioritise notes about the user themselves — name, role,
+  hardware, projects, working style, corrections, likes, dislikes —
+  and to grow that memory across sessions with `knowledge_append`
+  instead of rewriting it with `knowledge_save`. The next
+  conversation (tomorrow, three months from now) starts with the
+  user already known, so they don't have to explain themselves
+  twice. The lib ships the canonical seven knowledge tools
+  (`knowledge_save`, `knowledge_append`, `knowledge_search`,
+  `knowledge_load`, `knowledge_list`, `knowledge_delete`,
+  `knowledge_keywords`); all CLI help text, help comments, and docs
+  updated to match.
 
 ### 2026-05-02 — Fourth-pass security audit + readability batch
 
@@ -1175,9 +1177,10 @@ default prompts, and the CLI flag wiring at once.
   original name is still accurate.
 * **RAG reframed as memory + fixed memories.** Tool descriptions
   rewritten in memory verbs (search / store / recall / update /
-  forget). New `fix=true` argument on `rag_save` mints an immutable
-  memory: title is auto-prefixed with `fix-easyai-`, and from then
-  on `rag_save` refuses to overwrite it and `rag_delete` refuses to
+  forget). New `fix=true` argument on `knowledge_save` mints an
+  immutable memory: keywords are auto-prefixed with `fix-`, and from
+  then on `knowledge_save` refuses to overwrite it and
+  `knowledge_delete` refuses to
   remove it. Use this to seed system designs, hard rules, ground-
   truth definitions the model must not rewrite. Search / load /
   list output gain a human-readable `modified` date and a `[FIXED]`
@@ -1214,11 +1217,12 @@ default prompts, and the CLI flag wiring at once.
   that returns 503 + `Retry-After` on saturation instead of unbounded
   queueing. Full doc: [`easyai-mcp-server.md`](easyai-mcp-server.md).
 * **RAG concurrency upgrade.** `RagStore::mu` is now
-  `std::shared_mutex`; `rag_search` / `rag_load` / `rag_list` /
-  `rag_keywords` take `std::shared_lock` so parallel readers don't
-  serialise on the write path. Benefits every consumer of libeasyai
-  — `easyai-server`, `easyai-cli` with `--RAG`, any third-party
-  program calling `make_rag_tools()`. Atomic-rename writes already
+  `std::shared_mutex`; `knowledge_search` / `knowledge_load` /
+  `knowledge_list` / `knowledge_keywords` take `std::shared_lock` so
+  parallel readers don't serialise on the write path. Benefits every
+  consumer of libeasyai — `easyai-server`, `easyai-cli` with
+  `--RAG`, any third-party program calling
+  `knowledge_split_tools()`. Atomic-rename writes already
   made on-disk reads tear-free; the lock relaxation is safe.
 * **Doc restructure.** `INI_KFlags.md` content has moved to the top
   of the new [`easyai-server.md`](easyai-server.md) so the chat
@@ -1277,8 +1281,10 @@ default prompts, and the CLI flag wiring at once.
   has an INI key (FlagDef table refactor); precedence is CLI > INI
   > hardcoded default. Edit the file, `systemctl restart`, done.
   Full reference in [`easyai-server.md`](easyai-server.md) §1.
-* **RAG: persistent memory.** Seven tools (`rag_save`, `rag_append`,
-  `rag_search`, `rag_load`, `rag_list`, `rag_delete`, `rag_keywords`).
+* **RAG: persistent memory.** Seven keyword-only knowledge tools
+  (`knowledge_save`, `knowledge_append`, `knowledge_search`,
+  `knowledge_load`, `knowledge_list`, `knowledge_delete`,
+  `knowledge_keywords`).
   Multi-keyword search (first keyword required, rest rank by overlap)
   + pagination. One Markdown file per entry — operator-readable,
   hand-editable. See [`RAG.md`](RAG.md).
@@ -1343,7 +1349,7 @@ has a matching INI key (see [`easyai-server.md`](easyai-server.md) §1).
 | `--no-python` | python3 on | Drop the `python3` tool. By default it's auto-registered alongside `fs` whenever `--sandbox` is set or `--allow-bash` is on. Stdlib-only interpreter; disk access auto-restricted to the sandbox root. |
 | `--use-google` | off | Enable engine=`"google"` inside the unified `web` tool (needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`). |
 | `--external-tools DIR` | — | Load every `EASYAI-*.tools` manifest in `DIR`. |
-| `--memory DIR` | — | Enable persistent memory: registers one `memory(action=…)` tool with sub-actions save / append / search / load / list / delete / keywords — a passive RAG technique. `--RAG` is still accepted as a back-compat alias. |
+| `--memory DIR` | — | Enable persistent memory: registers seven keyword-only knowledge tools (`knowledge_save`, `knowledge_append`, `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords`) — a passive RAG technique. `--RAG` is still accepted as a back-compat alias. |
 | `--preset NAME` | `precise` | Ambient sampling preset. See [Sampling presets](#sampling-presets) for what each implies. |
 | `--temperature F` | per preset | Override temperature (0.0–2.0). |
 | `--top-p F` | per preset | Nucleus sampling p. |
@@ -1407,7 +1413,7 @@ reference: [`easyai-mcp-server.md`](easyai-mcp-server.md).
 | `--allow-bash` | off | Register `bash`. |
 | `--no-tools` | off | Skip the built-in toolbelt entirely. |
 | `--external-tools DIR` | — | Load `EASYAI-*.tools` manifests. |
-| `--memory DIR` | — | Enable the unified `memory` tool (alias `--RAG`). |
+| `--memory DIR` | — | Enable the seven `knowledge_*` tools (alias `--RAG`). |
 | `--api-key TOK` | — | Bearer required for `/health`, `/metrics`, `/v1/tools`. |
 | `--no-mcp-auth` | off | Force `/mcp` open. |
 | `--metrics` | off | Enable Prometheus `/metrics`. |
@@ -1446,8 +1452,8 @@ upstream `llama-server`, OpenAI itself, etc.).
 | `--no-python` | python3 on | Drop the auto-registered `python3` tool (default-on whenever `--sandbox` or `--allow-bash` is set). |
 | `--use-google` | off | Enable engine=`"google"` inside the unified `web` tool. |
 | `--external-tools DIR` | — | Load `EASYAI-*.tools` manifests. |
-| `--memory DIR` | — | Enable persistent memory (one `memory(action=…)` tool; alias `--RAG`). |
-| `--tools-mode MODE` | `split` | How `fs` / `web` / `memory` are exposed. Default `split` (since 2026-05-15): one focused tool per action — `fs_read`, `fs_edit`, …, `memory_save`, …, `web_search`, `web_fetch`. `unified` registers the legacy single dispatcher per family with `action=`. `both` registers both surfaces. INI: `[cli] tools_mode`. |
+| `--memory DIR` | — | Enable persistent memory (seven `knowledge_*` tools; alias `--RAG`). |
+| `--tools-mode MODE` | `split` | How `fs` / `web` are exposed. Default `split` (since 2026-05-15): one focused tool per action — `fs_read`, `fs_edit`, …, `web_search`, `web_fetch`. Knowledge tools are always split (seven separate tools). `unified` registers the legacy single dispatcher per `fs`/`web` family with `action=`. `both` registers both surfaces. INI: `[cli] tools_mode`. |
 | `--no-plan` | off | Don't auto-register the planning tool. |
 | `-p, --prompt TEXT` | (REPL) | One-shot prompt; without it you get a REPL. |
 | `--no-reasoning` | shown | Hide `delta.reasoning_content`. |
@@ -1706,7 +1712,7 @@ when you need looser sampling.
 | Name | temp | top_p | top_k | min_p | Behaviour | Pick when… |
 |---|---|---|---|---|---|---|
 | `deterministic` | 0.0 | 1.0 | 1 | 0.00 | Greedy: always picks the single most likely token. Same prompt → byte-identical answer every time. No randomness, no exploration. | You need reproducibility (CI, benchmarks, eval harnesses), or when even tiny variation breaks downstream parsing. |
-| `precise` (default) | 0.2 | 0.92 | 50 | 0.03 | Sticks to high-confidence tokens. Concise, follows instructions tightly, rarely contradicts itself or invents facts. Slightly wider candidate pool than before (top_k 50, min_p 0.03) for more natural phrasing while staying deterministic enough for stable tool calls. | Code generation, math, factual Q&A, the `memory` tool, tool-calling agents, structured output (JSON/SQL/cypher), anything you'd want to be "right" rather than "interesting". |
+| `precise` (default) | 0.2 | 0.92 | 50 | 0.03 | Sticks to high-confidence tokens. Concise, follows instructions tightly, rarely contradicts itself or invents facts. Slightly wider candidate pool than before (top_k 50, min_p 0.03) for more natural phrasing while staying deterministic enough for stable tool calls. | Code generation, math, factual Q&A, knowledge tools, tool-calling agents, structured output (JSON/SQL/cypher), anything you'd want to be "right" rather than "interesting". |
 | `balanced` | 0.7 | 0.92 | 50 | 0.03 | A bit of variety while still mostly committing to the most-likely answer. Phrasing varies between runs; the substance shouldn't. | General-purpose chat, summarisation, casual Q&A, anywhere you want natural-sounding prose without surprises. |
 | `creative` | 1.0 | 0.92 | 50 | 0.03 | More phrasing variety, occasional surprising word choices, willingness to take a less-obvious angle. | Brainstorming, fiction, marketing copy, ideation, anything where "interesting" beats "literal". |
 | `wild` | 1.4 | 0.98 | 60 | 0.00 | Maximum entropy. Frequently picks low-probability tokens; can wander off-topic, contradict itself, hallucinate. | Pure exploration, "show me something I wouldn't have thought of", stylistic experiments. Don't ship it. |
@@ -1764,14 +1770,14 @@ no API bill, no data leaving the box.**
   Model Context Protocol client auto-discovers the tool catalogue.
   **Write one tool — every AI app on your machine can call it.**
 
-* **Long-term memory built in.** The `memory` tool: one
-  `memory(action=...)` tool (sub-actions save / append / search /
-  load / list / delete / keywords) the agent uses to save, append
-  (grow what you already know about the user without losing the
-  previous body), search, load, list, delete, and inventory its own
-  knowledge. It's a passive RAG technique — one human-readable
-  Markdown file per entry, `cat`, `vim`, `grep` it. No vector DB to
-  babysit.
+* **Long-term memory built in.** Seven keyword-only knowledge tools
+  (`knowledge_save`, `knowledge_append`, `knowledge_search`,
+  `knowledge_load`, `knowledge_list`, `knowledge_delete`,
+  `knowledge_keywords`) the agent uses to save, append (grow what
+  you already know about the user without losing the previous body),
+  search, load, list, delete, and inventory its own knowledge. It's
+  a passive RAG technique — one human-readable Markdown file per
+  entry, `cat`, `vim`, `grep` it. No vector DB to babysit.
 
 * **Operator-defined tool packs.** Drop a JSON manifest in
   `/etc/easyai/external-tools/`, the agent picks it up at startup.
@@ -1984,9 +1990,9 @@ no shell.
 | `--allow-bash`        | `bash` (run `/bin/sh -c`). cwd = `--sandbox <dir>` if given, otherwise the binary's CWD. NOT a hardened sandbox — runs with your user privileges. Also bumps the agentic-loop `max_tool_hops` to 99999 (bash flows naturally span many turns). |
 | `--use-google`        | Enables `engine="google"` inside the unified `web` tool (Google Custom Search JSON API), and lets the default `engine="auto"` cascade try google as its first hop. Requires `GOOGLE_API_KEY` and `GOOGLE_CSE_ID` env vars. Counts against your Google quota — free tier is 100 queries/day per key. Without this flag (or without the env vars), the auto cascade silently skips google and falls through to brave → ddg-lite → bing → ddg. |
 | `--external-tools <dir>` | Load every `EASYAI-<name>.tools` file in `<dir>` as an operator-defined tool pack. Per-file fault isolation (a bad file is logged + skipped, the agent still starts). Spawns via `fork`+`execve` — never a shell. **This is the supported way to give the model focused powers without flipping `--allow-bash`.** See [`EXTERNAL_TOOLS.md`](EXTERNAL_TOOLS.md). |
-| `--memory <dir>`      | Enable the agent's persistent **memory** (search / store / append / recall / update / forget) — a passive RAG technique over keyword-indexed Markdown files. Registers ONE `memory(action=...)` tool with sub-actions `save`, `append` (grow an existing memory without losing its body), `search`, `load`, `list`, `delete`, `keywords` — each memory one Markdown file in `<dir>`. Memories whose title starts with `fix-easyai-` are immutable: pass `fix=true` (sub-action `save`) to mint one. `--RAG` is still accepted as a back-compat alias. The systemd-installed server passes this by default (`/var/lib/easyai/rag`). See [`RAG.md`](RAG.md). |
+| `--memory <dir>`      | Enable the agent's persistent **memory** (search / store / append / recall / update / forget) — a passive RAG technique over keyword-indexed Markdown files. Registers seven keyword-only knowledge tools: `knowledge_save`, `knowledge_append` (grow an existing memory without losing its body), `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords` — each memory one Markdown file in `<dir>`. Keywords are sorted and joined by `_` to form the filename. Entries whose keywords start with `fix-` are immutable: pass `fix=true` on `knowledge_save` to mint one. `--RAG` is still accepted as a back-compat alias. The systemd-installed server passes this by default (`/var/lib/easyai/rag`). See [`RAG.md`](RAG.md). |
 | `--mcp <url>`         | Connect to a remote MCP server as a CLIENT (e.g. another `easyai-server` or `easyai-mcp-server`). The upstream's tool catalogue is fetched via `tools/list` and merged into the local one; each remote tool's handler proxies `tools/call` back to it. Local tool names win on collision (remote dup skipped with a warning). Pair with `--mcp-token <token>` when the upstream requires bearer auth. |
-| `--no-local-tools`    | Skip the LOCAL built-in toolbelt entirely (datetime, web, fs, bash, ...). Useful when you want ONLY external tools, ONLY the `memory` tool, or ONLY tools fetched via `--mcp`. Does NOT disable the MCP client — that's controlled by `--mcp`. **Renamed from `--no-tools`.** |
+| `--no-local-tools`    | Skip the LOCAL built-in toolbelt entirely (datetime, web, fs, bash, ...). Useful when you want ONLY external tools, ONLY the knowledge tools, or ONLY tools fetched via `--mcp`. Does NOT disable the MCP client — that's controlled by `--mcp`. **Renamed from `--no-tools`.** |
 
 #### Single config file: `/etc/easyai/easyai.ini`
 
@@ -2038,7 +2044,7 @@ Full key reference + worked examples: [`easyai-server.md`](easyai-server.md) §1
 
 #### easyai-server speaks **MCP** — every tool also reachable from Claude Desktop / Cursor / Continue
 
-`easyai-server` exposes its full tool catalogue (built-ins + the `memory` tool + every operator-defined `--external-tools` pack) via the **Model Context Protocol** at `POST /mcp`. Other AI applications connect, list, and dispatch:
+`easyai-server` exposes its full tool catalogue (built-ins + the knowledge tools + every operator-defined `--external-tools` pack) via the **Model Context Protocol** at `POST /mcp`. Other AI applications connect, list, and dispatch:
 
 ```
 Claude Desktop ──► [stdio bridge] ──► POST /mcp ──┐
@@ -2047,7 +2053,7 @@ Continue        ─────────────────────�
                                                         many consumers)
 ```
 
-You build the tools once. Your `memory` tool, your deploy CLI, your monitoring queries — written ONCE for your easyai-server — become available in every AI app you already use. No plugin per app.
+You build the tools once. Your knowledge tools, your deploy CLI, your monitoring queries — written ONCE for your easyai-server — become available in every AI app you already use. No plugin per app.
 
 ```sh
 # List tools the server is exposing right now
@@ -2071,11 +2077,11 @@ where you left off.
 
 ```
 > "I prefer terse responses in PT-BR."
-[model: memory(action="save", title="user-prefs", keywords=["user","prefs","locale"], content="...")]
+[model: knowledge_save(keywords=["user","prefs","locale"], content="...")]
 
 [next session]
 > "build easyai on the AI box"
-[model: memory(action="search", keywords=["easyai"]) → finds your saved build recipe]
+[model: knowledge_search(keywords=["easyai"]) → finds your saved build recipe]
 [model loads it and answers in your style]
 ```
 
