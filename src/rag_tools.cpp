@@ -1717,14 +1717,18 @@ Tool make_rag_tool(std::string root_dir) {
 
     return Tool::builder("knowledge")
         .short_describe(
-            "Knowledge store — save & recall notes, skills, facts "
-            "for future use.")
+            "Knowledge store — save & recall knowledge, skills, "
+            "mental notes. Only save AFTER answering the user.")
         .describe(
             "Persistent knowledge store for the model — save and recall "
             "mental notes, skills, facts, preferences, and pieces of "
-            "information for future use across conversations. NOT for "
-            "storing output content (code, text meant for the user) — "
-            "write those directly in your response.\n"
+            "information for future use across conversations. Only save "
+            "knowledge, skills, and mental notes for later retrieval — "
+            "NOT output content (code, text meant for the user); write "
+            "those directly in your response.\n"
+            "\n"
+            "IMPORTANT: only save/append AFTER you have answered the "
+            "user. Answer first, then persist knowledge as a final step.\n"
             "\n"
             "One tool, seven actions:\n"
             "  save     — create/overwrite. Needs: title, keywords, content.\n"
@@ -1882,9 +1886,10 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
 
     out.push_back(Tool::builder("knowledge_save")
         .describe(
-            "Save knowledge — create or overwrite an entry in the "
-            "model's persistent store for mental notes, skills, facts, "
-            "and information to recall in future conversations.")
+            "Save knowledge — create or overwrite an entry. Only save "
+            "knowledge, skills, and mental notes for later retrieval — "
+            "not output content. Only save AFTER you have answered the "
+            "user.")
         .param("title",    "string", "Short name (spaces become _).", true)
         .param("keywords", "string", "Comma-separated keywords, e.g. \"python, async, sockets\".", true)
         .param("content",  "string", "Body text.", true)
@@ -1895,7 +1900,9 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
     out.push_back(Tool::builder("knowledge_append")
         .describe(
             "Append to knowledge — add text to an existing entry. "
-            "Creates it if new (keywords required).")
+            "Creates it if new (keywords required). Only save "
+            "knowledge, skills, and mental notes — not output content. "
+            "Only append AFTER you have answered the user.")
         .param("title",    "string", "Entry title.", true)
         .param("content",  "string", "Text to append.", true)
         .param("keywords", "string", "Comma-separated keywords (required if new).", false)
