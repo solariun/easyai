@@ -224,9 +224,8 @@ std::string compose_full_system(
 std::string sanitize_addendum(const std::string & s, std::size_t cap);
 
 // Compose the final system prompt for the given base + tool list. For
-// every tool, appends `Tool::effective_system_addendum()` (which is
-// `system_addendum` when the tool set one, else `description` as a
-// fallback — see easyai/tool.hpp), each piped through
+// every tool with a non-empty `system_addendum`, appends it via
+// `Tool::effective_system_addendum()`, each piped through
 // `sanitize_addendum(_, 8192)` and separated by blank lines. Single
 // source of truth for the addendum-concat policy that Session,
 // LocalBackend, and RemoteBackend (cli-client) all execute — and the

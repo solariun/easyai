@@ -88,16 +88,10 @@ struct Tool {
     // accidentally ship the whole manual.
     std::string wire_description() const;
 
-    // Resolve the block that should be appended to the system prompt at
-    // tool registration. Order:
-    //   1. `system_addendum` if non-empty — the explicit, curated form.
-    //   2. else `description` — so a tool that simply declares its full
-    //      manual via `describe(...)` automatically contributes guidance
-    //      to the system prompt without the author having to also call
-    //      `system_addendum(...)`. Callers still apply
-    //      `preamble::sanitize_addendum(_, kAddendumCap)` (8 KB cap per
-    //      tool) before splicing.
-    //   3. else empty — nothing to contribute.
+    // Returns system_addendum if set, empty otherwise. Only explicit
+    // addenda are injected into the system prompt — descriptions are
+    // NOT used as fallback (they duplicate the <tools> schema block
+    // and plant non-existent tool names in weaker models' context).
     std::string effective_system_addendum() const;
 
     static Tool make(std::string n, std::string d, std::string p, ToolHandler h) {

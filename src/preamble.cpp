@@ -467,9 +467,6 @@ std::string tools_block(const ToolsetView & view) {
         s << " — do not retry the evaluate call. The exact callable "
              "name(s) are in your AVAILABLE TOOLS list below.\n\n";
     } else if (view.fs_on || view.bash_on) {
-        // No evaluate registered: still useful to spell out which
-        // tools can write, so the model doesn't reach for a
-        // hallucinated `python` / `code_interpreter` / `evaluate` call.
         s << "## Write/edit policy\n"
              "Disk writes/edits go through ";
         if (view.fs_on && view.bash_on) {
@@ -481,19 +478,13 @@ std::string tools_block(const ToolsetView & view) {
         } else {
             s << "`bash` (the only write tool registered this session).";
         }
-        s << " Do not call any other name for disk work — there is "
-             "no `evaluate`, `python`, `python3`, `code_interpreter`, "
-             "`write_file`, etc. wired up this turn. The exact "
-             "callable name(s) are in your AVAILABLE TOOLS list "
-             "below.\n\n";
+        s << " Only call tools listed in AVAILABLE TOOLS below.\n\n";
     } else {
-        s << "## Write/edit policy — NO WRITE TOOLS THIS SESSION\n"
-             "There is NO filesystem tool, NO bash, NO write_file, NO "
-             "save_file, NO create_file registered this session. You "
-             "CANNOT write files. When asked to write code or create a "
-             "file, put the FULL content DIRECTLY in your chat reply "
-             "using a fenced code block. NEVER call a tool name you "
-             "invented — it will fail with 'unknown tool'.\n\n";
+        s << "## Write/edit policy — NO WRITE TOOLS\n"
+             "You have NO write capability this session. When asked to "
+             "write code or create a file, put the FULL content DIRECTLY "
+             "in your chat reply using a fenced code block. Only call "
+             "tools listed in AVAILABLE TOOLS below.\n\n";
     }
 
     if (!view.active_tools.empty()) {

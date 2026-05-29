@@ -73,8 +73,7 @@ Tool Tool::Builder::build() const {
 // Resolve the block that should be appended to the system prompt at
 // tool registration. See easyai/tool.hpp for the contract.
 std::string Tool::effective_system_addendum() const {
-    if (!system_addendum.empty()) return system_addendum;
-    return description;
+    return system_addendum;
 }
 
 std::string Tool::wire_description() const {
