@@ -1586,6 +1586,11 @@ static bool parse_chat_request(const httplib::Request & req,
     // Qwen3 / Hermes / DeepSeek templates render an orphan tool result
     // and the model produces malformed output.
     std::string last_role;
+    // Multi-part content stats — text parts are coalesced; non-text
+    // parts (image_url, input_audio, …) are silently dropped by this
+    // text-only path, so we count them and surface the loss below.
+    std::size_t mp_messages = 0, mp_text_parts = 0, mp_dropped_parts = 0;
+    std::string mp_dropped_types;   // unique type names, comma-joined
     for (const auto & m : body["messages"]) {
         easyai::Engine::HistoryMessage hm{};
         hm.role = m.value("role", "user");
@@ -1595,8 +1600,22 @@ static bool parse_chat_request(const httplib::Request & req,
             if (content.is_string()) {
                 hm.content = content.get<std::string>();
             } else if (content.is_array()) {
+                ++mp_messages;
                 for (const auto & part : content) {
-                    if (part.value("type", "") == "text") hm.content += part.value("text", "");
+                    const std::string ptype = part.value("type", "");
+                    if (ptype == "text") {
+                        hm.content += part.value("text", "");
+                        ++mp_text_parts;
+                    } else {
+                        ++mp_dropped_parts;
+                        const std::string label =
+                            ptype.empty() ? "(no type)" : ptype;
+                        if (mp_dropped_types.find(label) == std::string::npos) {
+                            if (!mp_dropped_types.empty())
+                                mp_dropped_types += ", ";
+                            mp_dropped_types += label;
+                        }
+                    }
                 }
             }
             // content.is_null() → leave hm.content empty (assistant
@@ -1679,6 +1698,25 @@ static bool parse_chat_request(const httplib::Request & req,
         }
     }
 
+    // Multi-part content report. Text-only coalescing is the healthy
+    // case → quiet line in the raw log. Dropped non-text parts are DATA
+    // LOSS the text-only model never sees → surface on stderr too.
+    if (mp_messages) {
+        if (mp_dropped_parts) {
+            easyai::log::write(
+                "easyai-server: multi-part content in %zu message(s): "
+                "%zu text part(s) coalesced, %zu non-text part(s) DROPPED "
+                "(%s) — the model will not see them\n",
+                mp_messages, mp_text_parts, mp_dropped_parts,
+                mp_dropped_types.c_str());
+        } else if (auto * fp = easyai::log::file()) {
+            std::fprintf(fp,
+                "multi-part content in %zu message(s): %zu text part(s) "
+                "coalesced\n", mp_messages, mp_text_parts);
+            std::fflush(fp);
+        }
+    }
+
     auto get_num = [&](const char * k, double dflt) -> double {
         if (body.contains(k) && body[k].is_number()) return body[k].get<double>();
         return dflt;
@@ -1733,15 +1771,18 @@ static bool parse_chat_request(const httplib::Request & req,
 // hallucinating post-cutoff facts.
 //
 // We rebuild this per request so the timestamp is always fresh.
-static std::string build_authoritative_preamble(const ServerCtx & ctx) {
+static std::string build_authoritative_preamble(const ServerCtx & ctx,
+                                                bool inject_datetime,
+                                                const std::string & memory_root) {
     // The preamble builder lives in libeasyai now (preamble.hpp) so
     // server, local, and cli all share one implementation. This thin
     // wrapper just maps from ServerCtx into the library's Options
-    // struct.
+    // struct. The caller decides whether to inject the date/time block
+    // and the memory vocabulary (each tied to tool availability).
     return easyai::preamble::build({
-        /* inject_datetime  = */ true,
+        /* inject_datetime  = */ inject_datetime,
         /* knowledge_cutoff = */ ctx.knowledge_cutoff,
-        /* memory_root      = */ ctx.memory_root,
+        /* memory_root      = */ memory_root,
         /* cite_sources     = */ true,
     });
 }
@@ -1813,6 +1854,17 @@ static void prepare_engine_for_request(ServerCtx & ctx, const ChatRequest & req)
     if      (req.inject_override == "on")  inject_now = true;
     else if (req.inject_override == "off") inject_now = false;
 
+    // Enforce injection from tool availability: a registered `datetime`
+    // tool forces the date/time block on regardless of the toggle; a
+    // registered `knowledge_*` tool + a configured store forces the
+    // MEMORY VOCABULARY block on, INDEPENDENT of the datetime toggle
+    // (so a datetime-off setting no longer also suppresses memory).
+    const auto tools_view =
+        easyai::preamble::ToolsetView::from_tools(ctx.engine.tools());
+    const bool        inject_dt = inject_now || tools_view.datetime_on;
+    const std::string mem_root  = tools_view.memory_on ? ctx.memory_root
+                                                       : std::string();
+
     // First-user-turn detection: no assistant message anywhere in the
     // client-supplied history. On that turn (and only that turn) we
     // also append the AVAILABLE TOOLS + VERIFY-BEFORE-YOU-CALL block
@@ -1828,8 +1880,8 @@ static void prepare_engine_for_request(ServerCtx & ctx, const ChatRequest & req)
         });
 
     std::string addendum;
-    if (inject_now) {
-        addendum += build_authoritative_preamble(ctx);
+    if (inject_dt || !mem_root.empty()) {
+        addendum += build_authoritative_preamble(ctx, inject_dt, mem_root);
     }
     if (first_user_turn) {
         addendum += easyai::preamble::build_session_info(ctx.engine.tools());
@@ -2349,12 +2401,20 @@ static void handle_chat_stream(ServerCtx & ctx,
             // the callback to an empty std::function clears whatever
             // the previous request on the same shared engine wired
             // (engine.cpp gates on `if (cb)` before invoking).
-            if (!req_state->emit_prompt_progress) {
+            // Wire the per-batch progress callback when EITHER the client
+            // wants SSE progress OR the operator runs --verbose (so the
+            // server logs the CLI-style [prompt_progress] line regardless
+            // of the client's wire preference). When neither is wanted,
+            // clear the callback so a previous request's wiring on the
+            // shared engine doesn't leak in.
+            const bool emit_progress = req_state->emit_prompt_progress;
+            const bool log_progress  = ctx.verbose;
+            if (!emit_progress && !log_progress) {
                 ctx.engine.on_prompt_progress(
                     easyai::PromptProgressCallback{});
             } else {
             ctx.engine.on_prompt_progress(
-                [&, last_emit_ms, last_emit_pct]
+                [&, last_emit_ms, last_emit_pct, emit_progress, log_progress]
                 (const easyai::PromptProgressReport & r) {
                     if (r.total <= 0) return;
                     const int pct = (int)(100.0 * r.processed / r.total);
@@ -2368,6 +2428,32 @@ static void handle_chat_stream(ServerCtx & ctx,
                     }
                     *last_emit_ms  = r.ms;
                     *last_emit_pct = pct;
+
+                    // CLI-style per-batch log (mirrors cli_client.cpp),
+                    // teed to stderr + the raw transaction log. ctx-% is
+                    // the LIVE projection — where the KV cache lands when
+                    // this pass finishes: (cached + processed) / n_ctx.
+                    if (log_progress) {
+                        const int n_ctx    = ctx.engine.n_ctx();
+                        const int ctx_used = r.cached + r.processed;
+                        if (n_ctx > 0) {
+                            int ctx_pct = (int)(100LL * ctx_used / n_ctx);
+                            if (ctx_pct > 100) ctx_pct = 100;
+                            easyai::log::write(
+                                "easyai-server: [prompt_progress] %d/%d "
+                                "(%d cached) %.0f ms → thinking %d%% · "
+                                "ctx %d%% (%d/%d tok)\n",
+                                r.processed, r.total, r.cached, r.ms,
+                                pct, ctx_pct, ctx_used, n_ctx);
+                        } else {
+                            easyai::log::write(
+                                "easyai-server: [prompt_progress] %d/%d "
+                                "(%d cached) %.0f ms → thinking %d%%\n",
+                                r.processed, r.total, r.cached, r.ms, pct);
+                        }
+                    }
+
+                    if (!emit_progress) return;
                     ordered_json evt;
                     evt["choices"] = json::array({{
                         {"index", 0},
@@ -2381,7 +2467,7 @@ static void handle_chat_stream(ServerCtx & ctx,
                     evt["pct"]       = pct;   // convenience for clients
                     emit_event("easyai.prompt_progress", safe_dump(evt));
                 });
-            }   // end "else" — emit_prompt_progress is true
+            }   // end progress-callback wiring
 
             // Engine fires this once per generate() AFTER the prompt-
             // eval llama_decode loop completes and BEFORE the first
@@ -4494,6 +4580,11 @@ int main(int argc, char ** argv) {
             }
             ctx->default_tools.push_back(easyai::tools::remote_model(spec));
             ++added;
+            std::fprintf(stderr,
+                "easyai-server: remote-model peer ai-%s enabled -> %s "
+                "(model=%s)\n",
+                spec.name.c_str(), spec.url.c_str(),
+                spec.model.empty() ? "easyai" : spec.model.c_str());
         }
         if (added) {
             std::fprintf(stderr,

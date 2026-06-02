@@ -1649,6 +1649,13 @@ void register_tools(easyai::Client & cli,
                 continue;
             }
             cli.add_tool(easyai::tools::remote_model(spec));
+            if (o.verbose) {
+                vlog("%s[easyai-cli-remote]%s remote-model peer ai-%s "
+                     "enabled -> %s (model=%s)\n",
+                     st.dim(), st.reset(), spec.name.c_str(),
+                     spec.url.c_str(),
+                     spec.model.empty() ? "easyai" : spec.model.c_str());
+            }
         }
     }
 
@@ -2595,26 +2602,29 @@ int main(int argc, char ** argv) {
         }
     }
 
-    // Memory vocabulary snapshot — when --memory is in use, append
-    // the current keyword index so the model can see what it has
-    // tagged without burning a memory(action="keywords") hop. The
-    // remote server typically owns the date/time block, so we
-    // pass inject_datetime=false: only the MEMORY VOCABULARY block
-    // is rendered, and only when the store is non-empty.
-    //
-    // This is the same easyai::preamble::build() helper server.cpp
-    // and local.cpp use, so the format stays in sync across all
-    // three binaries — change the renderer once, every binary
-    // updates.
-    if (!o.rag_dir.empty()) {
-        std::string vocab = easyai::preamble::build({
-            /* inject_datetime  = */ false,
-            /* knowledge_cutoff = */ std::string(),
-            /* memory_root      = */ o.rag_dir,
-            /* cite_sources     = */ true,
-        });
-        if (!vocab.empty()) {
-            o.system_prompt += vocab;
+    // Authoritative date/time + memory vocabulary — ENFORCED from the
+    // live tool registry, not a flag: if the `datetime` tool is
+    // registered the date/time block is injected; if a `knowledge_*`
+    // tool is registered AND a --memory store is set, the MEMORY
+    // VOCABULARY block is injected. Tying it to tool presence means the
+    // model always has ground truth for a capability it actually has —
+    // and it works against a non-easyai endpoint that wouldn't inject
+    // the date itself. We skip the KNOWLEDGE CUTOFF hint (no --cutoff
+    // here; the remote model's cutoff is unknown) and cite_sources
+    // (already emitted in the prefix above). Same preamble::build()
+    // renderer the server and local binaries use, so the format stays
+    // in sync everywhere.
+    {
+        const auto tv = easyai::preamble::ToolsetView::from_tools(cli.tools());
+        const std::string mem_root = tv.memory_on ? o.rag_dir : std::string();
+        if (tv.datetime_on || !mem_root.empty()) {
+            std::string inj = easyai::preamble::build({
+                /* inject_datetime  = */ tv.datetime_on,
+                /* knowledge_cutoff = */ std::string(),
+                /* memory_root      = */ mem_root,
+                /* cite_sources     = */ false,
+            });
+            if (!inj.empty()) o.system_prompt += inj;
         }
     }
 

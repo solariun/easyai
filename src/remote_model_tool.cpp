@@ -4,8 +4,10 @@
 #include "easyai/remote_model_tool.hpp"
 
 #include "easyai/client.hpp"
+#include "easyai/log.hpp"
 
 #include <cctype>
+#include <chrono>
 #include <initializer_list>
 #include <map>
 #include <string>
@@ -77,6 +79,19 @@ void ensure_scheme(std::string & url) {
     if (url.compare(0, 7, "http://") == 0)  return;
     if (url.compare(0, 8, "https://") == 0) return;
     url = "http://" + url;
+}
+
+// One-line, truncated preview of text for the raw transaction log
+// (control chars collapsed to spaces, capped). Kept out of the
+// stderr-tee'd lines so prompt / answer bodies don't leak into journald.
+std::string log_preview(const std::string & s, std::size_t cap = 200) {
+    std::string out;
+    out.reserve((s.size() < cap ? s.size() : cap) + 4);
+    for (char c : s) {
+        if (out.size() >= cap) { out += "..."; break; }
+        out += (c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
+    }
+    return out;
 }
 
 // ---- INI value lookup helpers ---------------------------------------------
@@ -252,9 +267,11 @@ Tool remote_model(const RemoteModelSpec & spec) {
                 "ai-" + s.name + ": no endpoint configured (set `url` in "
                 "[REMOTE_MODEL_" + s.name + "]).");
 
+        const char * model = s.model.empty() ? kDefaultModel : s.model.c_str();
+
         Client cli;
         cli.endpoint(s.url)
-           .model(s.model.empty() ? kDefaultModel : s.model)
+           .model(model)
            .timeout_seconds(s.timeout_seconds > 0 ? s.timeout_seconds
                                                    : kDefaultTimeoutSeconds)
            .http_retries(2)
@@ -269,14 +286,40 @@ Tool remote_model(const RemoteModelSpec & spec) {
         if (s.tls_insecure)          cli.tls_insecure(true);
         if (!s.ca_cert_path.empty()) cli.ca_cert_path(s.ca_cert_path);
 
+        // Logged after Client construction so the auto-opened raw log is
+        // attached and the prompt preview lands in it. The summary line
+        // also tees to stderr (no body — keeps prompt text out of journald).
+        easyai::log::write(
+            "ai-%s: calling %s (model=%s, prompt=%zu chars)\n",
+            s.name.c_str(), s.url.c_str(), model, prompt.size());
+        if (auto * fp = easyai::log::file()) {
+            std::fprintf(fp, "ai-%s: prompt> %s\n",
+                         s.name.c_str(), log_preview(prompt).c_str());
+            std::fflush(fp);
+        }
+
+        const auto t0 = std::chrono::steady_clock::now();
         std::string reply = cli.chat(prompt);
-        std::string err   = cli.last_error();
+        const long long ms = (long long) std::chrono::duration_cast<
+            std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+        std::string err = cli.last_error();
         if (reply.empty()) {
+            const char * why = err.empty() ? "empty reply" : err.c_str();
+            easyai::log::error("ai-%s: FAILED after %lld ms — %s\n",
+                               s.name.c_str(), ms, why);
             if (!err.empty())
                 return ToolResult::error(
                     "ai-" + s.name + " call failed: " + err);
             return ToolResult::error(
                 "ai-" + s.name + " returned an empty reply.");
+        }
+        easyai::log::write("ai-%s: ok after %lld ms (reply=%zu chars)\n",
+                           s.name.c_str(), ms, reply.size());
+        if (auto * fp = easyai::log::file()) {
+            std::fprintf(fp, "ai-%s: reply> %s\n",
+                         s.name.c_str(), log_preview(reply).c_str());
+            std::fflush(fp);
         }
         return ToolResult::ok(reply);
     };

@@ -122,6 +122,63 @@ skips an enabled-but-url-less spec with a warning):
   they appear on `/v1/tools`. Gated by `--no-local-tools` /
   `[SERVER] local_tools`. Peer URLs must be reachable from the server.
 
+**Logging (2026-06-02)**: the `remote_model` handler (lib, so both
+binaries) logs each call via `easyai::log` — a summary line on stderr
+(`ai-<name>: calling <url> (model=…, prompt=N chars)` →
+`ai-<name>: ok after N ms (reply=M chars)` or `… FAILED after N ms — …`
+via `log::error`) plus prompt/answer previews written only to the raw
+transaction log (`log::file()`), so bodies don't leak into journald.
+Registration logs list each enabled peer with its endpoint + model
+(server: stderr; cli: `--verbose`).
+
+## Multi-part request logging (server, 2026-06-02)
+
+`parse_chat_request` coalesces array-form message `content` into text.
+Non-text parts (`image_url`, `input_audio`, …) are silently dropped by
+this text-only path — now COUNTED and surfaced: a text-only multi-part
+message gets a quiet raw-log line; a message with dropped parts logs to
+stderr (`multi-part content in N message(s): … M non-text part(s)
+DROPPED (<deduped types>) — the model will not see them`) so the data
+loss is visible to the operator.
+
+## Prompt-progress logging (server, 2026-06-02)
+
+Under `--verbose`, the server logs the per-batch prompt-eval progress
+line the CLI already prints — same format, now server-side:
+`easyai-server: [prompt_progress] <processed>/<total> (<cached> cached)
+<ms> ms → thinking <N>% · ctx <N>% (<used>/<n_ctx> tok)`
+(`thinking = processed/total`; `ctx = (cached+processed)/n_ctx`, the
+LIVE projection of where the KV cache lands). Wired in
+`handle_chat`'s `engine.on_prompt_progress` and decoupled from the
+client's SSE preference: the callback is installed when the client
+wants SSE progress OR the operator runs `--verbose`, so the log fires
+regardless of `stream_options.easyai_prompt_progress`. Same 80 ms / 5 %
+throttle as the SSE path; only emitted on streaming generations (the
+prompt-eval batches are a streaming-path concept).
+
+## Datetime + memory injection is tool-gated (AUTHORITATIVE — 2026-06-02)
+
+The per-turn `preamble::build()` blocks are now ENFORCED from the live
+tool registry (`ToolsetView::from_tools`) instead of flags alone, on
+both server and cli:
+
+| Block | Injected when |
+|-------|---------------|
+| `# AUTHORITATIVE DATE/TIME` (+ `# KNOWLEDGE CUTOFF` on server) | the `datetime` tool is registered — OR (server) the `--inject-datetime` flag/header is on. Tool presence forces it on even if the flag is off. |
+| `# KNOWLEDGE LOOP` + `# KNOWLEDGE VOCABULARY` | a `knowledge_*` tool is registered AND a store is configured (`--memory`/`--RAG`). Now INDEPENDENT of the datetime toggle — turning datetime off no longer suppresses memory. |
+
+* `examples/server.cpp` `prepare_engine_for_request`: `inject_dt =
+  inject_now || view.datetime_on`; `mem_root = view.memory_on ?
+  ctx.memory_root : ""`; `build_authoritative_preamble(ctx, inject_dt,
+  mem_root)`. Per-request, off the engine's current tool set (so a
+  client that replaces tools is judged on what it actually sent).
+* `examples/cli.cpp`: injects from `ToolsetView::from_tools(cli.tools())`
+  into the baked system prompt — `datetime` tool ⇒ date/time block (no
+  CUTOFF; the remote model's cutoff is unknown), `knowledge_*` + `--memory`
+  ⇒ memory blocks. `cite_sources=false` here (the cli prefix emits it).
+  Note: against an easyai-server this double-injects the date/time block
+  (cli + server); both read their own wall clock.
+
 ## Backend::Config extensions (2026-05-27)
 
 `LocalBackend::Config` and `RemoteBackend::Config` gained two fields,
