@@ -5152,7 +5152,21 @@ int main(int argc, char ** argv) {
                 "};"
                 "async function monitorSSE(stream){"
                   "const set=window.__easyaiSetStatus||(()=>{});"
-                  "set('answering');"
+                  // Chip shows "processing" the instant the request is sent
+                  // (the bundle's "Processing…" shimmer is hidden via CSS);
+                  // prompt_progress upgrades it to "thinking N%", the first
+                  // token switches it to "answering".
+                  "set('processing');"
+                  // Make the processing-info bar visible + working the
+                  // instant the request is sent — don't wait for the first
+                  // answer. Repaint via the global push hook (a few
+                  // animation frames cover the panel mounting just after).
+                  "if(window.__easyaiPushTimings){"
+                    "window.__easyaiPushTimings(null);"
+                    "requestAnimationFrame(()=>window.__easyaiPushTimings(null));"
+                    "setTimeout(()=>window.__easyaiPushTimings(null),60);"
+                    "setTimeout(()=>window.__easyaiPushTimings(null),250);"
+                  "}"
                   "const reader=stream.getReader();"
                   "const dec=new TextDecoder();"
                   "let buf='',inThink=false,inToolCallTag=false,startMs=performance.now();"
@@ -5179,7 +5193,7 @@ int main(int argc, char ** argv) {
                       "live:true,"
                     "};"
                   "};"
-                  "let lastState='answering';"
+                  "let lastState='processing';"
                   "const liveTick=setInterval(()=>{"
                     "const now=performance.now();"
                     "const dt=now-prevMs;"
@@ -5930,6 +5944,12 @@ int main(int argc, char ** argv) {
                     "'[aria-label=\"Assistant message with actions\"]'"
                   ");"
                   "msgs.forEach(m=>{attachChip(m);shrinkToolLogs(m);});"
+                  // Paint the processing-info bar the moment its panel
+                  // mounts (request start) or whenever svelte wipes our
+                  // span — only when our `.__easyai-ovr` is missing, so we
+                  // don't rebuild it on every streamed-token DOM mutation.
+                  "if(!document.querySelector('.chat-processing-info-content .__easyai-ovr'))"
+                    "renderOverview();"
                 "};"
                 "const mo=new MutationObserver(scanMessages);"
                 "if(document.body)mo.observe(document.body,{childList:true,subtree:true});"
@@ -6129,9 +6149,21 @@ int main(int argc, char ** argv) {
                   // Threshold colors (ctxColor) are applied inline only
                   // when crossed; otherwise the value uses text-foreground
                   // and tracks the active light/dark theme automatically.
-                  "const target=document.querySelector('.chat-processing-info-detail');"
-                  "if(target!==__eaiOvrTarget)__eaiBindOvr(target);"
-                  "if(!target)return;"
+                  // Paint into a persistent `.__easyai-ovr` span we own,
+                  // inside the bundle's `.chat-processing-info-content`.
+                  // `-content` exists as soon as the container mounts (when
+                  // the request starts), unlike the bundle's `-detail`,
+                  // which it only fills at finish — so the bar is populated
+                  // from send, not just after the first answer completes.
+                  "const content=document.querySelector('.chat-processing-info-content');"
+                  "if(content!==__eaiOvrTarget)__eaiBindOvr(content);"
+                  "if(!content)return;"
+                  "let ovr=content.querySelector('.__easyai-ovr');"
+                  "if(!ovr){"
+                    "ovr=document.createElement('span');"
+                    "ovr.className='__easyai-ovr';"
+                    "content.appendChild(ovr);"
+                  "}"
                   "const ctxValStyle=ctxColor?"
                     "' style=\"color:'+ctxColor+'\"':'';"
                   "const html="
@@ -6142,7 +6174,7 @@ int main(int argc, char ** argv) {
                       "'<span class=\"text-muted-foreground\">last</span>'+"
                       "'<span class=\"text-foreground\">'+lastText+'</span>'+"
                     "'</span>';"
-                  "if(target.innerHTML!==html)target.innerHTML=html;"
+                  "if(ovr.innerHTML!==html)ovr.innerHTML=html;"
                 "};"
                 "window.__easyaiPushTimings=(t)=>{"
                   "if(t)lastTimings=t;"
@@ -6171,6 +6203,17 @@ int main(int argc, char ** argv) {
                 // working.
                 ".chat-processing-info-container{"
                 "  opacity:1 !important;transform:none !important;}"
+                // We paint our metrics into a `.__easyai-ovr` span we
+                // inject into `-content`; hide the bundle's native detail
+                // span so it doesn't show empty / duplicate beside ours.
+                ".chat-processing-info-detail{display:none !important;}"
+                // Kill the bundle's "Processing…/Initializing…" shimmer
+                // placeholder (the .processing-container/.processing-text
+                // pair that renders getProcessingMessage()).  Its job —
+                // telling the user the model is working — now lives in the
+                // per-message status chip ("processing" → "thinking N%" →
+                // "answering").  Stable kebab class, no svelte hash.
+                ".processing-container{display:none !important;}"
                 // MCP — explicit user request.
                 "[class*=\"mcp\" i],[class*=\"Mcp\"],"
                 "[data-testid*=\"mcp\" i],"

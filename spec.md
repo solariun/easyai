@@ -163,20 +163,33 @@ bundle.js edit):
 
 **Per-message chip** (`buildChip` / `__easyaiSetStatus` — the
 inline-flex span beside the copy/edit/fork/delete actions; dot `.d` +
-label `.l`) now shows ONLY the waving dot + a status word:
-`thinking <N>%` (from `easyai.prompt_progress` `pct` during ingestion),
-`answering`, `thinking`, `fetching·<tool>`, `processing`, `complete`,
-`error`. All numeric metrics were removed from it.
+label `.l`) now shows ONLY the waving dot + a status word. From the
+instant the request is sent it reads `processing`, then `thinking <N>%`
+(from `easyai.prompt_progress` `pct` during ingestion — visible on
+longer prompts; near-instant for short ones), then `answering` /
+`thinking` once tokens flow, then `fetching·<tool>` / `complete` /
+`error`. All numeric metrics were removed from it. The bundle's own
+`.processing-container` "Processing…/Initializing…" shimmer is hidden
+via CSS — its role (signal the model is working) is now the chip's
+job.
 
 **Processing-info bar** (the bundle's `.chat-processing-info-container`
-> `-content` > `.chat-processing-info-detail`, painted by
-`renderOverview`) now carries the metrics: `ctx <used>/<n_ctx> (<pct>%)
-· last <tokens> tok · <time>s · <inst> t/s`.
-* It is forced ALWAYS-VISIBLE via injected CSS
+> `-content`) now carries the metrics: `ctx <used>/<n_ctx> (<pct>%) ·
+last <tokens> tok · <time>s · <inst> t/s`.
+* `renderOverview` paints a persistent `.__easyai-ovr` span it injects
+  into `.chat-processing-info-content` (which exists as soon as the
+  container mounts), NOT the bundle's `.chat-processing-info-detail`
+  (the bundle only fills that at finish). The bundle's native `-detail`
+  is hidden via CSS so it doesn't show empty/duplicate beside ours.
+* **Visible + working on SEND** (2026-06-02), not only after the first
+  answer: forced visible via injected CSS
   (`.chat-processing-info-container{opacity:1!important;transform:none
-  !important}`) — the bundle otherwise fades it out (opacity/transform)
-  unless its svelte `.visible` class is set during processing. Targeted
-  by the stable kebab class (no svelte hash) for rebuild-resilience.
+  !important}`, stable kebab class, no svelte hash); `monitorSSE` calls
+  `__easyaiPushTimings(null)` at request start (+ a rAF / 60 ms / 250 ms
+  re-paint to cover the panel mounting just after); and the per-message
+  MutationObserver (`scanMessages`) repaints whenever our `.__easyai-ovr`
+  is missing (panel mount / svelte re-render), so the bar populates the
+  moment the request fires.
 * Speed is the INSTANT rate during streaming: `monitorSSE`'s 200 ms
   sampler computes `instTps = Δtokens/Δt` and ships it on the synthetic
   live timings (`inst_tps`); `renderOverview` uses `inst_tps` when
