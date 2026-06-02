@@ -1717,6 +1717,63 @@ reasoning        = off
 #context          = 131072
 
 # ============================================================
+# [REMOTE_MODEL_<name>] — peer-model tools (ai-<name>)
+# ============================================================
+# Each [REMOTE_MODEL_<name>] section becomes a server-side tool
+# named ai-<name>. The model running on THIS server can call it
+# to consult ANOTHER AI model as a peer: "check my work",
+# "co-solve this", "second opinion before a risky step". One
+# section = one tool; add as many as you like.
+#
+# The tool runs SERVER-SIDE — the server is the agent. It calls
+# the peer endpoint, gets the reply, and feeds it back into the
+# turn. So the webui and ANY /v1/chat/completions consumer get
+# the peers for free (also listed on /v1/tools). Each peer URL
+# must be reachable FROM THE SERVER.
+#
+# Gated by the local toolbelt master switch: SERVER.local_tools
+# = off (or --no-local-tools) drops these along with the built-in
+# tools.
+#
+# EVERY peer is OFF by default — set enabled = true to switch one
+# on. The server dials out to NO peer until you do (so a box that
+# IS ai.local never points a peer back at itself by accident).
+#
+# Two peers come pre-filled as named presets (url + description),
+# so enabling one is a one-liner:
+#   ai-local -> http://ai.local      (general purpose)
+#   ai-pro   -> http://ai-pro.local  (harder problems)
+# A section with the same <name> overrides the preset's fields.
+#
+# Keys (only enabled = true is required to switch a peer on;
+# url is required unless a preset already supplies it):
+#   enabled      true to switch this peer ON (default off)
+#   url          http(s) endpoint (bare host[:port] gets http://)
+#   key          Bearer token
+#   model        request-body model id (default: easyai)
+#   description  what this peer is good for (shown to the model)
+#   temperature top_p top_k min_p max_tokens   sampling knobs
+#   timeout      per-call seconds (default 300)
+#   tls_insecure skip cert verify on https (dev only)
+#   ca_cert_path custom CA bundle (PEM) for https
+
+# Switch on the ai-pro preset and tweak it:
+#[REMOTE_MODEL_pro]
+#enabled      = true
+#url          = https://ai-pro.local
+#key          = sk-...
+#model        = easyai
+#description  = Larger reasoning model. Use for hard math, tricky logic, and final-answer checks.
+#temperature  = 0.2
+#timeout      = 600
+
+# A brand-new peer (any name) — just give it enabled + url:
+#[REMOTE_MODEL_bigbox]
+#enabled      = true
+#url          = http://bigbox.lan:9000
+#description  = 72B model on the LAN for deep reasoning.
+
+# ============================================================
 # [TOOLS] — per-tool ACL (RESERVED for a future release)
 # ============================================================
 # Will let the operator filter which tools the MCP catalogue
