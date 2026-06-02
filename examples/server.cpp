@@ -5163,18 +5163,28 @@ int main(int argc, char ** argv) {
                   // generation is still in flight.  Updated on every
                   // delta below; rendered through liveTick().
                   "let liveTok=0,liveStart=0;"
+                  // INSTANT generation speed (not the cumulative average):
+                  // tokens emitted in the last sampling window / that
+                  // window's duration.  Recomputed on the 200ms tick;
+                  // liveExtra() returns the latest sample so the frequent
+                  // per-delta status updates reuse it instead of each
+                  // recomputing a lagging running average.
+                  "let prevTok=0,prevMs=0,instTps=0;"
                   "const liveExtra=()=>{"
                     "const elapsed=Math.max(1,performance.now()-liveStart);"
-                    "const tps=liveTok/(elapsed/1000);"
                     "return{"
                       "tokens:liveTok,"
                       "elapsedMs:elapsed,"
-                      "tps:tps,"
+                      "tps:instTps,"
                       "live:true,"
                     "};"
                   "};"
                   "let lastState='answering';"
                   "const liveTick=setInterval(()=>{"
+                    "const now=performance.now();"
+                    "const dt=now-prevMs;"
+                    "if(prevMs>0&&dt>0)instTps=(liveTok-prevTok)/(dt/1000);"
+                    "prevMs=now;prevTok=liveTok;"
                     "if(liveTok>0&&lastState!=='complete'&&lastState!=='error')"
                       "set(lastState,liveExtra());"
                   "},200);"
@@ -5208,6 +5218,18 @@ int main(int argc, char ** argv) {
                             "window.__easyaiToolDisplay(j.display,j.name,j.is_error);"
                           "}"
                         "}catch(e){}"
+                        "continue;"
+                      "}"
+                      // easyai.prompt_progress — per-batch prompt-ingestion
+                      // progress (server emits pct = processed/total).  Show
+                      // it as "thinking N%" on the chip during prompt eval,
+                      // before the first token is sampled.
+                      "if(evtType==='easyai.prompt_progress'){"
+                        "try{const j=JSON.parse(data);"
+                          "const pct=(typeof j.pct==='number')?j.pct:"
+                            "(j.total?Math.round(100*j.processed/j.total):0);"
+                          "setLive('processing',{thinkPct:pct});"
+                        "}catch(e){setLive('processing');}"
                         "continue;"
                       "}"
                       // easyai.prompt_eval — server-side llama-server-style
@@ -5261,6 +5283,7 @@ int main(int argc, char ** argv) {
                             "if(liveStart>0)window.__easyaiPushTimings({"
                               "predicted_n:liveTok,"
                               "predicted_ms:now-liveStart,"
+                              "inst_tps:instTps,"
                               "live:true,"
                             "});"
                           "}"
@@ -5273,7 +5296,7 @@ int main(int argc, char ** argv) {
                           "let msg='';"
                           "if(t&&t.predicted_n&&t.predicted_ms){"
                             "const tps=(t.predicted_n/(t.predicted_ms/1000)).toFixed(1);"
-                            "msg=t.predicted_n+'tok·'+(t.predicted_ms/1000).toFixed(1)+'s·'+tps+'t/s';"
+                            "msg=(t.predicted_ms/1000).toFixed(1)+'s·'+t.predicted_n+'tok·'+tps+'t/s';"
                           "}"
                           "setLive('complete',msg);"
                           // Server-side incomplete-turn signal — single
@@ -5947,20 +5970,17 @@ int main(int argc, char ** argv) {
                     "else dot.classList.remove('pulse');"
                   "}"
                   "if(lab){"
+                    // Status ONLY — the metrics (tokens · time · speed)
+                    // now live in the always-visible processing-info bar,
+                    // not the per-message chip.  The chip is just the
+                    // waving dot + a status word.
                     "let txt=state;"
-                    "if(state==='complete'&&typeof extra==='string'&&extra){"
-                      "txt=extra;"
+                    "if(state==='processing'&&extra&&typeof extra==='object'&&"
+                             "typeof extra.thinkPct==='number'){"
+                      // prompt-ingestion progress → "thinking 37%"
+                      "txt='thinking '+extra.thinkPct+'%';"
                     "}else if(state==='fetching'&&typeof extra==='string'&&extra){"
                       "txt='fetching·'+extra;"
-                    "}else if(state==='processing'&&typeof extra==='string'&&extra){"
-                      "txt='prompt·'+extra;"
-                    "}else if(extra&&typeof extra==='object'&&extra.live){"
-                      // Live metrics: state + tok count + elapsed + t/s.
-                      "const sec=(extra.elapsedMs/1000).toFixed(1);"
-                      "const tps=extra.tps?extra.tps.toFixed(1):'0.0';"
-                      "txt=state+'·'+extra.tokens+'tok·'+sec+'s·'+tps+'t/s';"
-                    "}else if(state==='fetching'&&extra&&extra.tokens){"
-                      "txt='fetching';"
                     "}"
                     "lab.textContent=txt;"
                   "}"
@@ -6090,7 +6110,10 @@ int main(int argc, char ** argv) {
                   "}"
                   "let lastText='—';"
                   "if(t&&t.predicted_n&&t.predicted_ms){"
-                    "const tps=(t.predicted_n/(t.predicted_ms/1000));"
+                    // Live: INSTANT t/s (monitorSSE's 200ms sampler);
+                    // final: overall predicted_n/predicted_ms throughput.
+                    "const tps=(t.live&&typeof t.inst_tps==='number')"
+                      "?t.inst_tps:(t.predicted_n/(t.predicted_ms/1000));"
                     "lastText=t.predicted_n+' tok · '+(t.predicted_ms/1000).toFixed(1)+"
                       "'s · '+tps.toFixed(1)+' t/s';"
                   "}"
@@ -6139,6 +6162,15 @@ int main(int argc, char ** argv) {
             // patterns; if upstream renames things we'll need to revisit.
             inj <<
               "<style>"
+                // Processing-info bar: ALWAYS visible.  The bundle fades
+                // it out (opacity:0 + translateY) unless its svelte
+                // `.visible` class is present during processing; we host
+                // the live generation metrics (tokens · time · instant
+                // t/s) there now, so it must persist.  Target the stable
+                // kebab class (no svelte hash) so a rebuilt bundle keeps
+                // working.
+                ".chat-processing-info-container{"
+                "  opacity:1 !important;transform:none !important;}"
                 // MCP — explicit user request.
                 "[class*=\"mcp\" i],[class*=\"Mcp\"],"
                 "[data-testid*=\"mcp\" i],"

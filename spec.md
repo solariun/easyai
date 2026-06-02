@@ -156,6 +156,35 @@ regardless of `stream_options.easyai_prompt_progress`. Same 80 ms / 5 %
 throttle as the SSE path; only emitted on streaming generations (the
 prompt-eval batches are a streaming-path concept).
 
+## Webui status split: chip vs processing-info bar (server, 2026-06-02)
+
+Two surfaces, both driven by server.cpp's injected webui JS (no
+bundle.js edit):
+
+**Per-message chip** (`buildChip` / `__easyaiSetStatus` — the
+inline-flex span beside the copy/edit/fork/delete actions; dot `.d` +
+label `.l`) now shows ONLY the waving dot + a status word:
+`thinking <N>%` (from `easyai.prompt_progress` `pct` during ingestion),
+`answering`, `thinking`, `fetching·<tool>`, `processing`, `complete`,
+`error`. All numeric metrics were removed from it.
+
+**Processing-info bar** (the bundle's `.chat-processing-info-container`
+> `-content` > `.chat-processing-info-detail`, painted by
+`renderOverview`) now carries the metrics: `ctx <used>/<n_ctx> (<pct>%)
+· last <tokens> tok · <time>s · <inst> t/s`.
+* It is forced ALWAYS-VISIBLE via injected CSS
+  (`.chat-processing-info-container{opacity:1!important;transform:none
+  !important}`) — the bundle otherwise fades it out (opacity/transform)
+  unless its svelte `.visible` class is set during processing. Targeted
+  by the stable kebab class (no svelte hash) for rebuild-resilience.
+* Speed is the INSTANT rate during streaming: `monitorSSE`'s 200 ms
+  sampler computes `instTps = Δtokens/Δt` and ships it on the synthetic
+  live timings (`inst_tps`); `renderOverview` uses `inst_tps` when
+  `t.live`, else the overall `predicted_n/predicted_ms` on finish.
+
+Live token count is the streamed chunk count (≈ tokens) until
+finish_reason, when the server's real `predicted_n` lands.
+
 ## Datetime + memory injection is tool-gated (AUTHORITATIVE — 2026-06-02)
 
 The per-turn `preamble::build()` blocks are now ENFORCED from the live
