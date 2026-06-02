@@ -4462,6 +4462,45 @@ int main(int argc, char ** argv) {
             args.external_tools_dir.c_str());
     }
 
+    // Remote-model peers — ai-<name> tools from [REMOTE_MODEL_*] in the
+    // server's INI. The two presets (ai-local / ai-pro) are pre-filled
+    // but, like every connection, OFF until a section sets `enabled =
+    // true`. Registered into the server-side toolset so the webui AND
+    // any /v1/chat/completions consumer can use them: the tool executes
+    // HERE (the server is the agent) — it calls the peer endpoint and
+    // feeds the reply back into the turn — so each peer URL must be
+    // reachable from the server, and nothing dials out until the
+    // operator opts in. Gated by --no-local-tools like the rest of the
+    // built-in toolbelt.
+    if (args.local_tools) {
+        std::size_t added = 0;
+        for (const auto & spec : easyai::tools::resolve_remote_models(ini_config)) {
+            if (!spec.enabled) continue;   // opt-in: enabled=true in the INI
+            const std::string tname = "ai-" + spec.name;
+            if (spec.url.empty()) {
+                std::fprintf(stderr,
+                    "easyai-server: [REMOTE_MODEL_%s] enabled but has no "
+                    "url — skipping\n", spec.name.c_str());
+                continue;
+            }
+            bool collides = false;
+            for (const auto & local : ctx->default_tools)
+                if (local.name == tname) { collides = true; break; }
+            if (collides) {
+                std::fprintf(stderr,
+                    "easyai-server: remote-model peer %s skipped "
+                    "(name already registered)\n", tname.c_str());
+                continue;
+            }
+            ctx->default_tools.push_back(easyai::tools::remote_model(spec));
+            ++added;
+        }
+        if (added) {
+            std::fprintf(stderr,
+                "easyai-server: remote-model peers: %zu enabled\n", added);
+        }
+    }
+
     // tool_lookup MUST be added last so its snapshot covers every other
     // tool registered above (built-ins, RAG, MCP-fetched, external).
     // The getter captures a pointer to ctx->default_tools, which is the

@@ -66,6 +66,62 @@ mirror-paste a paragraph into its own system prompt. Removes the
 
 Builder access: `Tool::builder("name").system_addendum("…")`.
 
+## Remote-model peer tools — `ai-<name>` (AUTHORITATIVE — 2026-06-01)
+
+A built-in tool family that lets the running agent consult ANOTHER
+OpenAI-protocol model as a peer ("check my work", "co-solve this",
+"second opinion before a risky step"). Lives in the lib
+(`include/easyai/remote_model_tool.hpp`, `src/remote_model_tool.cpp`,
+namespace `easyai::tools`) so any consumer reads as short as ours.
+
+| Surface | Contract |
+|---------|----------|
+| `[REMOTE_MODEL_<name>]` INI section | One connection → one tool named `ai-<name>` with a single required `prompt` param. From 1 to many; resolved at start-up. OFF until `enabled = true`. |
+| `tools::resolve_remote_models(ini)` | Pure. Seeds two presets, overlays INI sections. Returns `std::vector<RemoteModelSpec>` (every spec carries an `enabled` flag). No self-reference logic. |
+| `tools::remote_model(spec)` | Builds one `ai-<name>` Tool. Handler opens a FRESH, stateless `Client` per call, sends `prompt` as a single user turn, returns the reply. NO tools exposed to the peer (consultant, not sub-agent). Each call is independent. |
+
+INI keys (section `[REMOTE_MODEL_<name>]`): `enabled`/`enable` (**default
+false** — must be `true` to switch the connection on), `url`/`endpoint`
+(http or https; bare host gets `http://`), `key`/`api_key`, `model`
+(default `easyai`), `description`, sampling (`temperature` `top_p`
+`top_k` `min_p` `max_tokens`), `timeout` (default 300s), `tls_insecure`,
+`ca_cert_path`.
+
+**Opt-in, no auto-disable** (2026-06-02): every connection — including
+the two presets — starts `enabled = false`. Nothing dials out until the
+operator sets `enabled = true`. There is NO self-reference guard; the
+old `host[:port]`-match auto-disable and the `self_url`/`self_model`
+params were removed. Explicit enablement is the whole control surface —
+a box that IS `ai.local` simply leaves the `ai-local` preset off.
+
+**Two presets** (url + description pre-filled, both OFF by default):
+`ai-local` → `http://ai.local`, `ai-pro` → `http://ai-pro.local`. A
+section with the same `<name>` overrides the preset's fields and (with
+`enabled = true`) switches it on; new names are added the same way.
+
+**Description composition** (per the [[Tool::system_addendum]] rule —
+the tool ships its own guidance):
+* `short_description` — the per-turn trigger sent in every request's
+  `tools[]` (the channel that always reaches the model, via
+  `Tool::wire_description`). Static reinforcement + the peer name.
+* `description` — full manual: the operator's per-connection text
+  ABOVE a static base that normalises WHEN / HOW / WHAT-YOU-GET-BACK.
+  Returned by `tool_lookup` / `/v1/tools`.
+* `system_addendum` — concise reinforcement (operator one-liner folded
+  in) composed into the system prompt by Session / RemoteBackend. Kept
+  short so many connections don't bloat the prompt.
+
+**Binary wiring** (resolution is lib-side; each binary registers only
+`enabled` specs, BEFORE `tool_lookup` so the snapshot covers them, and
+skips an enabled-but-url-less spec with a warning):
+* `examples/cli.cpp` `register_tools()` — re-reads the INI, honours an
+  explicit `--tools` allowlist by `ai-<name>`.
+* `examples/server.cpp` — resolves from the server's own loaded
+  `ini_config`. Tools execute SERVER-SIDE (the server is the agent),
+  so the webui and any `/v1/chat/completions` consumer get them and
+  they appear on `/v1/tools`. Gated by `--no-local-tools` /
+  `[SERVER] local_tools`. Peer URLs must be reachable from the server.
+
 ## Backend::Config extensions (2026-05-27)
 
 `LocalBackend::Config` and `RemoteBackend::Config` gained two fields,

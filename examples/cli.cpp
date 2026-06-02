@@ -53,6 +53,7 @@
 #include "easyai/plan.hpp"
 #include "easyai/preamble.hpp"
 #include "easyai/rag_tools.hpp"
+#include "easyai/remote_model_tool.hpp"
 #include "easyai/text.hpp"
 #include "easyai/tool.hpp"
 #include "easyai/ui.hpp"
@@ -1622,6 +1623,32 @@ void register_tools(easyai::Client & cli,
             if (!o.tools_enabled.empty()
                     && o.tools_enabled.count(t.name) == 0) continue;
             cli.add_tool(std::move(t));
+        }
+    }
+
+    // Remote-model peers — ai-<name> tools from [REMOTE_MODEL_*] INI
+    // sections (the two presets ai-local / ai-pro are pre-filled but,
+    // like every connection, OFF until the section sets `enabled =
+    // true`). We re-read the INI here (cheap) — peers don't depend on
+    // the final --url; a missing INI simply means no peers are on.
+    {
+        std::string rm_err;
+        easyai::config::Ini rm_ini =
+            easyai::config::load_ini_file(o.config_path, rm_err);
+        for (const auto & spec : easyai::tools::resolve_remote_models(rm_ini)) {
+            if (!spec.enabled) continue;   // opt-in: enabled=true in the INI
+            const std::string tname = "ai-" + spec.name;
+            // Honour an explicit --tools allowlist; the empty default
+            // registers every enabled peer.
+            if (!o.tools_enabled.empty() && o.tools_enabled.count(tname) == 0)
+                continue;
+            if (spec.url.empty()) {
+                std::fprintf(stderr,
+                    "easyai-cli: [REMOTE_MODEL_%s] enabled but has no url "
+                    "— skipping\n", spec.name.c_str());
+                continue;
+            }
+            cli.add_tool(easyai::tools::remote_model(spec));
         }
     }
 

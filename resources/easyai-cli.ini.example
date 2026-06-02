@@ -286,3 +286,59 @@
 ; lines prefixed with > are sent to the AI model. Requires TTY.
 ; CLI flag --shell overrides this setting.
 ;shell            = false
+
+
+; ============================================================
+; Remote-model peers — [REMOTE_MODEL_<name>] sections
+; ============================================================
+;
+; Each [REMOTE_MODEL_<name>] section becomes a tool named
+; `ai-<name>` that the running agent can call to consult ANOTHER
+; AI model as a peer: "check my work", "co-solve this", "second
+; opinion before a risky step". One section = one tool; add as
+; many as you like. They are resolved once at start-up.
+;
+; The tool ships its own usage guidance; the `description` below
+; is shown ABOVE that static base so the model knows what THIS
+; peer is good for (helps it pick between several peers).
+;
+; EVERY peer is OFF by default — set `enabled = true` to switch one
+; on. Nothing dials out until you do.
+;
+; Two peers come pre-filled as named presets (url + description),
+; so enabling one is a one-liner:
+;   ai-local → http://ai.local      (general purpose)
+;   ai-pro   → http://ai-pro.local  (harder problems)
+; A section with the same <name> overrides the preset's fields.
+;
+; Keys (only `enabled = true` is required to switch a peer on;
+; `url` is required unless a preset already supplies it):
+;   enabled      true to switch this peer ON (default off)
+;   url          http(s) endpoint (bare host[:port] gets http://)
+;   key          Bearer token
+;   model        request-body model id (default: easyai)
+;   description  what this peer is good for (shown to the model)
+;   temperature top_p top_k min_p max_tokens   sampling knobs
+;   timeout      per-call seconds (default 300)
+;   tls_insecure skip cert verify on https (dev only)
+;   ca_cert_path custom CA bundle (PEM) for https
+
+; Switch on the ai-pro preset and tweak it:
+;[REMOTE_MODEL_pro]
+;enabled      = true
+;url          = https://ai-pro.local
+;key          = sk-...
+;model        = easyai
+;description  = Larger reasoning model. Use for hard math, tricky logic, and final-answer checks.
+;temperature  = 0.2
+;timeout      = 600
+
+; Switch on the ai-local preset (url comes from the preset):
+;[REMOTE_MODEL_local]
+;enabled      = true
+
+; A brand-new peer (any name) — just give it enabled + url:
+;[REMOTE_MODEL_bigbox]
+;enabled      = true
+;url          = http://bigbox.lan:9000
+;description  = 72B model on the LAN for deep reasoning.

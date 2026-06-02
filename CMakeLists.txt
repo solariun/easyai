@@ -149,6 +149,7 @@ set(EASYAI_SOURCES
     src/engine.cpp
     src/tool.cpp
     src/builtin_tools.cpp
+    src/remote_model_tool.cpp
     src/config.cpp
     src/external_tools.cpp
     src/rag_tools.cpp

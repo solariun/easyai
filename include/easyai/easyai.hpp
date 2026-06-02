@@ -16,6 +16,7 @@
 #include "session.hpp"
 #include "tool.hpp"
 #include "builtin_tools.hpp"
+#include "remote_model_tool.hpp"
 #include "external_tools.hpp"
 #include "rag_tools.hpp"
 #include "preamble.hpp"
