@@ -1646,22 +1646,15 @@ max_tokens       = $max_tokens
 # [MODEL_<pattern>] — per-model ENGINE overrides
 # ============================================================
 # Define per-model tuning profiles that override [ENGINE] defaults
-# when the loaded model name matches. The server strips the GGUF
-# path to basename-without-extension, then picks the best section
-# using two passes:
-#
-#   1. EXCLUSIVE alias — a section that lists 'alias = <name>'
-#      (or 'alias = name1, name2, ...') only activates when the
-#      model name matches one of those aliases EXACTLY (case-
-#      insensitive). Use this to pin a profile to a specific gguf
-#      and exclude it from substring matching.
-#   2. PREFIX pattern — '[MODEL_<pattern>]' matches when the model
-#      name STARTS WITH <pattern> (case-insensitive). The LONGEST
-#      matching prefix wins. One section covers every quant in a
-#      family (e.g. [MODEL_Qwen3.6] applies to
-#      Qwen3.6-25B-A38M-Q4_K_M, Qwen3.6-25B-A38M-Q6_K, ...).
-#      Sections that declared 'alias' are skipped here so they
-#      stay exclusive to their explicit targets.
+# when the loaded model matches. The server strips the GGUF path to
+# basename-without-extension, then picks the section whose name is the
+# LONGEST prefix of it (case-insensitive): '[MODEL_<pattern>]' matches
+# when the model name STARTS WITH <pattern>, so one section covers every
+# quant in a family (e.g. [MODEL_Qwen3.6] applies to
+# Qwen3.6-25B-A38M-Q4_K_M, Qwen3.6-25B-A38M-Q6_K, ...) and a longer,
+# more specific pattern wins over a shorter one. Loading
+# "Qwen3-Coder-Next-Q6_K_M.gguf" matches both [MODEL_Qwen3] and
+# [MODEL_Qwen3-Coder-Next] — the latter wins (longer prefix).
 #
 # Precedence: CLI flags > MODEL_<match> > [ENGINE] > hardcoded.
 #
@@ -1672,17 +1665,20 @@ max_tokens       = $max_tokens
 # Only include keys you want to override; omitted keys keep the
 # [ENGINE] value.
 #
-# Example: loading "Qwen3-Coder-Next-Q6_K_M.gguf" matches both
-# [MODEL_Qwen3] and [MODEL_Qwen3-Coder-Next] — the latter wins
-# because "Qwen3-Coder-Next" is a longer prefix match. Want the
-# profile to apply ONLY to that exact gguf? Add
-# 'alias = Qwen3-Coder-Next-Q6_K_M' to the section.
+# 'alias' is NOT a match key — it is the public model-id this profile
+# advertises (via /v1/models, the webui badge, chat responses) once
+# matched, OVERRIDING the [SERVER] alias above. Each profile below sets
+# 'alias = $service_alias' so the served name stays '$service_alias' for
+# whichever model the box loads; change a profile's alias to give that
+# specific model its own session name. An explicit --alias on the
+# command line still wins.
 
 # Research + coding agent profile for Qwen3-Coder-Next.
 # Low temperature, tight top_p/min_p, mild penalties — tuned for
 # deterministic code output and structured tool-calling.
 # KV K-cache at bf16, V-cache at q8_0 for precision + memory balance.
 [MODEL_Qwen3-Coder-Next]
+alias            = $service_alias
 temperature      = 0.2
 top_p            = 0.92
 top_k            = 50
@@ -1702,6 +1698,7 @@ cache_type_v     = q8_0
 # Moderate temperature for natural conversation, no presence penalty
 # (the model's own MoE gating handles diversity), repeat off.
 [MODEL_Qwen3.6]
+alias            = $service_alias
 temperature      = 0.4
 top_p            = 0.95
 top_k            = 20
@@ -1732,15 +1729,15 @@ reasoning        = off
 
 # ----------------------------------------------------------------
 # Full [MODEL_*] reference — every key the engine accepts.
-# Copy, rename to a real model, uncomment what you want to tweak.
-# 'alias' makes the profile EXCLUSIVE to the listed gguf basename(s).
+# Copy, rename so [MODEL_<pattern>] is a prefix of your gguf basename,
+# uncomment what you want to tweak.
 # ----------------------------------------------------------------
 #[MODEL_TEMPLATE]
-## Exclusive targets (comma-separated, case-insensitive, exact match
-## against the gguf basename without extension). With 'alias' present
-## this section is skipped by the substring matcher and ONLY activates
-## when the loaded model name equals one of these.
-#alias               = ExactGgufBasename, AnotherBasename
+## Public model-id this profile advertises once matched, overriding the
+## [SERVER] alias (via /v1/models, the webui badge, chat responses).
+## Single name; NOT a match key (matching is by the [MODEL_<pattern>]
+## prefix above). An explicit --alias on the command line still wins.
+#alias               = $service_alias
 #
 ## --- core load ---
 #context             = 32768

@@ -87,23 +87,34 @@ false** — must be `true` to switch the connection on), `url`/`endpoint`
 `top_k` `min_p` `max_tokens`), `timeout` (default 300s), `tls_insecure`,
 `ca_cert_path`.
 
-## Per-model `[MODEL_*]` overrides + exclusive `alias` (2026-06-03)
+## Per-model `[MODEL_*]` overrides + `alias` served-name override (2026-06-03)
 
-`find_model_section(ini, model_name)` picks the best `[MODEL_*]` profile
-in two passes:
+`find_model_section(ini, model_name)` picks the `[MODEL_*]` profile whose
+pattern is the **longest prefix** of the resolved gguf basename
+(case-insensitive). `[MODEL_<pattern>]` matches when the basename STARTS
+WITH `<pattern>`, so one section covers every quant in a family
+(`[MODEL_Qwen3.6]` → `Qwen3.6-25B-A38M-Q4_K_M`, …) and a longer, more
+specific pattern wins over a shorter one (`[MODEL_Qwen3-Coder-Next]` beats
+`[MODEL_Qwen3]`). Matching is purely on the section name; `alias` is not
+consulted here.
 
-1. **Exclusive alias** — sections with an `alias = <name>[,<name>...]`
-   key activate ONLY on an exact (case-insensitive) match against one
-   of the listed gguf basenames. Longest matching alias wins.
-2. **Prefix pattern** — `[MODEL_<pattern>]` matches when the resolved
-   model basename STARTS WITH `<pattern>` (case-insensitive). Longest
-   matching prefix wins, so one section covers every quant in a family
-   (`[MODEL_Qwen3.6]` → `Qwen3.6-25B-A38M-Q4_K_M`, …). Sections that
-   declared `alias` are skipped here so they remain exclusive to their
-   explicit targets.
+`alias` inside a `[MODEL_*]` section is the **public model-id the matched
+profile advertises** — it OVERRIDES the `[SERVER] alias` for `/v1/models`,
+the webui badge, and chat responses, so the served name tracks whichever
+model the box loads. Resolution lives in `server.cpp` right after
+`apply_model_overrides`: when a profile matched and the operator did NOT
+pass `--alias` on the CLI, the matched section's `alias` (single name;
+first token of a comma list, trimmed) is written into `args.alias`, which
+feeds `ctx->model_id`. Served-id precedence: **CLI `--alias` > matched
+`[MODEL_*] alias` > `[SERVER] alias` > gguf basename**.
 
-Precedence stays `CLI > MODEL_<match> > [ENGINE] > hardcoded`. The
-overlay (`apply_model_overrides`) iterates the same `kFlags()` ENGINE
+The installer (`install_easyai_server.sh`) emits `alias = $service_alias`
+in every generated `[MODEL_*]` profile so the brand name survives a model
+swap; operators change a profile's `alias` to give that specific model its
+own session name.
+
+Profile-key precedence stays `CLI > MODEL_<match> > [ENGINE] > hardcoded`.
+The overlay (`apply_model_overrides`) iterates the same `kFlags()` ENGINE
 keys, so any [ENGINE] key — including `chat_template_file`,
 `reasoning_format`, every sampling/penalty/speculative key — is valid
 inside a `[MODEL_*]` section.

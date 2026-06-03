@@ -62,19 +62,16 @@ Ini load_ini_file(const std::string & path, std::string & err_out);
 
 // Find the best-matching [MODEL_<pattern>] section for a resolved model
 // name.  Scans every section whose name starts with "MODEL_" and picks
-// the best fit using this precedence:
+// the one whose pattern is the LONGEST prefix of `model_name`
+// (case-insensitive).  `MODEL_<pattern>` matches if `model_name` STARTS
+// WITH `pattern`, so one section covers a whole quant family
+// (`MODEL_Qwen3.6` → Qwen3.6-25B-A38M-Q4_K_M, Qwen3.6-25B-A38M-Q6_K, …)
+// and a longer, more specific pattern wins over a shorter one
+// (`MODEL_Qwen3-Coder-Next` beats `MODEL_Qwen3`).
 //
-//   1. Exclusive alias — a section whose `alias = <name>[,<name>...]` key
-//      contains an exact (case-insensitive) match for `model_name`.  Use
-//      this when the pattern would otherwise be ambiguous and you want
-//      the section to apply ONLY to this model.  Multiple aliases may be
-//      comma-separated.  Among aliased matches the longest alias wins.
-//   2. Prefix pattern — `MODEL_<pattern>` matches if `model_name` STARTS
-//      WITH `pattern` (case-insensitive).  The longest matching prefix
-//      wins.  Lets one section cover a whole quant family
-//      (`MODEL_Qwen3.6` → Qwen3.6-25B-A38M-Q4_K_M, Qwen3.6-25B-A38M-Q6_K, …).
-//      Sections with an `alias` key are skipped here so they only
-//      activate via their explicit aliases.
+// The section's `alias` key is NOT used for matching — it is the public
+// model-id the matched profile advertises (overriding the [SERVER]
+// alias). The caller (apply_model_overrides) applies it.
 //
 // Returns the full section name (e.g. "MODEL_Qwen3-Coder") or "" if
 // nothing matches.

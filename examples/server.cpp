@@ -4310,6 +4310,23 @@ int main(int argc, char ** argv) {
             auto dot = mn.find_last_of('.');
             if (dot != std::string::npos) mn = mn.substr(0, dot);
             args.matched_profile = apply_model_overrides(ini_config, args, mn);
+
+            // A matched [MODEL_*] profile may carry `alias = <name>` — the
+            // public model-id this model advertises via /v1/models, the
+            // webui badge, and chat responses. It OVERRIDES the [SERVER]
+            // alias so swapping the loaded model swaps the session name
+            // automatically. An explicit CLI --alias still wins (it is the
+            // operator's per-run override; INI is config).
+            if (!args.matched_profile.empty() && !args.cli_set.count("alias")) {
+                std::string ma = ini_config.get(args.matched_profile, "alias");
+                std::size_t comma = ma.find(',');           // single name; tolerate a list
+                if (comma != std::string::npos) ma = ma.substr(0, comma);
+                std::size_t b = ma.find_first_not_of(" \t");
+                std::size_t e = ma.find_last_not_of(" \t");
+                if (b != std::string::npos) ma = ma.substr(b, e - b + 1);
+                else                        ma.clear();
+                if (!ma.empty()) args.alias = ma;
+            }
         }
     }
 

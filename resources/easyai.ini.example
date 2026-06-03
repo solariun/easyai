@@ -314,35 +314,32 @@
 ; ============================================================
 ;
 ; Define per-model tuning profiles that override [ENGINE] defaults
-; when the loaded model name matches. The server strips the GGUF
-; path to basename-without-extension, then picks the best section
-; using two passes:
-;
-;   1. EXCLUSIVE alias — a section that lists `alias = <name>`
-;      (or `alias = name1, name2, ...`) only activates when the
-;      model name matches one of those aliases EXACTLY (case-
-;      insensitive). Use this to pin a profile to a specific gguf
-;      and exclude it from substring matching.
-;   2. PREFIX pattern — `[MODEL_<pattern>]` matches when the
-;      model name STARTS WITH `<pattern>` (case-insensitive). The
-;      LONGEST matching prefix wins. One section covers every
-;      quant in a family (e.g. [MODEL_Qwen3.6] applies to
-;      Qwen3.6-25B-A38M-Q4_K_M, Qwen3.6-25B-A38M-Q6_K, ...).
-;      Sections that declared `alias` are skipped here so they
-;      remain exclusive.
+; when the loaded model matches. The server strips the GGUF path to
+; basename-without-extension, then picks the section whose name is the
+; LONGEST prefix of it (case-insensitive): `[MODEL_<pattern>]` matches
+; when the model name STARTS WITH `<pattern>`, so one section covers
+; every quant in a family (e.g. [MODEL_Qwen3.6] applies to
+; Qwen3.6-25B-A38M-Q4_K_M, Qwen3.6-25B-A38M-Q6_K, ...) and a longer,
+; more specific pattern wins over a shorter one ([MODEL_Qwen3-Coder-Next]
+; beats [MODEL_Qwen3]).
 ;
 ; Precedence: CLI flags > MODEL_<match> > [ENGINE] > hardcoded.
+;
+; `alias` is NOT a match key — it is the public model-id this profile
+; advertises (via /v1/models, the webui badge, chat responses) once
+; matched, OVERRIDING the [SERVER] alias above. Lets the served name
+; track whichever model the box loads. A single name; an explicit
+; --alias on the command line still wins.
 ;
 ; Keys are the same as [ENGINE]; omitted keys keep the [ENGINE]
 ; value. Below is a full reference covering EVERY key the engine
 ; accepts — copy, rename `TEMPLATE`, uncomment what you want.
 ;
 ;[MODEL_TEMPLATE]
-;; Exclusive targets (comma-separated, case-insensitive, exact
-;; match against the gguf basename without extension). With
-;; `alias` present this section is skipped by the substring
-;; matcher and ONLY activates on an exact alias hit.
-;alias               = ExactGgufBasename, AnotherBasename
+;; Public model-id this profile advertises once matched, overriding
+;; the [SERVER] alias. Single name; NOT a match key (matching is by
+;; the [MODEL_<pattern>] prefix). --alias on the CLI still wins.
+;alias               = EasyAi
 ;
 ;; --- core load ---
 ;context             = 32768

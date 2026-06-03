@@ -178,58 +178,23 @@ std::string find_model_section(const Ini & ini, const std::string & model_name) 
     };
     const std::string name_lc = to_lower(model_name);
 
-    // Pass 1 — explicit `alias` keys take priority and are EXCLUSIVE:
-    // a section that lists aliases activates only via an exact match
-    // against one of them.  This lets operators pin a profile to a
-    // specific gguf even when its name contains the substring of a
-    // broader pattern (e.g. [MODEL_qwen] would otherwise swallow
-    // Qwen3-Coder-Next).
-    std::string alias_section;
-    std::size_t alias_best = 0;
-    for (const auto & kv : ini.sections) {
-        const auto & sec   = kv.first;
-        const auto & entry = kv.second;
-        if (sec.size() <= 6 || sec.substr(0, 6) != "MODEL_") continue;
-        auto ait = entry.find("alias");
-        if (ait == entry.end() || ait->second.empty()) continue;
-
-        std::string rest = ait->second;
-        while (!rest.empty()) {
-            std::size_t comma = rest.find(',');
-            std::string token = (comma == std::string::npos)
-                                ? rest : rest.substr(0, comma);
-            rest = (comma == std::string::npos)
-                   ? std::string() : rest.substr(comma + 1);
-            token = trim(token);
-            if (token.size() >= 2 &&
-                token.front() == '"' && token.back() == '"') {
-                token = token.substr(1, token.size() - 2);
-            }
-            if (token.empty()) continue;
-            std::string token_lc = to_lower(token);
-            if (token_lc == name_lc && token_lc.size() > alias_best) {
-                alias_best    = token_lc.size();
-                alias_section = sec;
-            }
-        }
-    }
-    if (!alias_section.empty()) return alias_section;
-
-    // Pass 2 — prefix match on the section name, longest prefix wins.
-    // `[MODEL_Qwen3.6]` activates whenever the loaded gguf basename
-    // STARTS WITH "Qwen3.6" (case-insensitive), so a single section
-    // covers every variant in the family (e.g. Qwen3.6-25B-A38M-Q4_K_M)
-    // without listing each one.  Substring matching was rejected as
-    // too loose — it would fire on unrelated names that merely contain
-    // the pattern in the middle.  Sections that declared an `alias`
-    // are skipped so they stay exclusive to their explicit targets.
+    // Longest-prefix match on the section name. `[MODEL_Qwen3.6]`
+    // activates whenever the loaded gguf basename STARTS WITH "Qwen3.6"
+    // (case-insensitive), so a single section covers every variant in
+    // the family (e.g. Qwen3.6-25B-A38M-Q4_K_M) without listing each
+    // one. The LONGEST matching prefix wins, so [MODEL_Qwen3-Coder-Next]
+    // beats [MODEL_Qwen3] for a Qwen3-Coder-Next gguf. Substring matching
+    // was rejected as too loose — it would fire on unrelated names that
+    // merely contain the pattern in the middle.
+    //
+    // The section's `alias` key is NOT a match key: it is the public
+    // model-id this profile advertises once matched, overriding the
+    // [SERVER] alias (resolved by the caller — see apply_model_overrides).
     std::string best_section;
     std::size_t best_len = 0;
     for (const auto & kv : ini.sections) {
         const auto & sec   = kv.first;
-        const auto & entry = kv.second;
         if (sec.size() <= 6 || sec.substr(0, 6) != "MODEL_") continue;
-        if (entry.count("alias")) continue;
 
         std::string pattern_lc = to_lower(sec.substr(6));
         if (pattern_lc.empty()) continue;
