@@ -170,25 +170,63 @@ Ini load_ini_file(const std::string & path, std::string & err_out) {
 std::string find_model_section(const Ini & ini, const std::string & model_name) {
     if (model_name.empty()) return {};
 
-    std::string name_lc;
-    name_lc.reserve(model_name.size());
-    for (char c : model_name)
-        name_lc.push_back((char) std::tolower((unsigned char) c));
+    auto to_lower = [](const std::string & s) {
+        std::string out;
+        out.reserve(s.size());
+        for (char c : s) out.push_back((char) std::tolower((unsigned char) c));
+        return out;
+    };
+    const std::string name_lc = to_lower(model_name);
 
+    // Pass 1 — explicit `alias` keys take priority and are EXCLUSIVE:
+    // a section that lists aliases activates only via an exact match
+    // against one of them.  This lets operators pin a profile to a
+    // specific gguf even when its name contains the substring of a
+    // broader pattern (e.g. [MODEL_qwen] would otherwise swallow
+    // Qwen3-Coder-Next).
+    std::string alias_section;
+    std::size_t alias_best = 0;
+    for (const auto & kv : ini.sections) {
+        const auto & sec   = kv.first;
+        const auto & entry = kv.second;
+        if (sec.size() <= 6 || sec.substr(0, 6) != "MODEL_") continue;
+        auto ait = entry.find("alias");
+        if (ait == entry.end() || ait->second.empty()) continue;
+
+        std::string rest = ait->second;
+        while (!rest.empty()) {
+            std::size_t comma = rest.find(',');
+            std::string token = (comma == std::string::npos)
+                                ? rest : rest.substr(0, comma);
+            rest = (comma == std::string::npos)
+                   ? std::string() : rest.substr(comma + 1);
+            token = trim(token);
+            if (token.size() >= 2 &&
+                token.front() == '"' && token.back() == '"') {
+                token = token.substr(1, token.size() - 2);
+            }
+            if (token.empty()) continue;
+            std::string token_lc = to_lower(token);
+            if (token_lc == name_lc && token_lc.size() > alias_best) {
+                alias_best    = token_lc.size();
+                alias_section = sec;
+            }
+        }
+    }
+    if (!alias_section.empty()) return alias_section;
+
+    // Pass 2 — substring pattern match, longest pattern wins.  Skip
+    // sections that declared an `alias` so they remain exclusive to
+    // their explicit targets.
     std::string best_section;
     std::size_t best_len = 0;
-
     for (const auto & kv : ini.sections) {
-        const auto & sec = kv.first;
-        if (sec.size() <= 6) continue;
-        if (sec.substr(0, 6) != "MODEL_") continue;
-        std::string pattern = sec.substr(6);
+        const auto & sec   = kv.first;
+        const auto & entry = kv.second;
+        if (sec.size() <= 6 || sec.substr(0, 6) != "MODEL_") continue;
+        if (entry.count("alias")) continue;
 
-        std::string pattern_lc;
-        pattern_lc.reserve(pattern.size());
-        for (char c : pattern)
-            pattern_lc.push_back((char) std::tolower((unsigned char) c));
-
+        std::string pattern_lc = to_lower(sec.substr(6));
         if (pattern_lc.empty()) continue;
         if (name_lc.find(pattern_lc) != std::string::npos &&
             pattern_lc.size() > best_len) {

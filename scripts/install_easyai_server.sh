@@ -1647,9 +1647,18 @@ max_tokens       = $max_tokens
 # ============================================================
 # Define per-model tuning profiles that override [ENGINE] defaults
 # when the loaded model name matches. The server strips the GGUF
-# path to basename-without-extension, then checks all [MODEL_*]
-# sections for a case-insensitive substring match. The LONGEST
-# matching pattern wins.
+# path to basename-without-extension, then picks the best section
+# using two passes:
+#
+#   1. EXCLUSIVE alias — a section that lists `alias = <name>`
+#      (or `alias = name1, name2, ...`) only activates when the
+#      model name matches one of those aliases EXACTLY (case-
+#      insensitive). Use this to pin a profile to a specific gguf
+#      and exclude it from substring matching.
+#   2. SUBSTRING pattern — `[MODEL_<pattern>]` matches when
+#      `<pattern>` is a case-insensitive substring of the model
+#      name. The LONGEST pattern wins. Sections that declared
+#      `alias` are skipped here so they stay exclusive.
 #
 # Precedence: CLI flags > MODEL_<match> > [ENGINE] > hardcoded.
 #
@@ -1662,7 +1671,9 @@ max_tokens       = $max_tokens
 #
 # Example: loading "Qwen3-Coder-Next-Q6_K_M.gguf" matches both
 # [MODEL_Qwen3] and [MODEL_Qwen3-Coder-Next] — the latter wins
-# because "Qwen3-Coder-Next" is a longer substring match.
+# because "Qwen3-Coder-Next" is a longer substring match. Want
+# the profile to apply ONLY to that exact gguf? Add
+# `alias = Qwen3-Coder-Next-Q6_K_M` to the section.
 
 # Research + coding agent profile for Qwen3-Coder-Next.
 # Low temperature, tight top_p/min_p, mild penalties — tuned for
@@ -1715,6 +1726,63 @@ reasoning        = off
 #presence_penalty = 0.0
 #frequency_penalty = 0.0
 #context          = 131072
+
+# ----------------------------------------------------------------
+# Full [MODEL_*] reference — every key the engine accepts.
+# Copy, rename to a real model, uncomment what you want to tweak.
+# `alias` makes the profile EXCLUSIVE to the listed gguf basename(s).
+# ----------------------------------------------------------------
+#[MODEL_TEMPLATE]
+## Exclusive targets (comma-separated, case-insensitive, exact match
+## against the gguf basename without extension). With `alias` present
+## this section is skipped by the substring matcher and ONLY activates
+## when the loaded model name equals one of these.
+#alias               = ExactGgufBasename, AnotherBasename
+#
+## --- core load ---
+#context             = 32768
+#ngl                 = -1
+#threads             = 0
+#threads_batch       = 0
+#batch               = 0
+#parallel            = 1
+#preset              = precise
+#
+## --- compute / memory ---
+#flash_attn          = true
+#mlock               = false
+#no_mmap             = false
+#no_kv_offload       = false
+#kv_unified          = false
+#cache_type_k        = q8_0
+#cache_type_v        = q8_0
+#numa                =
+#split_mode          = layer
+#rope_scaling        = yarn
+#rope_freq_scale     = 1.0
+#yarn_orig_ctx       = 32768
+#override_kv         = tokenizer.ggml.eos_token_id=int:151645
+#
+## --- speculative decoding ---
+#spec_type           = none
+#spec_draft_n_max    = 6
+#spec_draft_model    =
+#
+## --- chat template / reasoning ---
+#chat_template_file  = /etc/easyai/qwen3-think.jinja
+#reasoning_format    = deepseek
+#
+## --- sampling (per-request overrides win) ---
+#temperature         = 0.7
+#top_p               = 0.95
+#top_k               = 40
+#min_p               = 0.05
+#repeat_penalty      = 1.15
+#presence_penalty    = 0.0
+#frequency_penalty   = 0.0
+#max_tokens          = -1
+#max_incomplete_retries = 10
+#seed                = 0
 
 # ============================================================
 # [REMOTE_MODEL_<name>] — peer-model tools (ai-<name>)
@@ -1772,6 +1840,26 @@ reasoning        = off
 #enabled      = true
 #url          = http://bigbox.lan:9000
 #description  = 72B model on the LAN for deep reasoning.
+
+# ----------------------------------------------------------------
+# Full [REMOTE_MODEL_*] reference — every key the loader accepts.
+# Copy, rename `TEMPLATE`, uncomment what you want to tweak.
+# Sampling knobs left commented use the peer's own defaults.
+# ----------------------------------------------------------------
+#[REMOTE_MODEL_TEMPLATE]
+#enabled      = false
+#url          = https://peer.example:8443
+#key          = REPLACE-WITH-BEARER-TOKEN
+#model        = easyai
+#description  = What this peer is good for (shown to the model).
+#temperature  = 0.2
+#top_p        = 0.95
+#top_k        = 40
+#min_p        = 0.05
+#max_tokens   = -1
+#timeout      = 300
+#tls_insecure = false
+#ca_cert_path = /etc/easyai/peer-ca.pem
 
 # ============================================================
 # [TOOLS] — per-tool ACL (RESERVED for a future release)

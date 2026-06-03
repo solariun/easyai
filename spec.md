@@ -87,6 +87,25 @@ false** — must be `true` to switch the connection on), `url`/`endpoint`
 `top_k` `min_p` `max_tokens`), `timeout` (default 300s), `tls_insecure`,
 `ca_cert_path`.
 
+## Per-model `[MODEL_*]` overrides + exclusive `alias` (2026-06-03)
+
+`find_model_section(ini, model_name)` picks the best `[MODEL_*]` profile
+in two passes:
+
+1. **Exclusive alias** — sections with an `alias = <name>[,<name>...]`
+   key activate ONLY on an exact (case-insensitive) match against one
+   of the listed gguf basenames. Longest matching alias wins.
+2. **Substring pattern** — `[MODEL_<pattern>]` matches when `<pattern>`
+   is a case-insensitive substring of the resolved model basename.
+   Longest pattern wins. Sections that declared `alias` are skipped
+   here so they remain exclusive to their explicit targets.
+
+Precedence stays `CLI > MODEL_<match> > [ENGINE] > hardcoded`. The
+overlay (`apply_model_overrides`) iterates the same `kFlags()` ENGINE
+keys, so any [ENGINE] key — including `chat_template_file`,
+`reasoning_format`, every sampling/penalty/speculative key — is valid
+inside a `[MODEL_*]` section.
+
 **Opt-in, no auto-disable** (2026-06-02): every connection — including
 the two presets — starts `enabled = false`. Nothing dials out until the
 operator sets `enabled = true`. There is NO self-reference guard; the
@@ -164,14 +183,17 @@ bundle.js edit):
 **Per-message chip** (`buildChip` / `__easyaiSetStatus` — the
 inline-flex span beside the copy/edit/fork/delete actions; dot `.d` +
 label `.l`) now shows ONLY the waving dot + a status word. From the
-instant the request is sent it reads `processing`, then `thinking <N>%`
-(from `easyai.prompt_progress` `pct` during ingestion — visible on
-longer prompts; near-instant for short ones), then `answering` /
-`thinking` once tokens flow, then `fetching·<tool>` / `complete` /
-`error`. All numeric metrics were removed from it. The bundle's own
-`.processing-container` "Processing…/Initializing…" shimmer is hidden
-via CSS — its role (signal the model is working) is now the chip's
-job.
+instant the request is sent it reads `processing`, then
+`processing <N>%` (from `easyai.prompt_progress` `pct` during
+ingestion — visible on longer prompts; near-instant for short ones),
+then `answering` / `thinking` once tokens flow, then `fetching·<tool>`
+/ `complete` / `error`. All numeric metrics were removed from it. The
+bundle's own `.processing-container` "Processing…/Initializing…"
+shimmer is hidden via CSS — its role (signal the model is working) is
+now the chip's job, and during the `processing` phase the chip label
+itself runs a left-to-right reflection-sweep shimmer
+(`@keyframes __easyaiShimmer`, `background-clip:text` gradient) so the
+user gets the same "model is busy" visual on the new surface.
 
 **Processing-info bar** (the bundle's `.chat-processing-info-container`
 > `-content`) now carries the metrics: `ctx <used>/<n_ctx> (<pct>%) ·

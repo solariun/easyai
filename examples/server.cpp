@@ -5810,7 +5810,27 @@ int main(int argc, char ** argv) {
                       "50%{opacity:.25}"
                     "}"
                     ".__easyaiDot.pulse{"
-                      "animation:__easyaiPulse 1.05s ease-in-out infinite}';"
+                      "animation:__easyaiPulse 1.05s ease-in-out infinite}"
+                    // Shimmer: reflection sweeping LEFT→RIGHT across the
+                    // label text — replicates the look of the bundle's
+                    // original \"Processing…\" placeholder, now applied
+                    // to the per-message chip while the model is in the
+                    // prompt-eval / thinking phase.  We paint a moving
+                    // gradient onto the text via background-clip:text so
+                    // the dot color and surrounding chrome stay intact.
+                    "@keyframes __easyaiShimmer{"
+                      "0%{background-position:-150% 0}"
+                      "100%{background-position:250% 0}"
+                    "}"
+                    ".__easyaiShim{"
+                      "background:linear-gradient(90deg,"
+                        "currentColor 0%,currentColor 35%,"
+                        "#ffffff 50%,"
+                        "currentColor 65%,currentColor 100%);"
+                      "background-size:200% 100%;"
+                      "-webkit-background-clip:text;background-clip:text;"
+                      "-webkit-text-fill-color:transparent;color:transparent;"
+                      "animation:__easyaiShimmer 1.6s linear infinite}';"
                   "document.head&&document.head.appendChild(st);"
                 "}"
                 // Build a chip element matching the response-metrics text
@@ -5993,16 +6013,24 @@ int main(int argc, char ** argv) {
                     // Status ONLY — the metrics (tokens · time · speed)
                     // now live in the always-visible processing-info bar,
                     // not the per-message chip.  The chip is just the
-                    // waving dot + a status word.
+                    // waving dot + a status word, with a reflection-sweep
+                    // shimmer over the label while in the processing
+                    // phase so the user sees the model is busy ingesting
+                    // the prompt (mirrors what the bundle's original
+                    // \"Processing…\" placeholder used to do).
                     "let txt=state;"
-                    "if(state==='processing'&&extra&&typeof extra==='object'&&"
-                             "typeof extra.thinkPct==='number'){"
-                      // prompt-ingestion progress → "thinking 37%"
-                      "txt='thinking '+extra.thinkPct+'%';"
+                    "if(state==='processing'){"
+                      "if(extra&&typeof extra==='object'&&"
+                               "typeof extra.thinkPct==='number'){"
+                        // prompt-ingestion progress → "processing 37%"
+                        "txt='processing '+extra.thinkPct+'%';"
+                      "}else{txt='processing';}"
                     "}else if(state==='fetching'&&typeof extra==='string'&&extra){"
                       "txt='fetching·'+extra;"
                     "}"
                     "lab.textContent=txt;"
+                    "if(state==='processing')lab.classList.add('__easyaiShim');"
+                    "else lab.classList.remove('__easyaiShim');"
                   "}"
                 "};"
 

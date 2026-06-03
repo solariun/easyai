@@ -61,10 +61,21 @@ struct Ini {
 Ini load_ini_file(const std::string & path, std::string & err_out);
 
 // Find the best-matching [MODEL_<pattern>] section for a resolved model
-// name.  Scans every section whose name starts with "MODEL_", strips that
-// prefix to get the pattern, and does a case-insensitive substring match
-// against `model_name`.  The longest matching pattern wins.  Returns the
-// full section name (e.g. "MODEL_Qwen3-Coder") or "" if nothing matches.
+// name.  Scans every section whose name starts with "MODEL_" and picks
+// the best fit using this precedence:
+//
+//   1. Exclusive alias — a section whose `alias = <name>[,<name>...]` key
+//      contains an exact (case-insensitive) match for `model_name`.  Use
+//      this when the pattern would otherwise be ambiguous and you want
+//      the section to apply ONLY to this model.  Multiple aliases may be
+//      comma-separated.  Among aliased matches the longest alias wins.
+//   2. Substring pattern — `MODEL_<pattern>` matches if `pattern` is a
+//      case-insensitive substring of `model_name`.  The longest pattern
+//      wins.  Sections with an `alias` key are skipped here so they only
+//      activate via their explicit aliases.
+//
+// Returns the full section name (e.g. "MODEL_Qwen3-Coder") or "" if
+// nothing matches.
 std::string find_model_section(const Ini & ini, const std::string & model_name);
 
 }  // namespace easyai::config
