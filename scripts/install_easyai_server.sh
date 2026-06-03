@@ -1688,12 +1688,12 @@ repeat_penalty   = 1.04
 presence_penalty = 0.1
 frequency_penalty = 0.05
 max_tokens       = 12288
-context          = 262144
+context          = 128000
 cache_type_k     = bf16
 cache_type_v     = q8_0
-rope_scaling     = yarn
-rope_freq_scale  = 2
-yarn_orig_ctx    = 131072
+#rope_scaling     = yarn
+#rope_freq_scale  = 2
+#yarn_orig_ctx    = 131072
 
 # Qwen3.6 family — balanced chat defaults.
 # Moderate temperature for natural conversation, no presence penalty
@@ -1707,12 +1707,12 @@ repeat_penalty   = 1.0
 presence_penalty = 0.0
 frequency_penalty = 0.05
 max_tokens       = 12288
-context          = 262144
+context          = 128000
 cache_type_k     = bf16
 cache_type_v     = q8_0
-rope_scaling     = yarn
-rope_freq_scale  = 2
-yarn_orig_ctx    = 131072
+#rope_scaling     = yarn
+#rope_freq_scale  = 2
+#yarn_orig_ctx    = 131072
 reasoning        = off
 
 # Add your own profiles below. Examples:
