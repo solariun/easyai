@@ -1650,15 +1650,15 @@ max_tokens       = $max_tokens
 # path to basename-without-extension, then picks the best section
 # using two passes:
 #
-#   1. EXCLUSIVE alias — a section that lists `alias = <name>`
-#      (or `alias = name1, name2, ...`) only activates when the
+#   1. EXCLUSIVE alias — a section that lists 'alias = <name>'
+#      (or 'alias = name1, name2, ...') only activates when the
 #      model name matches one of those aliases EXACTLY (case-
 #      insensitive). Use this to pin a profile to a specific gguf
 #      and exclude it from substring matching.
-#   2. SUBSTRING pattern — `[MODEL_<pattern>]` matches when
-#      `<pattern>` is a case-insensitive substring of the model
+#   2. SUBSTRING pattern — '[MODEL_<pattern>]' matches when
+#      <pattern> is a case-insensitive substring of the model
 #      name. The LONGEST pattern wins. Sections that declared
-#      `alias` are skipped here so they stay exclusive.
+#      'alias' are skipped here so they stay exclusive.
 #
 # Precedence: CLI flags > MODEL_<match> > [ENGINE] > hardcoded.
 #
@@ -1673,7 +1673,7 @@ max_tokens       = $max_tokens
 # [MODEL_Qwen3] and [MODEL_Qwen3-Coder-Next] — the latter wins
 # because "Qwen3-Coder-Next" is a longer substring match. Want
 # the profile to apply ONLY to that exact gguf? Add
-# `alias = Qwen3-Coder-Next-Q6_K_M` to the section.
+# 'alias = Qwen3-Coder-Next-Q6_K_M' to the section.
 
 # Research + coding agent profile for Qwen3-Coder-Next.
 # Low temperature, tight top_p/min_p, mild penalties — tuned for
@@ -1730,11 +1730,11 @@ reasoning        = off
 # ----------------------------------------------------------------
 # Full [MODEL_*] reference — every key the engine accepts.
 # Copy, rename to a real model, uncomment what you want to tweak.
-# `alias` makes the profile EXCLUSIVE to the listed gguf basename(s).
+# 'alias' makes the profile EXCLUSIVE to the listed gguf basename(s).
 # ----------------------------------------------------------------
 #[MODEL_TEMPLATE]
 ## Exclusive targets (comma-separated, case-insensitive, exact match
-## against the gguf basename without extension). With `alias` present
+## against the gguf basename without extension). With 'alias' present
 ## this section is skipped by the substring matcher and ONLY activates
 ## when the loaded model name equals one of these.
 #alias               = ExactGgufBasename, AnotherBasename
@@ -1843,7 +1843,7 @@ reasoning        = off
 
 # ----------------------------------------------------------------
 # Full [REMOTE_MODEL_*] reference — every key the loader accepts.
-# Copy, rename `TEMPLATE`, uncomment what you want to tweak.
+# Copy, rename TEMPLATE, uncomment what you want to tweak.
 # Sampling knobs left commented use the peer's own defaults.
 # ----------------------------------------------------------------
 #[REMOTE_MODEL_TEMPLATE]
