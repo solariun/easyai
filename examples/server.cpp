@@ -5828,13 +5828,18 @@ int main(int argc, char ** argv) {
                     "}"
                     ".__easyaiDot.pulse{"
                       "animation:__easyaiPulse 1.05s ease-in-out infinite}"
-                    // Shimmer: reflection sweeping LEFT→RIGHT across the
-                    // label text — replicates the look of the bundle's
-                    // original \"Processing…\" placeholder, now applied
-                    // to the per-message chip while the model is in the
-                    // prompt-eval / thinking phase.  We paint a moving
-                    // gradient onto the text via background-clip:text so
-                    // the dot color and surrounding chrome stay intact.
+                    // Shimmer: a bright highlight sweeping LEFT→RIGHT across
+                    // the label text.  Applied to the per-message chip in
+                    // every ACTIVE response state (processing / thinking /
+                    // answering / fetching) so the status word visibly
+                    // shimmers from gray to bright while the model is busy.
+                    // The base stays the chip's muted gray (currentColor) and
+                    // a white band sweeps over it — we paint the moving
+                    // gradient onto the text via background-clip:text so the
+                    // dot color and surrounding chrome stay intact.  No
+                    // color:transparent here: currentColor must resolve to the
+                    // muted-foreground gray so the text reads gray↔bright
+                    // rather than vanishing between sweeps.
                     "@keyframes __easyaiShimmer{"
                       "0%{background-position:-150% 0}"
                       "100%{background-position:250% 0}"
@@ -5846,7 +5851,7 @@ int main(int argc, char ** argv) {
                         "currentColor 65%,currentColor 100%);"
                       "background-size:200% 100%;"
                       "-webkit-background-clip:text;background-clip:text;"
-                      "-webkit-text-fill-color:transparent;color:transparent;"
+                      "-webkit-text-fill-color:transparent;"
                       "animation:__easyaiShimmer 1.6s linear infinite}';"
                   "document.head&&document.head.appendChild(st);"
                 "}"
@@ -6017,12 +6022,15 @@ int main(int argc, char ** argv) {
                   "applyBarPalette(chip);"
                   "const dot=chip.querySelector('.d');"
                   "const lab=chip.querySelector('.l');"
+                  // 'active' = a response is being produced (as opposed to a
+                  // terminal complete/error or the answered/idle history
+                  // states).  Drives BOTH the dot pulse and the label shimmer.
+                  "const active=(state==='thinking'||state==='answering'||state==='fetching'||state==='processing');"
                   "if(dot){"
                     "dot.style.background=STATE_DOT[state]||STATE_DOT.idle;"
                     // Pulse while we're actively working; stop on
                     // terminal states so the user sees the difference at
                     // a glance.
-                    "const active=(state==='thinking'||state==='answering'||state==='fetching'||state==='processing');"
                     "if(active)dot.classList.add('pulse');"
                     "else dot.classList.remove('pulse');"
                   "}"
@@ -6030,10 +6038,10 @@ int main(int argc, char ** argv) {
                     // Status ONLY — the metrics (tokens · time · speed)
                     // now live in the always-visible processing-info bar,
                     // not the per-message chip.  The chip is just the
-                    // waving dot + a status word, with a reflection-sweep
-                    // shimmer over the label while in the processing
-                    // phase so the user sees the model is busy ingesting
-                    // the prompt (mirrors what the bundle's original
+                    // waving dot + a status word, with a gray→bright
+                    // reflection-sweep shimmer over the label for the whole
+                    // time the response is being produced so the user sees
+                    // the model is busy (mirrors what the bundle's original
                     // \"Processing…\" placeholder used to do).
                     "let txt=state;"
                     "if(state==='processing'){"
@@ -6046,7 +6054,9 @@ int main(int argc, char ** argv) {
                       "txt='fetching·'+extra;"
                     "}"
                     "lab.textContent=txt;"
-                    "if(state==='processing')lab.classList.add('__easyaiShim');"
+                    // Shimmer the status word for EVERY active response state
+                    // (not just 'processing') — gray↔bright while busy.
+                    "if(active)lab.classList.add('__easyaiShim');"
                     "else lab.classList.remove('__easyaiShim');"
                   "}"
                 "};"

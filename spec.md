@@ -203,10 +203,17 @@ then `answering` / `thinking` once tokens flow, then `fetching·<tool>`
 / `complete` / `error`. All numeric metrics were removed from it. The
 bundle's own `.processing-container` "Processing…/Initializing…"
 shimmer is hidden via CSS — its role (signal the model is working) is
-now the chip's job, and during the `processing` phase the chip label
-itself runs a left-to-right reflection-sweep shimmer
-(`@keyframes __easyaiShimmer`, `background-clip:text` gradient) so the
-user gets the same "model is busy" visual on the new surface.
+now the chip's job. For the WHOLE time a response is being produced —
+every active state (`processing` / `thinking` / `answering` /
+`fetching`), gated on the same `active` flag that drives the dot pulse,
+not just `processing` — the chip label runs a left-to-right
+reflection-sweep shimmer (`@keyframes __easyaiShimmer` `.__easyaiShim`,
+`background-clip:text` gradient). The base stays the chip's muted-gray
+`currentColor` with a `#ffffff` band sweeping over it, so the status
+word visibly shimmers **gray → bright** while busy (no `color:transparent`
+on the rule — currentColor must resolve to the gray, else the text would
+vanish between sweeps). Terminal `complete` / `error` and history
+`answered` / `idle` do not shimmer.
 
 **Processing-info bar** (the bundle's `.chat-processing-info-container`
 > `-content`) now carries the metrics: `ctx <used>/<n_ctx> (<pct>%) ·
