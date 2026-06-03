@@ -206,22 +206,8 @@ std::string find_model_section(const Ini & ini, const std::string & model_name) 
                 token = token.substr(1, token.size() - 2);
             }
             if (token.empty()) continue;
-            // Trailing `+` is a prefix wildcard: `Qwen3-Coder-Next+`
-            // matches every gguf basename that STARTS with
-            // "Qwen3-Coder-Next" (case-insensitive).  Without `+` the
-            // match is exact.  Wildcard lets one alias cover a quant
-            // family (e.g. -Q4_K_M, -Q6_K_M) without listing each.
-            bool prefix = false;
-            if (token.back() == '+') {
-                prefix = true;
-                token.pop_back();
-                if (token.empty()) continue;
-            }
             std::string token_lc = to_lower(token);
-            bool hit = prefix
-                ? (name_lc.compare(0, token_lc.size(), token_lc) == 0)
-                : (name_lc == token_lc);
-            if (hit && token_lc.size() > alias_best) {
+            if (token_lc == name_lc && token_lc.size() > alias_best) {
                 alias_best    = token_lc.size();
                 alias_section = sec;
             }

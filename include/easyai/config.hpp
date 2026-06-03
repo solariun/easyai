@@ -65,12 +65,9 @@ Ini load_ini_file(const std::string & path, std::string & err_out);
 // the best fit using this precedence:
 //
 //   1. Exclusive alias — a section whose `alias = <name>[,<name>...]` key
-//      matches `model_name` (case-insensitive).  Each alias is exact by
-//      default; a trailing `+` turns it into a prefix wildcard, so
-//      `alias = Qwen3-Coder-Next+` matches every gguf basename that
-//      starts with that string (e.g. -Q4_K_M, -Q6_K_M).  Use this when
-//      the pattern would otherwise be ambiguous and you want the section
-//      to apply ONLY to a known set of models.  Multiple aliases may be
+//      contains an exact (case-insensitive) match for `model_name`.  Use
+//      this when the pattern would otherwise be ambiguous and you want
+//      the section to apply ONLY to this model.  Multiple aliases may be
 //      comma-separated.  Among aliased matches the longest alias wins.
 //   2. Substring pattern — `MODEL_<pattern>` matches if `pattern` is a
 //      case-insensitive substring of `model_name`.  The longest pattern
