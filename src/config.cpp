@@ -215,9 +215,14 @@ std::string find_model_section(const Ini & ini, const std::string & model_name) 
     }
     if (!alias_section.empty()) return alias_section;
 
-    // Pass 2 — substring pattern match, longest pattern wins.  Skip
-    // sections that declared an `alias` so they remain exclusive to
-    // their explicit targets.
+    // Pass 2 — prefix match on the section name, longest prefix wins.
+    // `[MODEL_Qwen3.6]` activates whenever the loaded gguf basename
+    // STARTS WITH "Qwen3.6" (case-insensitive), so a single section
+    // covers every variant in the family (e.g. Qwen3.6-25B-A38M-Q4_K_M)
+    // without listing each one.  Substring matching was rejected as
+    // too loose — it would fire on unrelated names that merely contain
+    // the pattern in the middle.  Sections that declared an `alias`
+    // are skipped so they stay exclusive to their explicit targets.
     std::string best_section;
     std::size_t best_len = 0;
     for (const auto & kv : ini.sections) {
@@ -228,7 +233,7 @@ std::string find_model_section(const Ini & ini, const std::string & model_name) 
 
         std::string pattern_lc = to_lower(sec.substr(6));
         if (pattern_lc.empty()) continue;
-        if (name_lc.find(pattern_lc) != std::string::npos &&
+        if (name_lc.compare(0, pattern_lc.size(), pattern_lc) == 0 &&
             pattern_lc.size() > best_len) {
             best_len     = pattern_lc.size();
             best_section = sec;

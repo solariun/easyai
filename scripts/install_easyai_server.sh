@@ -1655,10 +1655,13 @@ max_tokens       = $max_tokens
 #      model name matches one of those aliases EXACTLY (case-
 #      insensitive). Use this to pin a profile to a specific gguf
 #      and exclude it from substring matching.
-#   2. SUBSTRING pattern — '[MODEL_<pattern>]' matches when
-#      <pattern> is a case-insensitive substring of the model
-#      name. The LONGEST pattern wins. Sections that declared
-#      'alias' are skipped here so they stay exclusive.
+#   2. PREFIX pattern — '[MODEL_<pattern>]' matches when the model
+#      name STARTS WITH <pattern> (case-insensitive). The LONGEST
+#      matching prefix wins. One section covers every quant in a
+#      family (e.g. [MODEL_Qwen3.6] applies to
+#      Qwen3.6-25B-A38M-Q4_K_M, Qwen3.6-25B-A38M-Q6_K, ...).
+#      Sections that declared 'alias' are skipped here so they
+#      stay exclusive to their explicit targets.
 #
 # Precedence: CLI flags > MODEL_<match> > [ENGINE] > hardcoded.
 #
@@ -1671,8 +1674,8 @@ max_tokens       = $max_tokens
 #
 # Example: loading "Qwen3-Coder-Next-Q6_K_M.gguf" matches both
 # [MODEL_Qwen3] and [MODEL_Qwen3-Coder-Next] — the latter wins
-# because "Qwen3-Coder-Next" is a longer substring match. Want
-# the profile to apply ONLY to that exact gguf? Add
+# because "Qwen3-Coder-Next" is a longer prefix match. Want the
+# profile to apply ONLY to that exact gguf? Add
 # 'alias = Qwen3-Coder-Next-Q6_K_M' to the section.
 
 # Research + coding agent profile for Qwen3-Coder-Next.
@@ -1680,7 +1683,6 @@ max_tokens       = $max_tokens
 # deterministic code output and structured tool-calling.
 # KV K-cache at bf16, V-cache at q8_0 for precision + memory balance.
 [MODEL_Qwen3-Coder-Next]
-alias            = Qwen3-Coder-Next+
 temperature      = 0.2
 top_p            = 0.92
 top_k            = 50
@@ -1700,7 +1702,6 @@ cache_type_v     = q8_0
 # Moderate temperature for natural conversation, no presence penalty
 # (the model's own MoE gating handles diversity), repeat off.
 [MODEL_Qwen3.6]
-alias            = Qwen3.6+
 temperature      = 0.4
 top_p            = 0.95
 top_k            = 20

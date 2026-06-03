@@ -323,10 +323,13 @@
 ;      model name matches one of those aliases EXACTLY (case-
 ;      insensitive). Use this to pin a profile to a specific gguf
 ;      and exclude it from substring matching.
-;   2. SUBSTRING pattern — `[MODEL_<pattern>]` matches when
-;      `<pattern>` is a case-insensitive substring of the model
-;      name. The LONGEST pattern wins. Sections that declared
-;      `alias` are skipped here so they remain exclusive.
+;   2. PREFIX pattern — `[MODEL_<pattern>]` matches when the
+;      model name STARTS WITH `<pattern>` (case-insensitive). The
+;      LONGEST matching prefix wins. One section covers every
+;      quant in a family (e.g. [MODEL_Qwen3.6] applies to
+;      Qwen3.6-25B-A38M-Q4_K_M, Qwen3.6-25B-A38M-Q6_K, ...).
+;      Sections that declared `alias` are skipped here so they
+;      remain exclusive.
 ;
 ; Precedence: CLI flags > MODEL_<match> > [ENGINE] > hardcoded.
 ;

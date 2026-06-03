@@ -95,10 +95,12 @@ in two passes:
 1. **Exclusive alias** — sections with an `alias = <name>[,<name>...]`
    key activate ONLY on an exact (case-insensitive) match against one
    of the listed gguf basenames. Longest matching alias wins.
-2. **Substring pattern** — `[MODEL_<pattern>]` matches when `<pattern>`
-   is a case-insensitive substring of the resolved model basename.
-   Longest pattern wins. Sections that declared `alias` are skipped
-   here so they remain exclusive to their explicit targets.
+2. **Prefix pattern** — `[MODEL_<pattern>]` matches when the resolved
+   model basename STARTS WITH `<pattern>` (case-insensitive). Longest
+   matching prefix wins, so one section covers every quant in a family
+   (`[MODEL_Qwen3.6]` → `Qwen3.6-25B-A38M-Q4_K_M`, …). Sections that
+   declared `alias` are skipped here so they remain exclusive to their
+   explicit targets.
 
 Precedence stays `CLI > MODEL_<match> > [ENGINE] > hardcoded`. The
 overlay (`apply_model_overrides`) iterates the same `kFlags()` ENGINE
