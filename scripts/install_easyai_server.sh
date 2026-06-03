@@ -1652,9 +1652,13 @@ max_tokens       = $max_tokens
 #
 #   1. EXCLUSIVE alias — a section that lists 'alias = <name>'
 #      (or 'alias = name1, name2, ...') only activates when the
-#      model name matches one of those aliases EXACTLY (case-
-#      insensitive). Use this to pin a profile to a specific gguf
-#      and exclude it from substring matching.
+#      model name matches one of those aliases (case-insensitive).
+#      Each alias is EXACT by default; a trailing '+' turns it into
+#      a PREFIX wildcard so 'alias = Qwen3-Coder-Next+' matches
+#      every gguf basename starting with that string (covers
+#      -Q4_K_M, -Q6_K_M, ... without listing each). Use this to pin
+#      a profile to a known model family and exclude it from
+#      substring matching.
 #   2. SUBSTRING pattern — '[MODEL_<pattern>]' matches when
 #      <pattern> is a case-insensitive substring of the model
 #      name. The LONGEST pattern wins. Sections that declared
@@ -1680,6 +1684,7 @@ max_tokens       = $max_tokens
 # deterministic code output and structured tool-calling.
 # KV K-cache at bf16, V-cache at q8_0 for precision + memory balance.
 [MODEL_Qwen3-Coder-Next]
+alias            = Qwen3-Coder-Next+
 temperature      = 0.2
 top_p            = 0.92
 top_k            = 50
@@ -1699,6 +1704,7 @@ cache_type_v     = q8_0
 # Moderate temperature for natural conversation, no presence penalty
 # (the model's own MoE gating handles diversity), repeat off.
 [MODEL_Qwen3.6]
+alias            = Qwen3.6+
 temperature      = 0.4
 top_p            = 0.95
 top_k            = 20

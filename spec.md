@@ -93,8 +93,11 @@ false** — must be `true` to switch the connection on), `url`/`endpoint`
 in two passes:
 
 1. **Exclusive alias** — sections with an `alias = <name>[,<name>...]`
-   key activate ONLY on an exact (case-insensitive) match against one
-   of the listed gguf basenames. Longest matching alias wins.
+   key activate ONLY when the gguf basename matches one of the listed
+   aliases (case-insensitive). Each alias is exact by default; a
+   trailing `+` turns it into a prefix wildcard
+   (`alias = Qwen3-Coder-Next+` matches every variant starting with
+   that string). Longest matching alias wins.
 2. **Substring pattern** — `[MODEL_<pattern>]` matches when `<pattern>`
    is a case-insensitive substring of the resolved model basename.
    Longest pattern wins. Sections that declared `alias` are skipped
