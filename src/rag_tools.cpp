@@ -1305,6 +1305,9 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
         .describe(
             "Save a knowledge entry. Keywords identify the entry and "
             "enable search. Save AFTER answering the user.\n"
+            "Store ONLY knowledge and information — facts, concepts, "
+            "decisions, how-tos. NEVER store files or file content "
+            "here. EVER. To read or write files use the fs tool.\n"
             "Example: {\"keywords\": \"python async\", "
             "\"content\": \"Use asyncio for concurrent IO.\"}")
         .param("keywords", "string",  "Entry keywords, e.g. \"python async sockets\".", true)
@@ -1316,6 +1319,8 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
     out.push_back(Tool::builder("knowledge_append")
         .describe(
             "Append text to a knowledge entry. Creates if new.\n"
+            "Append ONLY knowledge and information — NEVER files or "
+            "file content. EVER. To read or write files use the fs tool.\n"
             "Example: {\"keywords\": \"python async\", "
             "\"content\": \"Also supports gather().\"}")
         .param("keywords", "string", "Entry keywords.", true)

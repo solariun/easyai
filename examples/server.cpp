@@ -2467,6 +2467,31 @@ static void handle_chat_stream(ServerCtx & ctx,
                     evt["pct"]       = pct;   // convenience for clients
                     emit_event("easyai.prompt_progress", safe_dump(evt));
                 });
+
+            // Multi-part prompt processing is now wired. Push an
+            // immediate 0% tick the instant the request lands so the
+            // gauge starts at 0 right away — without it the first
+            // visible tick is the first n_batch boundary (~512 tokens
+            // in), and short prompts would jump straight to the final
+            // 100% tick with no honest "just started" frame. Record it
+            // in last_emit_pct only; last_emit_ms stays -1 so the first
+            // real batch tick (which carries real timing) is never
+            // throttled away.
+            if (emit_progress) {
+                *last_emit_pct = 0;
+                ordered_json evt;
+                evt["choices"] = json::array({{
+                    {"index", 0},
+                    {"delta", json::object()},
+                    {"finish_reason", nullptr},
+                }});
+                evt["total"]     = 0;
+                evt["cache"]     = 0;
+                evt["processed"] = 0;
+                evt["time_ms"]   = 0;
+                evt["pct"]       = 0;
+                emit_event("easyai.prompt_progress", safe_dump(evt));
+            }
             }   // end progress-callback wiring
 
             // Engine fires this once per generate() AFTER the prompt-

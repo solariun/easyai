@@ -188,6 +188,19 @@ regardless of `stream_options.easyai_prompt_progress`. Same 80 ms / 5 %
 throttle as the SSE path; only emitted on streaming generations (the
 prompt-eval batches are a streaming-path concept).
 
+**Immediate 0 % tick on reception (2026-06-05).** When the per-batch
+prompt processing is wired with SSE emit active (client wants
+`easyai.prompt_progress`), the server emits one synthetic
+`{pct:0, processed:0, total:0}` event right after wiring the callback —
+before prompt-eval starts. The gauge therefore starts at 0 % the instant
+the request lands instead of jumping to the first n_batch boundary
+(~512 tokens in); short prompts no longer leap straight to the final
+100 % tick with no "just started" frame. Only `last_emit_pct` is seeded
+(to 0); `last_emit_ms` stays −1 so the first real batch tick — which
+carries real timing — is never throttled away. Gated on `emit_progress`
+(not `log_progress`), so a `--verbose`-only request logs no synthetic
+SSE event.
+
 ## Webui status split: chip vs processing-info bar (server, 2026-06-02)
 
 Two surfaces, both driven by server.cpp's injected webui JS (no
@@ -520,6 +533,15 @@ Files starting with `fix-` are immutable (cannot overwrite or delete).
 | Yes | Append content after `---` separator | `updated "key.md" (+N B → M B total)` |
 | No | Create new entry | `created "key.md" (N bytes)` |
 | Fixed (`fix-*`) | Error | Immutable, cannot append |
+
+## Knowledge content policy (2026-06-05)
+
+The knowledge store holds **only knowledge and information** — facts,
+concepts, decisions, how-tos. It is **never** a file store: files and
+file content must NOT be written through `knowledge_save` /
+`knowledge_append`, EVER. File reads/writes go through the `fs` tool.
+Enforced in the `knowledge_save` and `knowledge_append` tool
+descriptions (`rag_tools.cpp`), which redirect file work to `fs`.
 
 ## Tools-in-prompt Contract
 
