@@ -539,7 +539,7 @@ struct Options {
     std::string external_tools_dir;            // dir of EASYAI-*.tools files
     std::string rag_dir;                        // optional RAG persistent-registry dir
     // Default "split": focused one-verb-per-tool surfaces (fs_read,
-    // fs_edit, knowledge_save, …) instead of the legacy single dispatcher
+    // fs_edit, knowledge_learning, …) instead of the legacy single dispatcher
     // (fs(action="read"), …). Smaller / quantised tool-callers
     // dispatch much more reliably against the split shape; large
     // models handle either. Pass --tools-mode unified to opt back into
@@ -800,7 +800,7 @@ void usage(const char * argv0) {
 "                                 knowledge) are exposed to the model:\n"
 "                                   \"split\"  — one focused tool per action\n"
 "                                     (fs_read, fs_edit, fs_glob, …, web_search,\n"
-"                                     web_fetch, knowledge_save, …); flat schemas,\n"
+"                                     web_fetch, knowledge_learning, …); flat schemas,\n"
 "                                     no \"unknown action\" failure mode. DEFAULT\n"
 "                                     since 2026-05-15 — works reliably across\n"
 "                                     small / quantised callers and large ones.\n"
@@ -2617,15 +2617,17 @@ int main(int argc, char ** argv) {
     {
         const auto tv = easyai::preamble::ToolsetView::from_tools(cli.tools());
         const std::string mem_root = tv.memory_on ? o.rag_dir : std::string();
-        if (tv.datetime_on || !mem_root.empty()) {
-            std::string inj = easyai::preamble::build({
-                /* inject_datetime  = */ tv.datetime_on,
-                /* knowledge_cutoff = */ std::string(),
-                /* memory_root      = */ mem_root,
-                /* cite_sources     = */ false,
-            });
-            if (!inj.empty()) o.system_prompt += inj;
-        }
+        // ALWAYS call build() — it now carries the unbreakable CRITICAL
+        // THINKING block, which must be present regardless of datetime /
+        // memory state. The datetime + memory sub-blocks stay self-gated
+        // inside build() by the flags passed below.
+        std::string inj = easyai::preamble::build({
+            /* inject_datetime  = */ tv.datetime_on,
+            /* knowledge_cutoff = */ std::string(),
+            /* memory_root      = */ mem_root,
+            /* cite_sources     = */ false,
+        });
+        if (!inj.empty()) o.system_prompt += inj;
     }
 
     // AVAILABLE TOOLS + VERIFY-BEFORE-YOU-CALL block. easyai-cli's

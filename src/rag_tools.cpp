@@ -323,6 +323,18 @@ std::string keywords_to_key(const std::vector<std::string> & kw) {
     return key;
 }
 
+// Human-readable keyword phrase for result messages — space-joined in
+// the caller's order. Keeps tool output reading as a piece of knowledge
+// ("learned \"python async\"") rather than a filename.
+std::string keywords_display(const std::vector<std::string> & kw) {
+    std::string s;
+    for (std::size_t i = 0; i < kw.size(); ++i) {
+        if (i > 0) s += ' ';
+        s += kw[i];
+    }
+    return s;
+}
+
 // ---------------------------------------------------------------------------
 // Format helpers — read/write the tiny "keywords: a, b, c\n\n<body>" shape.
 // ---------------------------------------------------------------------------
@@ -883,16 +895,15 @@ ToolHandler make_save_handler(std::shared_ptr<RagStore> store) {
 
         if (key_is_fixed(key) && store->index.count(key) > 0)
             return ToolResult::error(
-                "\"" + key + "\" is fixed (immutable) — cannot overwrite.");
+                "\"" + keywords_display(keywords) + "\" is pinned — cannot overwrite.");
 
         if (!store->save_locked(key, keywords, content, err))
             return ToolResult::error(err);
 
         std::ostringstream o;
-        o << "saved \"" << key << kEntrySuffix << "\" ("
-          << content.size() << " bytes, "
+        o << "learned \"" << keywords_display(keywords) << "\" ("
           << keywords.size() << " keyword" << (keywords.size() == 1 ? "" : "s")
-          << (key_is_fixed(key) ? ", FIXED" : "") << ")";
+          << (key_is_fixed(key) ? ", pinned" : "") << ")";
         return ToolResult::ok(o.str());
     };
 }
@@ -927,14 +938,13 @@ ToolHandler make_append_handler(std::shared_ptr<RagStore> store) {
             if (!store->save_locked(key, keywords, suffix, err))
                 return ToolResult::error(err);
             std::ostringstream o;
-            o << "created \"" << key << kEntrySuffix << "\" ("
-              << suffix.size() << " bytes)";
+            o << "learned \"" << keywords_display(keywords) << "\" (new)";
             return ToolResult::ok(o.str());
         }
 
         if (key_is_fixed(key))
             return ToolResult::error(
-                "\"" + key + "\" is fixed (immutable) — cannot append.");
+                "\"" + keywords_display(keywords) + "\" is pinned — cannot add to it.");
 
         std::vector<std::string> old_keywords;
         std::string              old_body;
@@ -957,8 +967,8 @@ ToolHandler make_append_handler(std::shared_ptr<RagStore> store) {
             return ToolResult::error(err);
 
         std::ostringstream o;
-        o << "updated \"" << key << kEntrySuffix << "\" (+"
-          << suffix.size() << " B → " << merged.size() << " B total)";
+        o << "expanded \"" << keywords_display(keywords) << "\" — "
+          << "added to what you already knew";
         return ToolResult::ok(o.str());
     };
 }
@@ -1023,7 +1033,7 @@ ToolHandler make_search_handler(std::shared_ptr<RagStore> store) {
 
         if (hits.empty()) {
             return ToolResult::ok(
-                "no matches. Use knowledge_list to browse entries.");
+                "no matches. Use knowledge_browse to see everything you know.");
         }
         if (off >= total) {
             return ToolResult::ok(
@@ -1051,9 +1061,8 @@ ToolHandler make_search_handler(std::shared_ptr<RagStore> store) {
                 preview = "(read error)";
 
             o << (i + 1) << ". [" << h.key << "]";
-            if (key_is_fixed(h.key)) o << " FIXED";
-            o << "  matched " << h.matched << "/" << keywords.size()
-              << "  (" << h.meta.content_bytes << " B)\n";
+            if (key_is_fixed(h.key)) o << " (pinned)";
+            o << "  matched " << h.matched << "/" << keywords.size() << "\n";
             o << "   keywords: ";
             for (std::size_t k = 0; k < h.meta.keywords.size(); ++k) {
                 if (k) o << " ";
@@ -1063,7 +1072,7 @@ ToolHandler make_search_handler(std::shared_ptr<RagStore> store) {
         }
         if (more)
             o << "next: knowledge_search with page=" << (page + 1) << "\n";
-        o << "load full content: knowledge_load with the same keywords.\n";
+        o << "use knowledge_recall with the same keywords for the full content.\n";
         return ToolResult::ok(o.str());
     };
 }
@@ -1094,7 +1103,7 @@ ToolHandler make_load_handler(std::shared_ptr<RagStore> store) {
         o << "keywords:";
         for (const auto & k : file_kw) o << " " << k;
         o << "\nmodified: " << format_local_time(mtime) << "\n";
-        if (key_is_fixed(key)) o << "fixed: yes\n";
+        if (key_is_fixed(key)) o << "pinned: yes\n";
         o << "\n" << body;
         if (!body.empty() && body.back() != '\n') o << '\n';
         return ToolResult::ok(o.str());
@@ -1128,23 +1137,22 @@ ToolHandler make_list_handler(std::shared_ptr<RagStore> store) {
 
         if (rows.empty())
             return ToolResult::ok(prefix.empty()
-                ? "no entries. Use knowledge_save to add."
-                : "no entries match prefix \"" + prefix + "\".");
+                ? "nothing learned yet. Use knowledge_learning to remember something."
+                : "nothing learned matches prefix \"" + prefix + "\".");
 
         std::ostringstream o;
-        o << rows.size() << " entr" << (rows.size() == 1 ? "y" : "ies")
+        o << rows.size() << " topic" << (rows.size() == 1 ? "" : "s")
           << ":\n\n";
         for (std::size_t i = 0; i < rows.size(); ++i) {
             const auto & r = rows[i];
             o << (i + 1) << ". " << r.key;
-            if (key_is_fixed(r.key)) o << " FIXED";
+            if (key_is_fixed(r.key)) o << " (pinned)";
             o << "  [";
             for (std::size_t k = 0; k < r.meta.keywords.size(); ++k) {
                 if (k) o << " ";
                 o << r.meta.keywords[k];
             }
-            o << "]  " << r.meta.content_bytes << " B  "
-              << format_local_time(r.meta.modified_unix) << "\n";
+            o << "]  " << format_local_time(r.meta.modified_unix) << "\n";
         }
         return ToolResult::ok(o.str());
     };
@@ -1164,7 +1172,7 @@ ToolHandler make_delete_handler(std::shared_ptr<RagStore> store) {
 
         if (key_is_fixed(key))
             return ToolResult::error(
-                "\"" + key + "\" is fixed (immutable) — cannot delete.");
+                "\"" + keywords_display(keywords) + "\" is pinned — cannot forget it.");
 
         std::unique_lock<std::shared_mutex> lock(store->mu);
         bool existed = false;
@@ -1172,8 +1180,8 @@ ToolHandler make_delete_handler(std::shared_ptr<RagStore> store) {
             return ToolResult::error(err);
         if (!existed)
             return ToolResult::ok(
-                "no entry \"" + key + "\" — nothing to delete.");
-        return ToolResult::ok("deleted \"" + key + kEntrySuffix + "\"");
+                "nothing known about \"" + keywords_display(keywords) + "\" — nothing to forget.");
+        return ToolResult::ok("forgot \"" + keywords_display(keywords) + "\"");
     };
 }
 
@@ -1236,17 +1244,17 @@ ToolHandler make_keywords_handler(std::shared_ptr<RagStore> store) {
 
         if (rows.empty()) {
             if (total_entries == 0) {
-                o << "no entries. Use knowledge_save to add.";
+                o << "nothing learned yet. Use knowledge_learning to remember something.";
             } else if (min_count > 1) {
                 o << "no keywords reach min_count=" << min_count
-                  << ". Memory has " << total_entries
-                  << " entr" << (total_entries == 1 ? "y" : "ies")
+                  << ". You know " << total_entries
+                  << " topic" << (total_entries == 1 ? "" : "s")
                   << " but every keyword is below the threshold. "
                   << "Try min_count=1 (default) to see the full list.";
             } else {
-                o << "no keywords found. Some entries may be untagged "
+                o << "no keywords found. Some knowledge may be untagged "
                   << "(no `keywords:` header) — those don't appear here. "
-                  << "Use knowledge_list to see them.";
+                  << "Use knowledge_browse to see them.";
             }
             return ToolResult::ok(o.str());
         }
@@ -1284,16 +1292,19 @@ std::shared_ptr<RagStore> build_rag_store(std::string root_dir) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// Public entry point — single-tool dispatcher
+// Public entry point — knowledge_split_tools
 // ---------------------------------------------------------------------------
-// One `rag` tool with an `action` parameter selecting one of "save" /
-// "append" / "search" / "load" / "list" / "delete" / "keywords". The
-// per-action handlers (make_save_handler / make_search_handler / etc.)
-// read every other parameter directly out of `arguments_json`, so the
-// dispatcher just picks the right closure by `action` and forwards the
-// original ToolCall.
-// ----------------------------------------------------------------------------
-// knowledge_split_tools — seven single-responsibility knowledge tools.
+// Seven single-responsibility tools, named so the model treats the store
+// as MEMORY rather than a filesystem (no save/load/delete file verbs).
+// The knowledge_ prefix groups them in the flat tool list:
+//   knowledge_learning       — remember a piece of knowledge  (make_save_handler)
+//   knowledge_learning_more  — add to existing knowledge       (make_append_handler)
+//   knowledge_search         — find knowledge by keywords       (make_search_handler)
+//   knowledge_recall         — return a topic's full content     (make_load_handler)
+//   knowledge_browse         — list all remembered topics         (make_list_handler)
+//   knowledge_forget         — drop a piece of knowledge           (make_delete_handler)
+//   knowledge_keywords       — show the keyword vocabulary          (make_keywords_handler)
+// Each handler reads its parameters straight out of `arguments_json`.
 // ----------------------------------------------------------------------------
 std::vector<Tool> knowledge_split_tools(std::string root_dir) {
     auto store = build_rag_store(std::move(root_dir));
@@ -1301,36 +1312,40 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
     std::vector<Tool> out;
     out.reserve(7);
 
-    out.push_back(Tool::builder("knowledge_save")
+    out.push_back(Tool::builder("knowledge_learning")
         .describe(
-            "Save a knowledge entry. Keywords identify the entry and "
-            "enable search. Save AFTER answering the user.\n"
+            "Remember a piece of knowledge for later recall. Keywords "
+            "label it and make it findable. Learn AFTER answering the "
+            "user.\n"
             "Store ONLY knowledge and information — facts, concepts, "
-            "decisions, how-tos. NEVER store files or file content "
-            "here. EVER. To read or write files use the fs tool.\n"
+            "decisions, how-tos. This is your memory, NOT a file store: "
+            "never put files or file content here, EVER. To read or "
+            "write files use the fs tool.\n"
             "Example: {\"keywords\": \"python async\", "
             "\"content\": \"Use asyncio for concurrent IO.\"}")
-        .param("keywords", "string",  "Entry keywords, e.g. \"python async sockets\".", true)
-        .param("content",  "string",  "Body text.", true)
-        .param("fix",      "boolean", "Make immutable (default false).", false)
+        .param("keywords", "string",  "Keywords that label this knowledge, e.g. \"python async sockets\".", true)
+        .param("content",  "string",  "The knowledge to remember.", true)
+        .param("fix",      "boolean", "Pin it so it can't be overwritten or forgotten (default false).", false)
         .handle(make_save_handler(store))
         .build());
 
-    out.push_back(Tool::builder("knowledge_append")
+    out.push_back(Tool::builder("knowledge_learning_more")
         .describe(
-            "Append text to a knowledge entry. Creates if new.\n"
-            "Append ONLY knowledge and information — NEVER files or "
-            "file content. EVER. To read or write files use the fs tool.\n"
+            "Add more to something you already learned (learns it fresh "
+            "if new). Keywords pick which knowledge to extend.\n"
+            "Add ONLY knowledge and information — never files or file "
+            "content, EVER. To read or write files use the fs tool.\n"
             "Example: {\"keywords\": \"python async\", "
             "\"content\": \"Also supports gather().\"}")
-        .param("keywords", "string", "Entry keywords.", true)
-        .param("content",  "string", "Text to append.", true)
+        .param("keywords", "string", "Keywords of the knowledge to extend.", true)
+        .param("content",  "string", "Knowledge to add.", true)
         .handle(make_append_handler(store))
         .build());
 
     out.push_back(Tool::builder("knowledge_search")
         .describe(
-            "Search knowledge by keywords. Returns ranked matches.\n"
+            "Search your knowledge by keywords. Returns ranked matches "
+            "with previews.\n"
             "Example: {\"keywords\": \"python\"}")
         .param("keywords",    "string",  "Search keywords, e.g. \"python async\".", true)
         .param("max_results", "integer", "Results per page (default 10, max 20).", false)
@@ -1338,36 +1353,40 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
         .handle(make_search_handler(store))
         .build());
 
-    out.push_back(Tool::builder("knowledge_load")
+    out.push_back(Tool::builder("knowledge_recall")
         .describe(
-            "Load full content of a knowledge entry.\n"
+            "Recall everything you know on a topic — returns the full "
+            "remembered content. Keywords pick which.\n"
             "Example: {\"keywords\": \"python async\"}")
-        .param("keywords", "string", "Entry keywords (same used to save).", true)
+        .param("keywords", "string", "Keywords of the knowledge to recall (same used to learn it).", true)
         .handle(make_load_handler(store))
         .build());
 
-    out.push_back(Tool::builder("knowledge_list")
+    out.push_back(Tool::builder("knowledge_browse")
         .describe(
-            "List all knowledge entries.\n"
+            "Browse everything you've learned — lists all remembered "
+            "topics. Optionally filter by keyword prefix.\n"
             "Example: {}")
-        .param("prefix", "string",  "Filter entries by prefix.", false)
+        .param("prefix", "string",  "Filter remembered topics by keyword prefix.", false)
         .param("max",    "integer", "Max results (default 50).", false)
         .handle(make_list_handler(store))
         .build());
 
-    out.push_back(Tool::builder("knowledge_delete")
+    out.push_back(Tool::builder("knowledge_forget")
         .describe(
-            "Delete a knowledge entry. Fixed entries are protected.\n"
+            "Forget a piece of knowledge. Pinned knowledge is protected "
+            "and cannot be forgotten.\n"
             "Example: {\"keywords\": \"python async\"}")
-        .param("keywords", "string", "Entry keywords.", true)
+        .param("keywords", "string", "Keywords of the knowledge to forget.", true)
         .handle(make_delete_handler(store))
         .build());
 
     out.push_back(Tool::builder("knowledge_keywords")
         .describe(
-            "Show all keywords in use across entries.\n"
+            "Show all keywords across everything you've learned — your "
+            "knowledge vocabulary.\n"
             "Example: {}")
-        .param("min_count", "integer", "Hide below N uses (default 1).", false)
+        .param("min_count", "integer", "Hide keywords used fewer than N times (default 1).", false)
         .param("max",       "integer", "Max results (default 200).", false)
         .handle(make_keywords_handler(store))
         .build());

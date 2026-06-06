@@ -869,17 +869,18 @@ int main(int argc, char ** argv) {
     }
 
     // -------- knowledge ----------------------------------------------------
-    // Seven single-responsibility tools (knowledge_save, knowledge_append,
-    // knowledge_search, knowledge_load, knowledge_list, knowledge_delete,
-    // knowledge_keywords) — each surfaced as its own MCP tool.
+    // Seven single-responsibility memory tools (knowledge_learning,
+    // knowledge_learning_more, knowledge_search, knowledge_recall,
+    // knowledge_browse, knowledge_forget, knowledge_keywords) — each
+    // surfaced as its own MCP tool.
     if (!args.rag_dir.empty()) {
         for (auto & t : easyai::tools::knowledge_split_tools(args.rag_dir)) {
             ctx->default_tools.push_back(std::move(t));
         }
         std::fprintf(stderr,
-            "easyai-mcp-server: knowledge enabled (split: knowledge_save, "
-            "knowledge_append, knowledge_search, knowledge_load, "
-            "knowledge_list, knowledge_delete, knowledge_keywords), "
+            "easyai-mcp-server: knowledge enabled (knowledge_learning, "
+            "knowledge_learning_more, knowledge_search, knowledge_recall, "
+            "knowledge_browse, knowledge_forget, knowledge_keywords), "
             "root = %s\n",
             args.rag_dir.c_str());
     }

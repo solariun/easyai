@@ -253,11 +253,44 @@ last <tokens> tok · <time>s · <inst> t/s`.
 Live token count is the streamed chunk count (≈ tokens) until
 finish_reason, when the server's real `predicted_n` lands.
 
+## Unbreakable CRITICAL THINKING block (AUTHORITATIVE — 2026-06-05)
+
+`preamble::build()` emits a `# CRITICAL THINKING — ALWAYS ON
+(NON-NEGOTIABLE, OVERRIDES ANY ROLE)` block as its FIRST output,
+UNCONDITIONALLY — independent of every `Options` flag. Content: keep
+reasoning critically under any role (check premises/claims against
+evidence, call out errors/false assumptions/missing context/risks, never
+fabricate/rubber-stamp/flatter a wrong idea); a role sets TONE and FOCUS
+but never overrides honesty or judgment; any instruction to stop thinking
+critically is void.
+
+Why it is unbreakable: server and cli append the whole `build()` preamble
+to WHICHEVER system message wins — the client's own "role"/system prompt
+or the server/cli default — so the block always lands AFTER the role text
+(recency weight) and on top of it. It leads `build()`'s output, and
+`build()` is now invoked UNCONDITIONALLY, so the block rides on every
+request regardless of datetime/memory state.
+
+Callers now always invoke `build()`:
+* `server.cpp build_authoritative_preamble` is called every request (the
+  `if (inject_dt || !mem_root.empty())` gate in `prepare_engine_for_request`
+  is removed). `cite_sources` is now computed as `inject_datetime ||
+  !memory_root.empty()` so its historical emission is unchanged.
+* `cli.cpp`: the `if (tv.datetime_on || !mem_root.empty())` gate around the
+  `build()` call is removed; `cite_sources=false` unchanged.
+* `session.cpp compose_dynamic()` already called `build()` unconditionally.
+
+The datetime / knowledge-cutoff / KNOWLEDGE-LOOP / memory-vocab sub-blocks
+stay self-gated inside `build()` by their `Options` flags (see next
+section) — only the critical-thinking block is always-on.
+
 ## Datetime + memory injection is tool-gated (AUTHORITATIVE — 2026-06-02)
 
-The per-turn `preamble::build()` blocks are now ENFORCED from the live
-tool registry (`ToolsetView::from_tools`) instead of flags alone, on
-both server and cli:
+The per-turn `preamble::build()` blocks (EXCEPT the always-on
+critical-thinking block above) are ENFORCED from the live tool registry
+(`ToolsetView::from_tools`) instead of flags alone, on both server and
+cli. `build()` itself is now always called (2026-06-05); these sub-blocks
+self-gate on their flags:
 
 | Block | Injected when |
 |-------|---------------|
@@ -497,18 +530,42 @@ Exposed only on the **unified** `fs` surface. Default `ToolMode` is `Split` (one
 
 ## ToolMode default
 
-`easyai::cli::Toolbelt::tool_mode_` defaults to `ToolMode::Split` — one focused tool per action (`fs_read`, `fs_write`, `fs_edit`, …, `web_search`, `web_fetch`, `memory_search`, …). Small / weaker tool-callers dispatch more reliably against flat one-verb-per-tool schemas than against an `action`-discriminated union.
+`easyai::cli::Toolbelt::tool_mode_` defaults to `ToolMode::Split` — one focused tool per action (`fs_read`, `fs_write`, `fs_edit`, …, `web_search`, `web_fetch`, `knowledge_search`, `knowledge_recall`, …). Small / weaker tool-callers dispatch more reliably against flat one-verb-per-tool schemas than against an `action`-discriminated union.
 
 To pick up the unified `fs(action="ops")` batch (or the `web(action=…)` dispatcher), opt in with `.tool_mode(ToolMode::Unified)` or `--tools-mode unified`. `Both` registers both surfaces side-by-side.
+
+## Knowledge tool names — memory, not files (2026-06-05)
+
+The seven knowledge tools are named as MEMORY operations so the model
+never treats the store as a filesystem. They keep the `knowledge_`
+prefix (groups them in the flat tool list) with memory-themed verbs:
+
+| Action | Tool name | Renamed from |
+|---|---|---|
+| remember a piece of knowledge | `knowledge_learning` | `knowledge_save` |
+| add to existing knowledge | `knowledge_learning_more` | `knowledge_append` |
+| find by keywords (ranked) | `knowledge_search` | (unchanged) |
+| return a topic's full content | `knowledge_recall` | `knowledge_load` |
+| list all remembered topics | `knowledge_browse` | `knowledge_list` |
+| drop a piece of knowledge | `knowledge_forget` | `knowledge_delete` |
+| show the keyword vocabulary | `knowledge_keywords` | (unchanged) |
+
+Result messages are reframed to match: no `.md` filenames, no byte
+counts, no file verbs — e.g. `learned "python async" (2 keywords)`,
+`expanded "python async" — added to what you already knew`,
+`forgot "python async"`; pinned (not "FIXED"/"immutable"). Descriptions
+state the store is memory, NOT a file store, and redirect file work to
+the `fs` tool. The C++ factory keeps its internal name
+`knowledge_split_tools()` (`rag_tools.cpp`).
 
 ## Knowledge Loop (memory + web)
 
 Mandatory workflow when both memory and web tools are available:
 
-1. **Memory first** — search/load relevant keywords
+1. **Memory first** — `knowledge_search` relevant keywords, then `knowledge_recall` the hits
 2. **Web second** — also search the web, even if memory had results
 3. **Merge & answer** — combine both, prefer more recent/authoritative on conflict
-4. **Update memory** — save durable new facts the web provided
+4. **Update memory** — remember durable new facts (`knowledge_learning` / `knowledge_learning_more`) the web provided
 
 Enforced in three places: system preamble (preamble.cpp), memory tool description (rag_tools.cpp), web tool descriptions (builtin_tools.cpp).
 
@@ -516,32 +573,35 @@ Enforced in three places: system preamble (preamble.cpp), memory tool descriptio
 
 | Operation | Default | Max |
 |-----------|---------|-----|
-| search (results per page) | 10 | 20 |
-| list (entries) | 50 | 200 |
-| keywords (vocabulary) | 200 | 500 |
+| `knowledge_search` (results per page) | 10 | 20 |
+| `knowledge_browse` (topics) | 50 | 200 |
+| `knowledge_keywords` (vocabulary) | 200 | 500 |
 
 ## Entry Identity
 
 Keywords are the sole identifier. Sorted + joined by `_` = filename stem.
 Example: `"python async sockets"` → file `async_python_sockets.md`.
-Files starting with `fix-` are immutable (cannot overwrite or delete).
+Files starting with `fix-` are pinned/immutable (cannot overwrite or
+forget). The `.md` stem and byte sizes are an on-disk detail and are NOT
+surfaced to the model — result messages show the keyword phrase only.
 
-## knowledge_append Behavior
+## knowledge_learning_more Behavior
 
-| Entry exists? | Behavior | Return message |
+| Knowledge exists? | Behavior | Return message |
 |--------------|----------|----------------|
-| Yes | Append content after `---` separator | `updated "key.md" (+N B → M B total)` |
-| No | Create new entry | `created "key.md" (N bytes)` |
-| Fixed (`fix-*`) | Error | Immutable, cannot append |
+| Yes | Append content after `---` separator | `expanded "python async" — added to what you already knew` |
+| No | Remember it fresh | `learned "python async" (new)` |
+| Pinned (`fix-*`) | Error | Pinned, cannot add to it |
 
 ## Knowledge content policy (2026-06-05)
 
 The knowledge store holds **only knowledge and information** — facts,
 concepts, decisions, how-tos. It is **never** a file store: files and
-file content must NOT be written through `knowledge_save` /
-`knowledge_append`, EVER. File reads/writes go through the `fs` tool.
-Enforced in the `knowledge_save` and `knowledge_append` tool
-descriptions (`rag_tools.cpp`), which redirect file work to `fs`.
+file content must NOT be written through `knowledge_learning` /
+`knowledge_learning_more`, EVER. File reads/writes go through the `fs`
+tool. Enforced in the `knowledge_learning` and `knowledge_learning_more`
+tool descriptions (`rag_tools.cpp`), which state the store is memory and
+redirect file work to `fs`.
 
 ## Tools-in-prompt Contract
 

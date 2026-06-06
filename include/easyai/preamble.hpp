@@ -108,8 +108,8 @@ struct Options {
     bool cite_sources = false;
 
     // When true, the cite_sources block emits its knowledge-tool bullets
-    // (knowledge(action="search"), knowledge(action="load"), knowledge_search,
-    // knowledge_load). When false, those bullets are omitted so the model
+    // (the knowledge_search / knowledge_recall tools). When false, those
+    // bullets are omitted so the model
     // is not told to cite tools that aren't registered. Drive this from
     // whether the knowledge/RAG tool is actually wired up this session.
     // Ignored when cite_sources=false.

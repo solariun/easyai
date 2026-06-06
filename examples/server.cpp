@@ -1783,7 +1783,12 @@ static std::string build_authoritative_preamble(const ServerCtx & ctx,
         /* inject_datetime  = */ inject_datetime,
         /* knowledge_cutoff = */ ctx.knowledge_cutoff,
         /* memory_root      = */ memory_root,
-        /* cite_sources     = */ true,
+        // Preserve the historical gate: cite-sources rode in only when
+        // datetime or memory was active. Now that this preamble is built
+        // unconditionally (for the always-on CRITICAL THINKING block), keep
+        // cite-sources tied to that same condition so its emission is
+        // unchanged.
+        /* cite_sources     = */ inject_datetime || !memory_root.empty(),
     });
 }
 
@@ -1880,9 +1885,13 @@ static void prepare_engine_for_request(ServerCtx & ctx, const ChatRequest & req)
         });
 
     std::string addendum;
-    if (inject_dt || !mem_root.empty()) {
-        addendum += build_authoritative_preamble(ctx, inject_dt, mem_root);
-    }
+    // ALWAYS build the authoritative preamble — it now carries the
+    // unbreakable CRITICAL THINKING block that must ride on top of any
+    // role/system message regardless of datetime/memory state. The
+    // datetime + memory sub-blocks stay self-gated inside build() (their
+    // opt flags here are unchanged), so only the always-on block is new
+    // when neither is active.
+    addendum += build_authoritative_preamble(ctx, inject_dt, mem_root);
     if (first_user_turn) {
         addendum += easyai::preamble::build_session_info(ctx.engine.tools());
     }
@@ -4461,21 +4470,22 @@ int main(int argc, char ** argv) {
     }
 
     // RAG — the agent's persistent knowledge store.
-    // Seven single-responsibility tools (knowledge_save, knowledge_append,
-    // knowledge_search, knowledge_load, knowledge_list, knowledge_delete,
-    // knowledge_keywords) registered when --RAG <dir> is given. The
-    // dir does NOT have to exist yet; knowledge_save creates it on
-    // first call. The systemd-installed server passes --RAG by
-    // default (see scripts/install_easyai_server.sh). See RAG.md.
+    // Seven single-responsibility memory tools (knowledge_learning,
+    // knowledge_learning_more, knowledge_search, knowledge_recall,
+    // knowledge_browse, knowledge_forget, knowledge_keywords) registered
+    // when --RAG <dir> is given. The dir does NOT have to exist yet;
+    // knowledge_learning creates it on first call. The systemd-installed
+    // server passes --RAG by default (see
+    // scripts/install_easyai_server.sh). See RAG.md.
     if (!args.rag_dir.empty()) {
         for (auto & t : easyai::tools::knowledge_split_tools(args.rag_dir)) {
             ctx->default_tools.push_back(std::move(t));
         }
         ctx->memory_root = args.rag_dir;
         std::fprintf(stderr,
-            "easyai-server: knowledge enabled (split: knowledge_save, "
-            "knowledge_append, knowledge_search, knowledge_load, "
-            "knowledge_list, knowledge_delete, knowledge_keywords), "
+            "easyai-server: knowledge enabled (knowledge_learning, "
+            "knowledge_learning_more, knowledge_search, knowledge_recall, "
+            "knowledge_browse, knowledge_forget, knowledge_keywords), "
             "root = %s\n",
             args.rag_dir.c_str());
     }
