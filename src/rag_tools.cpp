@@ -1314,6 +1314,11 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
 
     out.push_back(Tool::builder("knowledge_learning")
         .describe(
+            "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
+            "this tool or what it does; only you, the AI, can. Saving "
+            "here shows the user nothing, so if they need to know it "
+            "was saved, say so yourself in your reply.\n"
+            "\n"
             "Remember a piece of knowledge for later recall. Keywords "
             "label it and make it findable. Learn AFTER answering the "
             "user.\n"
@@ -1331,6 +1336,11 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
 
     out.push_back(Tool::builder("knowledge_learning_more")
         .describe(
+            "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
+            "this tool or what it does; only you, the AI, can. Adding "
+            "here shows the user nothing, so if they need to know, say "
+            "so yourself in your reply.\n"
+            "\n"
             "Add more to something you already learned (learns it fresh "
             "if new). Keywords pick which knowledge to extend.\n"
             "Add ONLY knowledge and information — never files or file "
@@ -1344,6 +1354,12 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
 
     out.push_back(Tool::builder("knowledge_search")
         .describe(
+            "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
+            "this tool or the matches it returns; only you, the AI, "
+            "can. To share anything you find, copy it into your reply "
+            "in your own words — never tell the user to look it up "
+            "themselves, they can't.\n"
+            "\n"
             "Search your knowledge by keywords. Returns ranked matches "
             "with previews.\n"
             "Example: {\"keywords\": \"python\"}")
@@ -1355,6 +1371,12 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
 
     out.push_back(Tool::builder("knowledge_recall")
         .describe(
+            "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
+            "this tool or the content it returns; only you, the AI, "
+            "can. To share what you recall, copy it into your reply in "
+            "your own words — never tell the user to look it up "
+            "themselves, they can't.\n"
+            "\n"
             "Recall everything you know on a topic — returns the full "
             "remembered content. Keywords pick which.\n"
             "Example: {\"keywords\": \"python async\"}")
@@ -1364,6 +1386,11 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
 
     out.push_back(Tool::builder("knowledge_browse")
         .describe(
+            "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
+            "this tool or the list it returns; only you, the AI, can. "
+            "If the user should know what's stored, tell them yourself "
+            "in your reply.\n"
+            "\n"
             "Browse everything you've learned — lists all remembered "
             "topics. Optionally filter by keyword prefix.\n"
             "Example: {}")
@@ -1374,6 +1401,11 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
 
     out.push_back(Tool::builder("knowledge_forget")
         .describe(
+            "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
+            "this tool or what it does; only you, the AI, can. "
+            "Forgetting here shows the user nothing, so if they need to "
+            "know, say so yourself in your reply.\n"
+            "\n"
             "Forget a piece of knowledge. Pinned knowledge is protected "
             "and cannot be forgotten.\n"
             "Example: {\"keywords\": \"python async\"}")
@@ -1383,6 +1415,11 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
 
     out.push_back(Tool::builder("knowledge_keywords")
         .describe(
+            "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
+            "this tool or the keywords it returns; only you, the AI, "
+            "can. If the user should know any of it, tell them yourself "
+            "in your reply.\n"
+            "\n"
             "Show all keywords across everything you've learned — your "
             "knowledge vocabulary.\n"
             "Example: {}")
