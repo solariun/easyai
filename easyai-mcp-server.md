@@ -257,6 +257,10 @@ populates it with:
    - The filesystem tool(s) listed in `tools/list` are the
      authoritative writer (`fs(action=...)` in Unified mode, the
      `fs_write`/`fs_edit`/... family in Split mode).
+   - **Read-before-write** (2026-06-12): an EXISTING file must first
+     be read with the filesystem read tool in this session before a
+     write/edit on it is accepted; blind overwrites come back as an
+     error telling the model to read first. New files are exempt.
    - `bash` is allowed to write files (redirects, `sed -i`, `mkdir`).
 3. The recovery rule: "On the first `PermissionError` from
    `evaluate`, switch to the filesystem tool / `bash` — do not retry

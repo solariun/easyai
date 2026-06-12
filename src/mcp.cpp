@@ -160,6 +160,11 @@ std::string build_instructions(const std::vector<Tool> & tools) {
             s += "  - The filesystem tool(s) listed in tools/list are "
                  "the authoritative path for file creation, "
                  "modification, and deletion.\n";
+            s += "  - Read-before-write: an EXISTING file must first "
+                 "be read with the filesystem read tool in this "
+                 "session before a write/edit on it is accepted; "
+                 "blind overwrites are rejected with an error that "
+                 "says to read first. New files are exempt.\n";
         }
         if (has_bash) {
             s += "  - `bash` is allowed to write files (redirects, "
