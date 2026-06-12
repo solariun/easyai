@@ -695,6 +695,14 @@ first turn.  Pass `--continue` (or set `[cli] auto_continue = on` in
 INI) to resume from the existing file before the first prompt.
 Saving on every turn is unchanged.
 
+In the TUI, a resumed conversation is also **replayed into the
+scrollback** — user bubbles, assistant replies and tool rows render
+exactly as they did live, closed by a `── Resumed .easyai_session ──`
+divider — so the prior context is visible, not just in effect.
+(Reasoning isn't persisted in the session file, so replayed turns have
+no "Thought" rows; per-turn durations are likewise unknown after a
+restart and are omitted.)
+
 ```bash
 $ cd ~/project
 $ easyai-cli --url http://ai.local

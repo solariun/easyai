@@ -27,6 +27,9 @@
 // registered tool handler so it can show live "running…" state. The
 // transport, history, session file and system prompt stay exactly as
 // the caller configured them — this is a presentation layer only.
+// History the caller pre-loaded (--continue / --session-file) is
+// replayed into the scrollback on startup, closed by a "Resumed …"
+// divider, so a resumed conversation is visible, not just in effect.
 #pragma once
 
 #include <functional>

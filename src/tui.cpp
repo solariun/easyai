@@ -27,7 +27,10 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -1447,10 +1450,15 @@ std::vector<std::string> render_message(Ui & ui, Message & m, bool last_msg) {
     // assistant
     for (size_t pi = 0; pi < m.parts.size(); ++pi) {
         Part & p = m.parts[pi];
-        if (!rows.empty()) rows.push_back("");
+        // blank separator between parts — track it so the Tool /
+        // hidden-Reasoning branches don't pop_back() an empty vector
+        // when the message STARTS with a tool part (replayed sessions,
+        // tool-call-first turns).
+        const bool gap = !rows.empty();
+        if (gap) rows.push_back("");
         switch (p.kind) {
             case PartKind::Reasoning: {
-                if (!ui.opt.show_reasoning) { rows.pop_back(); break; }
+                if (!ui.opt.show_reasoning) { if (gap) rows.pop_back(); break; }
                 bool streaming = p.t1 == 0;
                 std::string head(kMargin + kIndent, ' ');
                 if (streaming) {
@@ -1489,7 +1497,7 @@ std::vector<std::string> render_message(Ui & ui, Message & m, bool last_msg) {
                 break;
             }
             case PartKind::Tool: {
-                rows.pop_back();  // tools stack without the blank gap
+                if (gap) rows.pop_back();  // tools stack without the blank gap
                 render_tool(rows, ui, m, p.tool);
                 break;
             }
@@ -3294,6 +3302,108 @@ void tui_debug(const char * msg) {
     }
 }
 
+// ------------------------------------------------------- history replay ----
+// Rebuild the chat scrollback from the Client's already-loaded history
+// (--continue / --session-file).  The wire shape is what
+// Client::dump_history() emits: user / assistant(+tool_calls) / tool
+// messages.  Consecutive assistant+tool entries collapse into ONE
+// assistant bubble per user turn — the same look the live agentic loop
+// painted when it ran.  System messages are config, not conversation —
+// skipped.  Reasoning isn't persisted, so replayed bubbles have no
+// "Thought" rows.  Runs before the input loop starts: no lock needed.
+void seed_from_history(Ui & ui) {
+    const std::string raw = ui.cli->dump_history();
+    if (raw.size() <= 2) return;  // "[]" — fresh session
+    // The Client already parsed this exact payload in load_history();
+    // a non-throwing re-parse here is belt and braces.
+    nlohmann::json arr = nlohmann::json::parse(raw, nullptr, false);
+    if (arr.is_discarded() || !arr.is_array()) return;
+
+    auto s_of = [](const nlohmann::json & j, const char * k) -> std::string {
+        auto it = j.find(k);
+        return it != j.end() && it->is_string()
+                   ? it->get<std::string>() : std::string();
+    };
+
+    std::vector<Message> msgs;
+    // tool_call id → {message idx, part idx} awaiting its role:"tool" result
+    std::unordered_map<std::string, std::pair<size_t, size_t>> open_calls;
+    int cur = -1;  // open assistant bubble (resets on each user message)
+
+    for (const auto & jm : arr) {
+        if (!jm.is_object()) continue;
+        const std::string role = s_of(jm, "role");
+        if (role == "user") {
+            cur = -1;
+            Message m;
+            m.role = Message::User;
+            Part p; p.kind = PartKind::Text; p.text = s_of(jm, "content");
+            m.parts.push_back(std::move(p));
+            msgs.push_back(std::move(m));
+        } else if (role == "assistant") {
+            std::string content = s_of(jm, "content");
+            const auto tcs = jm.find("tool_calls");
+            const bool has_calls = tcs != jm.end() && tcs->is_array()
+                                   && !tcs->empty();
+            if (content.empty() && !has_calls) continue;
+            if (cur < 0) {
+                Message m;
+                m.role = Message::Assistant;
+                m.done = true;
+                msgs.push_back(std::move(m));
+                cur = (int) msgs.size() - 1;
+            }
+            Message & m = msgs[(size_t) cur];
+            // live order within a hop: streamed text first, tools after
+            if (!content.empty()) {
+                Part p; p.kind = PartKind::Text; p.text = std::move(content);
+                m.parts.push_back(std::move(p));
+            }
+            if (has_calls) {
+                for (const auto & tc : *tcs) {
+                    if (!tc.is_object()) continue;
+                    const auto fn = tc.find("function");
+                    if (fn == tc.end() || !fn->is_object()) continue;
+                    Part p; p.kind = PartKind::Tool;
+                    p.tool.name  = s_of(*fn, "name");
+                    p.tool.args  = s_of(*fn, "arguments");
+                    p.tool.state = ToolState::Done;  // result message follows
+                    m.parts.push_back(std::move(p));
+                    const std::string id = s_of(tc, "id");
+                    if (!id.empty())
+                        open_calls[id] = { (size_t) cur, m.parts.size() - 1 };
+                }
+            }
+        } else if (role == "tool") {
+            const auto it = open_calls.find(s_of(jm, "tool_call_id"));
+            if (it == open_calls.end()) continue;
+            Part & p = msgs[it->second.first].parts[it->second.second];
+            std::string content = s_of(jm, "content");
+            if (content.rfind("ERROR: ", 0) == 0) {
+                p.tool.state = ToolState::Error;
+                content.erase(0, 7);
+            }
+            p.tool.result = std::move(content);
+            open_calls.erase(it);
+        }
+        // "system" and anything unknown: config, not conversation.
+    }
+    if (msgs.empty()) return;
+
+    // divider between the replayed transcript and live turns
+    Message d;
+    d.role = Message::Info;
+    Part p; p.kind = PartKind::Text;
+    p.text = ui.opt.session_path.empty()
+                 ? "Resumed session"
+                 : "Resumed "
+                       + stdfs::path(ui.opt.session_path).filename().string();
+    d.parts.push_back(std::move(p));
+    msgs.push_back(std::move(d));
+
+    ui.msgs = std::move(msgs);
+}
+
 int run(Client & cli, Plan & plan, const Options & opt, const Hooks & hooks) {
     if (!terminal_capable()) { tui_debug("terminal_capable=false"); return 2; }
 
@@ -3327,6 +3437,7 @@ int run(Client & cli, Plan & plan, const Options & opt, const Hooks & hooks) {
     ui.placeholder_idx = (int)(now_ms() / 1000)
         % (int)(sizeof(kPlaceholders) / sizeof(*kPlaceholders));
 
+    seed_from_history(ui);   // --continue / --session-file scrollback replay
     install_callbacks(ui);
     wrap_tools(ui);
 
