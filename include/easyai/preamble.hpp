@@ -144,6 +144,30 @@ std::string build(const Options & opt);
 // registered this session.
 std::string cite_sources_block(bool has_memory = true);
 
+// ---------- agentic-session blocks (opencode-inspired, 2026-06) ----------
+//
+// env_block: machine-context header for coding sessions — working
+// directory, platform, git-repo flag, date. Models without this waste
+// the first hop on `pwd` / `fs_cwd`; with it they path correctly from
+// turn 1. All fields optional: empty strings are skipped.
+struct EnvInfo {
+    std::string cwd;        // absolute working dir / sandbox root
+    std::string platform;   // "darwin", "linux", ...
+    int         is_git = -1;  // 1 yes / 0 no / -1 unknown (skip line)
+    std::string date;       // YYYY-MM-DD (local)
+};
+std::string env_block(const EnvInfo & env);
+
+// agent_style_block: the coding-agent working agreement — terse
+// terminal-friendly answers, code-convention mimicry, plan-tool task
+// discipline, verification before "done", and (when a `question` tool
+// is registered) when to ask the user vs. decide. The flags gate the
+// paragraphs so the model is never told about affordances it doesn't
+// have this session.
+std::string agent_style_block(bool has_fs_or_bash,
+                              bool has_plan,
+                              bool has_question);
+
 // Build the AVAILABLE TOOLS + VERIFY-BEFORE-YOU-CALL block. The
 // returned string starts with a blank-line separator so it joins
 // cleanly onto whatever came before. Returns "" if `tools` is empty.

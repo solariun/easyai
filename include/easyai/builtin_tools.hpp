@@ -107,8 +107,8 @@ std::vector<Tool> fs_split(std::string root = ".");
 // hit the network, can spawn long-lived processes, etc. The only
 // safety nets are:
 //   - cwd is fixed to `root` (so the model's relative paths land there);
-//   - merged stdout/stderr is captured and capped at 32 KB;
-//   - a hard timeout (default 30s, capped at 300s) sends SIGTERM then
+//   - merged stdout/stderr is captured and capped at 50 KB / 2000 lines;
+//   - a hard timeout (default 120s, capped at 600s) sends SIGTERM then
 //     SIGKILL.
 // Caller is responsible for deciding whether bash is appropriate for
 // their threat model — we surface it only when the user opts in
@@ -143,6 +143,15 @@ Tool bash         (std::string root = ".", bool show_output = false);
 // their threat model — surfaced only when the operator opts in
 // (e.g. `--allow-python`).
 Tool python3      (std::string root = ".", bool show_output = false);
+
+// ---------- interactivity -------------------------------------------------
+// question: ask the human at the terminal 1-4 multiple-choice questions
+// and block the agent turn until they answer. Bridges into the
+// interactive TUI (easyai::tui::ask_questions); outside a TUI session
+// the handler returns a clean "no interactive user available" error so
+// unattended runs degrade gracefully. Register it only for interactive
+// surfaces — the CLI does this automatically in TUI mode.
+Tool question();
 
 // ---------- introspection -----------------------------------------------
 // tool_lookup: return the currently-registered tool catalogue, optionally

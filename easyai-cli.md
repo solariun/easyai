@@ -107,7 +107,8 @@ on the command line and stdin.
 
 | Mode | Trigger | Behaviour |
 | --- | --- | --- |
-| **REPL** | No `-p`, no positional prompt, stdin is a TTY | Interactive prompt loop. Green `●` prompt. Ctrl-C stops generation and returns to prompt. `/exit` or `Ctrl-D` to quit. |
+| **TUI** (default interactive) | No `-p`, no positional prompt, stdin **and** stdout are TTYs | Full-screen chat (opencode-style look & feel): bordered multiline prompt with `/`-command and `@`-file completion, markdown rendering, live tool rows with diffs, todo checklist, status/footer bars, themes. `enter` sends, `shift+enter`/`ctrl+j` newline, `esc esc` interrupts, `ctrl+c ctrl+c` or `/exit` quits, `/help` lists everything. Falls back to the line REPL on `--plain`, `--quiet`, or any non-TTY end. |
+| **REPL** (legacy) | Same as TUI but with `--plain` (or `[cli] tui = off`) | Interactive line loop. Green `●` prompt. Ctrl-C stops generation and returns to prompt. `/exit` or `Ctrl-D` to quit. |
 | **Shell** | `--shell` | Hybrid AI shell. Normal commands via `$SHELL`, lines prefixed with `>` go to the AI. `cd`/`export`/`unset` persist. See [§3a](#3a-shell-mode). |
 | **One-shot** | `-p <text>` OR a positional argument | Send the single prompt, stream the reply, exit. |
 | **Piped** | stdin is a pipe (anything redirected in) | Reads stdin into the prompt and runs once. Same as one-shot. |
@@ -221,6 +222,10 @@ prepended (see [§7](#7-system-prompt--injected-blocks)).
 
 | Flag | Notes |
 | --- | --- |
+| `--plain` | Use the legacy line REPL instead of the full-screen TUI. The TUI is the default for interactive terminal sessions; one-shot / piped / `--quiet` runs never use it. INI: `[cli] tui = off`. |
+| `--tui` | Force the TUI back on (overrides `[cli] tui = off`). |
+| `--theme NAME` | TUI color theme: `opencode` (default, dark) or `opencode-light`. Truecolor when the terminal advertises it, 256-color fallback otherwise. Switchable live via `/theme`. INI: `[cli] theme = NAME`. |
+| `--no-agents-md` | Skip `AGENTS.md` discovery. By default the CLI walks up from the working directory (first hit wins, 8 levels max) and also loads `~/.config/easyai/AGENTS.md`, injecting both as a `[project-instructions]` system-prompt block (sanitized, 32 KB cap). INI: `[cli] agents_md = off`. |
 | `--shell` | Hybrid AI shell — starts `$SHELL`, `>` prefix for AI prompts. `cd`/`export`/`unset` persist. Implies `--allow-bash`. INI: `[cli] shell = true`. See [§3a](#3a-shell-mode). |
 | `-p TEXT`, `--prompt TEXT` | One-shot prompt. (You can also pass it as a positional arg or pipe via stdin.) |
 | `--no-reasoning`, `--hide-reasoning` | Hide `delta.reasoning_content` (default: shown inline in dim grey). |

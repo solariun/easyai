@@ -1,6 +1,7 @@
 #include "easyai/builtin_tools.hpp"
 #include "easyai/log.hpp"
 #include "easyai/tool.hpp"
+#include "easyai/tui.hpp"   // question tool ↔ interactive asker bridge
 
 #include <algorithm>
 #include <cctype>
@@ -1504,7 +1505,172 @@ ToolResult web_handle_search(const ToolCall & c, bool google_enabled) {
     return ToolResult::error(o.str());
 }
 
-// ---------- fetch: GET a URL, return text (or raw HTML), with paging ----------
+// ---------- fetch helpers: HTML → markdown (forward-only scanner) ----------
+// Light conversion for web_fetch's format="markdown": headings, links,
+// list items, bold/italic, code/pre, paragraph breaks. Single forward
+// pass, no regex (stack-overflow rules: model/network input).
+std::string html_to_markdown(const std::string & html) {
+    std::string out;
+    out.reserve(html.size() / 2);
+    size_t i = 0;
+    const size_t n = html.size();
+    bool skip_until_close = false;          // inside script/style/head
+    std::string skip_tag;
+    std::string link_href;                  // pending <a href> stash
+    bool in_pre = false;
+    auto append_entity_decoded = [&](char c) { out.push_back(c); };
+    auto lower = [](std::string s) {
+        for (auto & ch : s) ch = (char) std::tolower((unsigned char) ch);
+        return s;
+    };
+    auto ends_blank = [&]() {
+        size_t k = out.size();
+        int nl = 0;
+        while (k > 0 && (out[k-1] == '\n' || out[k-1] == ' ')) {
+            if (out[k-1] == '\n') ++nl;
+            --k;
+        }
+        return nl;
+    };
+    auto newline = [&](int want) {
+        int have = ends_blank();
+        while (have < want) { out.push_back('\n'); ++have; }
+    };
+    while (i < n) {
+        char c = html[i];
+        if (c == '<') {
+            size_t close = html.find('>', i + 1);
+            if (close == std::string::npos) break;
+            std::string tag = html.substr(i + 1, close - i - 1);
+            i = close + 1;
+            bool closing = !tag.empty() && tag[0] == '/';
+            if (closing) tag.erase(0, 1);
+            // tag name = up to first space
+            std::string name = lower(tag.substr(0, tag.find_first_of(" \t\r\n/")));
+            if (skip_until_close) {
+                if (closing && name == skip_tag) skip_until_close = false;
+                continue;
+            }
+            if (!closing && (name == "script" || name == "style"
+                             || name == "noscript" || name == "head"
+                             || name == "svg" || name == "iframe")) {
+                skip_until_close = true;
+                skip_tag = name;
+                continue;
+            }
+            if (name.size() == 2 && name[0] == 'h'
+                && name[1] >= '1' && name[1] <= '6') {
+                if (!closing) {
+                    newline(2);
+                    out.append((size_t)(name[1] - '0'), '#');
+                    out.push_back(' ');
+                } else newline(2);
+                continue;
+            }
+            if (name == "br") { newline(1); continue; }
+            if (name == "p" || name == "div" || name == "section"
+                || name == "article" || name == "tr" || name == "table"
+                || name == "ul" || name == "ol" || name == "blockquote") {
+                newline(name == "p" ? 2 : 1);
+                continue;
+            }
+            if (name == "li") {
+                if (!closing) { newline(1); out += "- "; }
+                continue;
+            }
+            if (name == "b" || name == "strong") { out += "**"; continue; }
+            if (name == "i" || name == "em")     { out += "*";  continue; }
+            if (name == "code" && !in_pre)       { out += "`";  continue; }
+            if (name == "pre") {
+                in_pre = !closing;
+                newline(1);
+                out += "```";
+                newline(1);
+                continue;
+            }
+            if (name == "a") {
+                if (!closing) {
+                    // pull href="..." (quoted or bare)
+                    std::string lt = lower(tag);
+                    size_t h = lt.find("href");
+                    std::string href;
+                    if (h != std::string::npos) {
+                        size_t eq = tag.find('=', h);
+                        if (eq != std::string::npos && eq + 1 < tag.size()) {
+                            char quote = (tag[eq+1] == '"' || tag[eq+1] == '\'')
+                                             ? tag[eq+1] : 0;
+                            size_t b, e;
+                            if (quote) {
+                                b = eq + 2;
+                                e = tag.find(quote, b);
+                            } else {
+                                b = eq + 1;
+                                e = tag.find_first_of(" \t>", b);
+                            }
+                            if (e == std::string::npos) e = tag.size();
+                            if (b <= tag.size() && e >= b)
+                                href = tag.substr(b, e - b);
+                        }
+                    }
+                    out += "[";
+                    // remember href; emitted on </a>. Nested <a> is
+                    // rare/invalid — keep a single slot.
+                    link_href = href;
+                } else {
+                    out += "](" + link_href + ")";
+                    link_href.clear();
+                }
+                continue;
+            }
+            continue;  // every other tag: drop, keep content
+        }
+        if (c == '&') {
+            // tiny entity set
+            struct Ent { const char * name; char ch; };
+            static const Ent ents[] = {
+                { "&amp;", '&' }, { "&lt;", '<' }, { "&gt;", '>' },
+                { "&quot;", '"' }, { "&#39;", '\'' }, { "&apos;", '\'' },
+                { "&nbsp;", ' ' },
+            };
+            bool done = false;
+            for (auto & e : ents) {
+                size_t l = std::strlen(e.name);
+                if (html.compare(i, l, e.name) == 0) {
+                    append_entity_decoded(e.ch);
+                    i += l;
+                    done = true;
+                    break;
+                }
+            }
+            if (done) continue;
+            out.push_back('&');
+            ++i;
+            continue;
+        }
+        if (skip_until_close) { ++i; continue; }
+        if (c == '\r') { ++i; continue; }
+        if (!in_pre && (c == '\n' || c == '\t')) {
+            // collapse structural whitespace
+            if (!out.empty() && out.back() != ' ' && out.back() != '\n')
+                out.push_back(' ');
+            ++i;
+            continue;
+        }
+        out.push_back(c);
+        ++i;
+    }
+    // squeeze 3+ newlines to 2
+    std::string final;
+    final.reserve(out.size());
+    int nl = 0;
+    for (char ch : out) {
+        if (ch == '\n') { if (++nl <= 2) final.push_back(ch); }
+        else { nl = 0; final.push_back(ch); }
+    }
+    return final;
+}
+
+// ---------- fetch: GET a URL, return text/markdown/HTML, with paging --------
 ToolResult web_handle_fetch(const ToolCall & c) {
 #if !defined(EASYAI_HAVE_CURL)
     (void) c;
@@ -1516,23 +1682,30 @@ ToolResult web_handle_fetch(const ToolCall & c) {
         return ToolResult::error("missing required arg: url (web action=\"fetch\")");
     }
     args::get_bool(c.arguments_json, "as_html", as_html);
+    // format: "text" (default) | "markdown" | "html". as_html=true is
+    // the legacy spelling of format="html" and keeps working.
+    std::string format = args::get_string_or(c.arguments_json, "format", "");
+    if (format != "text" && format != "markdown" && format != "html")
+        format = as_html ? "html" : "text";
     long long start = std::max<long long>(0,
         args::get_int_or(c.arguments_json, "start", 0));
     long long limit = args::get_int_or(c.arguments_json, "limit", 8 * 1024);
     if (limit < 256)            limit = 256;
     if (limit > 64 * 1024)      limit = 64 * 1024;
 
-    // Cache key: url + as_html flag. Pagination is applied AFTER cache
+    // Cache key: url + format. Pagination is applied AFTER cache
     // hit so we don't multiply storage by every (start, limit) combo.
-    const std::string key = url + (as_html ? "|html" : "|text");
+    const std::string key = url + "|" + format;
     std::string processed;
     if (!web_fetch_cache().get(key, processed)) {
         std::string body, err;
         if (!http_get(url, {}, body, err)) {
             return ToolResult::error("fetch failed: " + err);
         }
-        processed = as_html ? body : strip_html(body);
-        web_fetch_cache().put(key, processed, as_html);
+        processed = format == "html"     ? body
+                  : format == "markdown" ? html_to_markdown(body)
+                                         : strip_html(body);
+        web_fetch_cache().put(key, processed, format == "html");
     }
 
     if ((size_t) start >= processed.size()) {
@@ -1605,13 +1778,14 @@ std::vector<Tool> web_split(bool google_enabled) {
 
     out.push_back(Tool::builder("web_fetch")
         .short_describe(
-            "Fetch one URL — returns its stripped text. Cite the URL "
+            "Fetch one URL — returns text/markdown/html. Cite the URL "
             "in your reply's `Sources:` block.")
         .describe(
-            "Fetch a URL and return its text (HTML stripped by "
-            "default). When the response is truncated the marker "
-            "tells you the next `start=` value. Same URL is cached "
-            "5 min.\n"
+            "Fetch a URL and return its content. format=\"text\" "
+            "(default) strips HTML; \"markdown\" converts headings/"
+            "links/lists to markdown; \"html\" returns the raw body. "
+            "When the response is truncated the marker tells you the "
+            "next `start=` value. Same URL is cached 5 min.\n"
             "\n"
             "CITATION (INVIOLABLE): after ANY web_search / web_fetch "
             "this turn, your final reply MUST end with a `Sources:` "
@@ -1619,9 +1793,11 @@ std::vector<Tool> web_split(bool google_enabled) {
             "line, prefixed `- `.")
         .param("url",     "string",
                "Absolute http(s) URL to fetch.", true)
+        .param("format",  "string",
+               "\"text\" (default) | \"markdown\" | \"html\".", false)
         .param("as_html", "boolean",
-               "Keep raw HTML instead of stripped text. Default "
-               "false.", false)
+               "Legacy alias for format=\"html\". Default false.",
+               false)
         .param("start",   "integer",
                "Byte offset, default 0. Use the previous call's "
                "`start=` marker to continue.", false)
@@ -1808,6 +1984,21 @@ struct Sandbox {
     //      here used to break fs_check_path on exactly the paths the
     //      operator most wanted to probe (e.g. files inside an
     //      0000-perm parent that the model wants to know about).
+    // Read-before-write registry (opencode contract): a file that
+    // already exists must have been fs_read in this session before
+    // fs_write / fs_edit may modify it. Keyed by normalized real path;
+    // process-lifetime scope (one CLI session = one process).
+    std::mutex                    read_mu;
+    std::set<std::string>         read_paths;
+    void note_read(const stdfs::path & p) {
+        std::lock_guard<std::mutex> lk(read_mu);
+        read_paths.insert(p.lexically_normal().string());
+    }
+    bool was_read(const stdfs::path & p) {
+        std::lock_guard<std::mutex> lk(read_mu);
+        return read_paths.count(p.lexically_normal().string()) > 0;
+    }
+
     bool inside_sandbox(const stdfs::path & p) const {
         // Path-component prefix match — avoids the string-prefix bug
         // where "/srv/user" prefix-matches "/srv/userMALICIOUS/secret".
@@ -1940,19 +2131,57 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
         }
         int fd = ::open(p.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         if (fd < 0) {
-            return ToolResult::error(std::string("cannot open: ")
-                                     + sb->virtual_path(p)
-                                     + " (" + std::strerror(errno) + ")");
+            std::string msg = std::string("cannot open: ")
+                            + sb->virtual_path(p)
+                            + " (" + std::strerror(errno) + ")";
+            // opencode contract: on not-found, suggest similarly named
+            // entries from the parent directory so the model can
+            // self-correct without a list round-trip.
+            if (errno == ENOENT) {
+                std::string stem = p.stem().string();
+                for (auto & ch : stem) ch = (char) std::tolower((unsigned char) ch);
+                std::error_code ec;
+                stdfs::directory_iterator it(p.parent_path(), ec), end;
+                std::string sugg;
+                int n = 0;
+                for (; !ec && it != end && n < 3; it.increment(ec)) {
+                    std::string base = it->path().filename().string();
+                    std::string lo = base;
+                    for (auto & ch : lo) ch = (char) std::tolower((unsigned char) ch);
+                    if (!stem.empty() && lo.find(stem) != std::string::npos) {
+                        if (!sugg.empty()) sugg += ", ";
+                        sugg += sb->virtual_path(it->path());
+                        ++n;
+                    }
+                }
+                if (!sugg.empty()) msg += ". Did you mean: " + sugg + "?";
+            }
+            return ToolResult::error(msg);
         }
         {
             struct stat st_kind {};
             if (::fstat(fd, &st_kind) == 0 && S_ISDIR(st_kind.st_mode)) {
                 ::close(fd);
-                return ToolResult::error(
-                    std::string("path is a directory: ")
-                    + sb->virtual_path(p)
-                    + " — use action=\"list\" to enumerate entries, "
-                    "or action=\"glob\" / \"grep\" for recursive search.");
+                // opencode contract: reading a directory returns its
+                // entries, one per line, subdirectories with a
+                // trailing `/`. No line-number prefix.
+                std::error_code ec;
+                std::vector<std::string> entries;
+                stdfs::directory_iterator dit(p, ec), dend;
+                for (; !ec && dit != dend; dit.increment(ec)) {
+                    std::error_code q;
+                    std::string base = dit->path().filename().string();
+                    if (dit->is_directory(q) && !q) base += "/";
+                    entries.push_back(base);
+                    if (entries.size() >= 1000) break;
+                }
+                std::sort(entries.begin(), entries.end());
+                std::string out;
+                for (auto & e : entries) { out += e; out += '\n'; }
+                if (entries.empty()) out = "(empty directory)\n";
+                if (entries.size() >= 1000)
+                    out += "(listing truncated at 1000 entries)\n";
+                return ToolResult::ok(std::move(out));
             }
         }
 
@@ -2005,15 +2234,19 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
                     + std::to_string(total) + ")");
             }
 
-            long long line_limit = has_limit ? limit : 200;
+            // opencode read defaults: 2000 lines per call, each line
+            // capped at 2000 chars, `<n>: ` prefix.
+            long long line_limit = has_limit ? limit : 2000;
             if (line_limit < 1)    line_limit = 1;
             if (line_limit > 2000) line_limit = 2000;
 
             long long end = std::min(start_line + line_limit - 1, total);
 
+            sb->note_read(p);
             std::string out;
             out.reserve((size_t)(end - start_line + 1) * 90);
-            char numbuf[16];
+            char numbuf[24];
+            constexpr size_t kMaxLineChars = 2000;
             for (long long ln = start_line; ln <= end; ++ln) {
                 auto & seg = lns[(size_t)(ln - 1)];
                 std::string_view sv(body.data() + seg.first, seg.second);
@@ -2021,15 +2254,22 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
                         && (sv.back() == '\n' || sv.back() == '\r'))
                     sv.remove_suffix(1);
                 int nn = std::snprintf(numbuf, sizeof(numbuf),
-                                       "%6lld| ", ln);
+                                       "%lld: ", ln);
                 if (nn > 0) out.append(numbuf, (size_t) nn);
-                out.append(sv.data(), sv.size());
+                if (sv.size() > kMaxLineChars) {
+                    out.append(sv.data(), kMaxLineChars);
+                    out.append("... (line truncated to 2000 chars)");
+                } else {
+                    out.append(sv.data(), sv.size());
+                }
                 out.push_back('\n');
             }
             if (end < total) {
-                out.append("[" + std::to_string(total - end)
-                           + " more lines; pass start_line="
-                           + std::to_string(end + 1) + " to continue]\n");
+                out.append("(File has more lines. Pass start_line="
+                           + std::to_string(end + 1)
+                           + " to read beyond this point — "
+                           + std::to_string(total - end)
+                           + " more lines.)\n");
             }
             char mbuf[128];
             std::snprintf(mbuf, sizeof(mbuf),
@@ -2110,6 +2350,7 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
             return s;
         };
 
+        sb->note_read(p);
         if (line_numbers && !buf.empty()) {
             std::string out;
             out.reserve(buf.size() + buf.size() / 32);
@@ -2119,12 +2360,12 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
                            "or action=\"grep\"]\n");
             }
             long long lineno = 1;
-            char numbuf[16];
+            char numbuf[24];
             size_t line_start = 0;
             for (size_t i = 0; i < buf.size(); ++i) {
                 if (buf[i] == '\n') {
                     int nn = std::snprintf(numbuf, sizeof(numbuf),
-                                           "%6lld| ", lineno);
+                                           "%lld: ", lineno);
                     if (nn > 0) out.append(numbuf, (size_t) nn);
                     out.append(buf, line_start, i - line_start + 1);
                     line_start = i + 1;
@@ -2133,7 +2374,7 @@ ToolHandler make_fs_read_handler(std::shared_ptr<Sandbox> sb) {
             }
             if (line_start < buf.size()) {
                 int nn = std::snprintf(numbuf, sizeof(numbuf),
-                                       "%6lld| ", lineno);
+                                       "%lld: ", lineno);
                 if (nn > 0) out.append(numbuf, (size_t) nn);
                 out.append(buf, line_start, buf.size() - line_start);
             }
@@ -2158,6 +2399,22 @@ ToolHandler make_fs_write_handler(std::shared_ptr<Sandbox> sb) {
         if (!sb->inside_sandbox(p)) {
             return ToolResult::error("path escapes sandbox via symlink: "
                                      + sb->virtual_path(p));
+        }
+
+        // Read-before-write (opencode contract): overwriting an
+        // EXISTING, non-empty file requires a prior fs_read in this
+        // session, so the model can't blind-clobber content it never
+        // looked at. New files and explicit appends are exempt.
+        if (!append) {
+            std::error_code rec;
+            if (stdfs::is_regular_file(p, rec) && !rec
+                && stdfs::file_size(p, rec) > 0 && !rec
+                && !sb->was_read(p)) {
+                return ToolResult::error(
+                    sb->virtual_path(p) + " already exists and has not "
+                    "been read in this session. Read it first (fs_read) "
+                    "so the overwrite is informed, then write.");
+            }
         }
 
         std::error_code ec;
@@ -2200,6 +2457,7 @@ ToolHandler make_fs_write_handler(std::shared_ptr<Sandbox> sb) {
             left -= (size_t) n;
         }
         ::close(fd);
+        sb->note_read(p);  // own write counts as knowing the content
         return ToolResult::ok("wrote " + std::to_string(content.size())
                               + " bytes to " + sb->virtual_path(p));
     };
@@ -2268,14 +2526,210 @@ ToolHandler make_fs_append_handler(std::shared_ptr<Sandbox> sb) {
 // range). Pure delete is content="". File must already exist (use
 // action="write" to create). Atomic via tempfile + rename, same
 // O_NOFOLLOW + post-mkdir TOCTOU defenses as write.
+// String-replacement edit (the opencode `edit` contract): exact
+// oldString → newString swap with line-ending-normalization fallback,
+// uniqueness enforcement, and replaceAll. Shares the Sandbox gates
+// with the line-range mode below.
+ToolResult fs_edit_strings(const std::shared_ptr<Sandbox> & sb,
+                           const stdfs::path & p,
+                           std::string olds, std::string news,
+                           bool replace_all) {
+    if (olds == news)
+        return ToolResult::error(
+            "no changes to apply: oldString and newString are identical");
+
+    std::error_code ec;
+    const bool exists = stdfs::exists(p, ec) && !ec;
+
+    // empty oldString + missing file → create (opencode's edit-creates
+    // contract); empty oldString + existing file is ambiguous → error.
+    if (olds.empty()) {
+        if (exists)
+            return ToolResult::error(
+                "oldString is empty but " + sb->virtual_path(p)
+                + " already exists. Pass the exact text to replace, or "
+                "use a write action to overwrite the whole file.");
+    } else if (!exists) {
+        return ToolResult::error(
+            "cannot open for edit: " + sb->virtual_path(p)
+            + " (No such file or directory). Use a write action to "
+            "create the file first.");
+    }
+
+    std::string body;
+    if (exists) {
+        if (!sb->was_read(p))
+            return ToolResult::error(
+                sb->virtual_path(p) + " has not been read in this "
+                "session. fs_read it first so oldString matches the "
+                "real content, then edit.");
+        std::ifstream f(p, std::ios::binary);
+        if (!f) return ToolResult::error("cannot open for edit: "
+                                         + sb->virtual_path(p));
+        std::ostringstream ss; ss << f.rdbuf();
+        body = ss.str();
+        if (body.size() > 8 * 1024 * 1024)
+            return ToolResult::error(
+                "file too large for edit (>8 MiB); use a write action "
+                "with the new full content instead.");
+    }
+
+    // Match pass 1: exact. Pass 2: line-ending normalization — if the
+    // file uses CRLF and oldString came in LF (or vice versa), convert
+    // the whole body to LF, match there, and restore CRLF on save.
+    auto count_occ = [](const std::string & hay, const std::string & pat) {
+        if (pat.empty()) return (size_t) 0;
+        size_t n = 0, at = 0;
+        while ((at = hay.find(pat, at)) != std::string::npos) {
+            ++n; at += pat.size();
+        }
+        return n;
+    };
+    auto to_lf = [](const std::string & s) {
+        std::string o; o.reserve(s.size());
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (s[i] == '\r' && i + 1 < s.size() && s[i+1] == '\n') continue;
+            o.push_back(s[i] == '\r' ? '\n' : s[i]);
+        }
+        return o;
+    };
+
+    bool crlf_restored = false;
+    std::string work = body;
+    size_t occ = olds.empty() ? 0 : count_occ(work, olds);
+    if (!olds.empty() && occ == 0) {
+        std::string body_lf = to_lf(body), olds_lf = to_lf(olds);
+        size_t occ_lf = count_occ(body_lf, olds_lf);
+        if (occ_lf > 0) {
+            const bool had_crlf = body.find("\r\n") != std::string::npos;
+            work = std::move(body_lf);
+            olds = std::move(olds_lf);
+            news = to_lf(news);
+            occ  = occ_lf;
+            crlf_restored = had_crlf;
+        }
+    }
+    if (!olds.empty()) {
+        if (occ == 0)
+            return ToolResult::error(
+                "oldString not found in " + sb->virtual_path(p)
+                + ". Re-read the file and pass the exact current text "
+                "(whitespace included).");
+        if (occ > 1 && !replace_all)
+            return ToolResult::error(
+                "found " + std::to_string(occ) + " matches of oldString "
+                "in " + sb->virtual_path(p) + ". Add surrounding lines "
+                "to make it unique, or pass replaceAll=true to replace "
+                "every occurrence.");
+    }
+
+    size_t replaced = 0;
+    if (olds.empty()) {
+        work = news;
+        replaced = 1;
+    } else if (replace_all) {
+        std::string out; out.reserve(work.size());
+        size_t at = 0, prev = 0;
+        while ((at = work.find(olds, prev)) != std::string::npos) {
+            out.append(work, prev, at - prev);
+            out += news;
+            prev = at + olds.size();
+            ++replaced;
+        }
+        out.append(work, prev, work.size() - prev);
+        work = std::move(out);
+    } else {
+        size_t at = work.find(olds);
+        work = work.substr(0, at) + news + work.substr(at + olds.size());
+        replaced = 1;
+    }
+    if (crlf_restored) {
+        std::string out; out.reserve(work.size() + work.size() / 16);
+        for (char ch : work) {
+            if (ch == '\n') out += "\r\n";
+            else out.push_back(ch);
+        }
+        work = std::move(out);
+    }
+
+    // Atomic replace: temp file in the same dir + rename.
+    std::error_code mec;
+    stdfs::create_directories(p.parent_path(), mec);
+    if (!sb->inside_sandbox(p))
+        return ToolResult::error("path escapes sandbox via symlink "
+                                 "(post-mkdir): " + sb->virtual_path(p));
+    stdfs::path tmp = p;
+    tmp += ".easyai-edit.tmp";
+    int fd = ::open(tmp.c_str(),
+                    O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
+                    0600);
+    if (fd < 0)
+        return ToolResult::error(std::string("cannot open temp file: ")
+                                 + std::strerror(errno));
+    const char * data = work.data();
+    size_t left = work.size();
+    while (left > 0) {
+        ssize_t n = ::write(fd, data, left);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            ::close(fd);
+            ::unlink(tmp.c_str());
+            return ToolResult::error(std::string("write failed: ")
+                                     + std::strerror(errno));
+        }
+        data += n; left -= (size_t) n;
+    }
+    ::close(fd);
+    if (::rename(tmp.c_str(), p.c_str()) != 0) {
+        ::unlink(tmp.c_str());
+        return ToolResult::error(std::string("rename failed: ")
+                                 + std::strerror(errno));
+    }
+    sb->note_read(p);
+    return ToolResult::ok(
+        "edited " + sb->virtual_path(p) + ": replaced "
+        + std::to_string(replaced) + (replaced == 1 ? " occurrence"
+                                                    : " occurrences"));
+}
+
 ToolHandler make_fs_edit_handler(std::shared_ptr<Sandbox> sb) {
     return [sb](const ToolCall & c) -> ToolResult {
         std::string path, content;
         long long start_line = 0, end_line = 0;
         if (!args::get_string(c.arguments_json, "path", path))
             return ToolResult::error("missing arg: path (fs action=\"edit\")");
+
+        // ----- string-replacement mode (opencode edit contract) -----
+        {
+            std::string olds, news;
+            const bool has_old = args::get_string(c.arguments_json,
+                                                  "oldString", olds);
+            const bool has_new = args::get_string(c.arguments_json,
+                                                  "newString", news);
+            if (has_old || has_new) {
+                if (!has_new)
+                    return ToolResult::error(
+                        "missing arg: newString (pass \"\" to delete "
+                        "the oldString text)");
+                stdfs::path sp; std::string serr;
+                if (!sb->resolve(path, sp, serr))
+                    return ToolResult::error(serr);
+                if (!sb->inside_sandbox(sp))
+                    return ToolResult::error(
+                        "path escapes sandbox via symlink: "
+                        + sb->virtual_path(sp));
+                bool replace_all = args::get_bool_or(c.arguments_json,
+                                                     "replaceAll", false);
+                return fs_edit_strings(sb, sp, olds, news, replace_all);
+            }
+        }
+
+        // ----- line-range mode (legacy easyai contract) -----
         if (!args::get_int(c.arguments_json, "start_line", start_line))
-            return ToolResult::error("missing arg: start_line (fs action=\"edit\")");
+            return ToolResult::error(
+                "missing arg: pass oldString+newString (exact text "
+                "replacement) or start_line/end_line/content (line "
+                "range) to fs edit");
         if (!args::get_int(c.arguments_json, "end_line", end_line))
             return ToolResult::error("missing arg: end_line (fs action=\"edit\")");
         // content is required but allowed to be empty string (pure
@@ -2768,8 +3222,14 @@ ToolHandler make_fs_glob_handler(std::shared_ptr<Sandbox> sb) {
         }
         const stdfs::recursive_directory_iterator end;
 
-        std::ostringstream o;
-        int n = 0;
+        // Collect (path, mtime), newest first, then trim to `limit`
+        // (default 100) — the opencode glob contract.
+        long long limit = args::get_int_or(c.arguments_json, "limit", 100);
+        if (limit < 1)    limit = 1;
+        if (limit > 1000) limit = 1000;
+        struct Hit { std::string vpath; stdfs::file_time_type mtime; };
+        std::vector<Hit> hits;
+        bool scan_capped = false;
         // Hand-rolled loop with ec-aware increment so a flake mid-
         // traversal (vanished entry, race) skips the bad subtree
         // instead of tearing down the whole call. Ranged-for would
@@ -2784,11 +3244,11 @@ ToolHandler make_fs_glob_handler(std::shared_ptr<Sandbox> sb) {
                     try { m = std::regex_match(rel, rx); }
                     catch (const std::regex_error &) { /* skip entry */ }
                     if (m) {
-                        o << sb->virtual_path(it->path()) << "\n";
-                        if (++n >= 500) {
-                            o << "...[stopped at 500 matches]\n";
-                            break;
-                        }
+                        std::error_code ec_t;
+                        auto mt = stdfs::last_write_time(it->path(), ec_t);
+                        if (ec_t) mt = stdfs::file_time_type::min();
+                        hits.push_back({ sb->virtual_path(it->path()), mt });
+                        if (hits.size() >= 5000) { scan_capped = true; break; }
                     }
                 }
             }
@@ -2800,7 +3260,21 @@ ToolHandler make_fs_glob_handler(std::shared_ptr<Sandbox> sb) {
                 if (it == end) break;
             }
         }
-        if (n == 0) return ToolResult::ok("No matches.");
+        if (hits.empty()) return ToolResult::ok("No files found");
+        std::stable_sort(hits.begin(), hits.end(),
+                         [](const Hit & a, const Hit & b) {
+                             return a.mtime > b.mtime;
+                         });
+        const bool truncated = scan_capped
+                            || (long long) hits.size() > limit;
+        if ((long long) hits.size() > limit)
+            hits.resize((size_t) limit);
+        std::ostringstream o;
+        for (auto & h : hits) o << h.vpath << "\n";
+        if (truncated)
+            o << "(Results are truncated: showing first "
+              << hits.size() << " results. Consider using a more "
+              "specific path or pattern.)\n";
         return ToolResult::ok(o.str());
     };
 }
@@ -2814,6 +3288,9 @@ ToolHandler make_fs_grep_handler(std::shared_ptr<Sandbox> sb) {
             return ToolResult::error("missing arg: pattern (fs action=\"grep\")");
         args::get_string(c.arguments_json, "path",      sub);
         args::get_string(c.arguments_json, "file_glob", file_glob);
+        // `include` is the opencode-style alias for file_glob.
+        if (file_glob.empty())
+            args::get_string(c.arguments_json, "include", file_glob);
         args::get_int   (c.arguments_json, "max_matches", max_matches);
         args::get_bool  (c.arguments_json, "case_insensitive", ci);
 
@@ -2866,7 +3343,13 @@ ToolHandler make_fs_grep_handler(std::shared_ptr<Sandbox> sb) {
             }
         }
 
-        std::ostringstream o;
+        // Matches are collected and grouped per file, then rendered in
+        // the opencode grep shape:
+        //   Found N matches
+        //   <path>:
+        //     Line <n>: <text>
+        struct GrepHit { std::string vpath; int lineno; std::string text; };
+        std::vector<GrepHit> hits;
         int  n         = 0;
         bool budget_hit = false;
 
@@ -2892,8 +3375,7 @@ ToolHandler make_fs_grep_handler(std::shared_ptr<Sandbox> sb) {
                 // and short of the failure regime.
                 if (line.size() > 64 * 1024) continue;
                 if (std::regex_search(line, rx)) {
-                    o << vpath << ":" << lineno << ": "
-                      << clip(line, 240) << "\n";
+                    hits.push_back({ vpath, lineno, clip(line, 240) });
                     if (++n >= max_matches) { budget_hit = true; return; }
                 }
             }
@@ -2942,8 +3424,23 @@ ToolHandler make_fs_grep_handler(std::shared_ptr<Sandbox> sb) {
             }
         }
 
-        if (n == 0) return ToolResult::ok("No matches.");
-        return ToolResult::ok(clip(o.str(), 32 * 1024));
+        if (n == 0) return ToolResult::ok("No files found");
+        std::ostringstream o;
+        o << "Found " << n << (n == 1 ? " match" : " matches") << "\n";
+        std::string current;
+        for (auto & h : hits) {
+            if (h.vpath != current) {
+                if (!current.empty()) o << "\n";
+                current = h.vpath;
+                o << h.vpath << ":\n";
+            }
+            o << "  Line " << h.lineno << ": " << h.text << "\n";
+        }
+        if (budget_hit)
+            o << "\n(Results truncated at " << max_matches
+              << " matches. Consider using a more specific path or "
+              "pattern.)\n";
+        return ToolResult::ok(clip(o.str(), 48 * 1024));
     };
 }
 
@@ -3153,27 +3650,35 @@ Tool fs(std::string root) {
             "action=\"check_path\" on the target. Skipping causes "
             "guess-and-fail loops.\n"
             "\n"
-            "action=\"read\"        path → file content. Output "
-            "prefixes every line with `<n>| ` and reports total line "
-            "count — read before edit to get accurate line refs.\n"
-            "  Line mode (recommended for editing): start_line (1-based), "
-            "limit = lines (default 200, max 2000).\n"
+            "action=\"read\"        path → file content. Every line "
+            "is prefixed `<n>: `; long lines are cut at 2000 chars. "
+            "Reading a DIRECTORY path lists its entries (dirs get a "
+            "trailing `/`). Read before write/edit — both refuse to "
+            "touch an existing file you haven't read this session.\n"
+            "  Line mode (recommended): start_line (1-based), limit "
+            "= lines (default 2000, max 2000).\n"
             "  Byte mode: offset (default 0), limit (default 65536 bytes, "
             "max 1048576). line_numbers on by default.\n"
             "\n"
             "action=\"write\"       path, content → overwrites the "
-            "file. Creates parent dirs.\n"
+            "file. Creates parent dirs. An EXISTING file must have "
+            "been read this session first (read-before-write).\n"
             "  Optional: append (true → append instead of overwrite).\n"
             "\n"
             "action=\"append\"      path, content → adds to end of "
             "file (creates if missing).\n"
             "\n"
-            "action=\"edit\"        path, start_line, end_line, "
-            "content → replaces lines [start..end] (1-based, "
-            "inclusive). Atomic.\n"
-            "  content=\"\" deletes the range; end_line=start-1 "
-            "inserts before start_line; start=line_count+1 appends "
-            "at EOF. File must exist — use write to create.\n"
+            "action=\"edit\"        two modes, both atomic; file must "
+            "have been read this session first.\n"
+            "  String mode (PREFERRED): oldString + newString "
+            "(+ replaceAll). oldString must match the file text "
+            "EXACTLY (whitespace included) and be unique — add "
+            "surrounding lines to disambiguate, or replaceAll=true "
+            "for every occurrence. newString=\"\" deletes the text.\n"
+            "  Line mode: start_line + end_line + content replaces "
+            "lines [start..end] (1-based, inclusive); content=\"\" "
+            "deletes the range; end_line=start-1 inserts before "
+            "start_line; start=line_count+1 appends at EOF.\n"
             "\n"
             "action=\"list\"        path → entries one per line "
             "(`d`/`f` prefix + size). Non-recursive.\n"
@@ -3597,11 +4102,16 @@ std::vector<Tool> fs_split(std::string root) {
     out.push_back(Tool::builder("fs_read")
         .describe(
             "Read a UTF-8 text file. RELATIVE path under the sandbox "
-            "root. Output prefixes every line with `<n>| ` and reports "
-            "the total line count — use before fs_edit to get accurate "
-            "line references.\n"
+            "root. Every output line is prefixed `<n>: `; lines longer "
+            "than 2000 chars are truncated. Reading a DIRECTORY path "
+            "lists its entries (subdirectories get a trailing `/`). "
+            "If the path doesn't exist, similar names from the parent "
+            "directory are suggested. Read a file BEFORE fs_write / "
+            "fs_edit — both refuse to modify an existing file that "
+            "wasn't read this session.\n"
             "  Line mode (recommended): pass start_line (1-based). "
-            "limit = lines (default 200, max 2000).\n"
+            "limit = lines (default 2000, max 2000); a trailing "
+            "marker tells you the next start_line when more remain.\n"
             "  Byte mode: offset + limit (bytes, default 65536). "
             "line_numbers on by default.")
         .param("path",         "string",
@@ -3612,11 +4122,11 @@ std::vector<Tool> fs_split(std::string root) {
         .param("offset",       "integer",
                "Byte mode only. Byte offset, default 0.", false)
         .param("limit",        "integer",
-               "Line mode: line count (default 200, max 2000). "
+               "Line mode: line count (default 2000, max 2000). "
                "Byte mode: max bytes (default 65536, max 1048576).",
                false)
         .param("line_numbers", "boolean",
-               "Byte mode only. Prefix each line `<n>| `. "
+               "Byte mode only. Prefix each line `<n>: `. "
                "Default true (always on in line mode).", false)
         .handle(make_fs_read_handler(sb))
         .build());
@@ -3624,7 +4134,10 @@ std::vector<Tool> fs_split(std::string root) {
     out.push_back(Tool::builder("fs_write")
         .describe(
             "Write UTF-8 text to a file (OVERWRITES existing "
-            "content). Creates parent dirs.")
+            "content). Creates parent dirs. An EXISTING non-empty "
+            "file must have been fs_read this session first "
+            "(read-before-write) so the overwrite is informed. "
+            "Prefer fs_edit for partial changes.")
         .param("path",    "string",
                "Relative path. `.` for root.", true)
         .param("content", "string",
@@ -3647,22 +4160,41 @@ std::vector<Tool> fs_split(std::string root) {
 
     out.push_back(Tool::builder("fs_edit")
         .describe(
-            "Replace lines [start_line..end_line] (1-based, "
-            "inclusive) in an existing file. Atomic.\n"
-            "  content=\"\" deletes the range; end_line=start_line-1 "
+            "Edit an existing file in place. Atomic. The file must "
+            "have been fs_read this session first (read-before-edit). "
+            "Two modes:\n"
+            "  String mode (PREFERRED): pass oldString + newString. "
+            "oldString must match the current file text EXACTLY — "
+            "same whitespace, same indentation — and must be unique "
+            "in the file; include surrounding lines to disambiguate, "
+            "or pass replaceAll=true to change every occurrence "
+            "(e.g. renaming a symbol). newString=\"\" deletes the "
+            "matched text. Line endings are normalized automatically "
+            "(CRLF files accept LF oldString and stay CRLF).\n"
+            "  Line mode: pass start_line + end_line + content to "
+            "replace lines [start..end] (1-based, inclusive). "
+            "content=\"\" deletes the range; end_line=start_line-1 "
             "inserts before start_line; start_line=line_count+1 "
-            "appends at EOF.\n"
-            "  Plan with fs_read(line_numbers=true).")
+            "appends at EOF. Plan with fs_read first.")
         .param("path",       "string",
                "Relative path under the sandbox root.", true)
+        .param("oldString",  "string",
+               "String mode: exact text to replace (must be unique "
+               "unless replaceAll).", false)
+        .param("newString",  "string",
+               "String mode: replacement text (\"\" deletes). Must "
+               "differ from oldString.", false)
+        .param("replaceAll", "boolean",
+               "String mode: replace every occurrence. Default "
+               "false.", false)
         .param("start_line", "integer",
-               "1-based, inclusive. line_count+1 appends at EOF.",
-               true)
+               "Line mode: 1-based, inclusive. line_count+1 appends "
+               "at EOF.", false)
         .param("end_line",   "integer",
-               "1-based, inclusive. start_line-1 inserts before "
-               "start_line.", true)
+               "Line mode: 1-based, inclusive. start_line-1 inserts "
+               "before start_line.", false)
         .param("content",    "string",
-               "Replacement text. \"\" deletes.", true)
+               "Line mode: replacement text. \"\" deletes.", false)
         .handle(make_fs_edit_handler(sb))
         .build());
 
@@ -3678,28 +4210,37 @@ std::vector<Tool> fs_split(std::string root) {
     out.push_back(Tool::builder("fs_glob")
         .describe(
             "Recursive wildcard file search. `*` single segment, "
-            "`**` crosses dirs, `?` one char, `[abc]` a set.")
+            "`**` crosses dirs, `?` one char, `[abc]` a set. Results "
+            "are sorted newest-first (mtime) and capped at `limit` "
+            "(default 100) with a truncation note; empty result is "
+            "`No files found`.")
         .param("pattern", "string",
                "Wildcard pattern (e.g. `*.cpp`, `**/test_*.py`).",
                true)
         .param("path",    "string",
                "Start directory; default sandbox root.", false)
+        .param("limit",   "integer",
+               "Max results, default 100 (max 1000).", false)
         .handle(make_fs_glob_handler(sb))
         .build());
 
     out.push_back(Tool::builder("fs_grep")
         .describe(
-            "Recursive regex content search. Output is "
-            "`<path>:<lineno>:<line>`.")
+            "Recursive regex content search. Output starts with "
+            "`Found N matches`, then per file:\n"
+            "  <path>:\n"
+            "    Line <n>: <text>\n"
+            "Empty result is `No files found`. Prefer this over "
+            "`bash grep`.")
         .param("pattern",          "string",
                "ECMAScript regex, matched per line. Anchor with "
                "`^`/`$` for full-line matches.", true)
         .param("path",             "string",
                "Start file or directory; default sandbox root.",
                false)
-        .param("file_glob",        "string",
+        .param("include",          "string",
                "Restrict filenames by basename pattern (e.g. "
-               "`*.cpp`).", false)
+               "`*.cpp`). Alias: file_glob.", false)
         .param("max_matches",      "integer",
                "Stop after N matches. Default 100.", false)
         .param("case_insensitive", "boolean",
@@ -3887,7 +4428,8 @@ ToolResult run_capped_subprocess(
     ::close(pipefd[1]);
     ::fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
 
-    constexpr size_t kCap = 32 * 1024;
+    // Model-facing capture: 50 KB / 2000 lines (opencode's shell caps).
+    constexpr size_t kCap = 50 * 1024;
     // Mirror cap is intentionally larger than the model-facing buffer
     // (4×) so the operator still sees most of a long build's output,
     // but bounded so a hostile/runaway command can't paint the
@@ -4006,7 +4548,31 @@ ToolResult run_capped_subprocess(
         oss << "exit=?\n";
     }
     std::string body = std::move(out);
-    if (body.size() >= kCap) body += "\n[truncated at 32 KB]\n";
+    bool   trunc_bytes = body.size() >= kCap;
+    // Line cap mirrors the byte cap: 2000 lines max, head-biased (the
+    // first lines of a build/test run carry the context; the tail is
+    // usually repeated spam). Keep whichever cap bites first.
+    {
+        constexpr int kMaxLines = 2000;
+        int n = 0;
+        size_t cut = std::string::npos;
+        for (size_t i = 0; i < body.size(); ++i) {
+            if (body[i] == '\n' && ++n >= kMaxLines) { cut = i + 1; break; }
+        }
+        if (cut != std::string::npos && cut < body.size()) {
+            int dropped = 0;
+            for (size_t i = cut; i < body.size(); ++i)
+                if (body[i] == '\n') ++dropped;
+            body.resize(cut);
+            body += "\n... " + std::to_string(dropped + 1)
+                  + " lines truncated ...\n";
+            trunc_bytes = false;  // line message already explains the cut
+        }
+    }
+    if (trunc_bytes)
+        body += "\n... output truncated at 50 KB ...\n"
+                "Re-run with a narrower command (pipe through head/tail "
+                "or grep) to see the rest.\n";
     // Closing banner mirrors the opening one: the operator sees the
     // exit status and a trailing newline so the next agent line
     // doesn't run into the subprocess output. Newline first in case
@@ -4044,23 +4610,27 @@ Tool bash(std::string root, bool show_output) {
             "your AVAILABLE TOOLS list.\n"
             "\n"
             "NOT a hardened sandbox — runs with caller's full uid/gid. "
-            "Output capped at 32 KB; SIGTERM/SIGKILL deadline "
-            "(default 30s, max 300s)."
+            "Output capped at 50 KB / 2000 lines; SIGTERM/SIGKILL "
+            "deadline (default 120s, max 600s)."
         )
         .param("command", "string",
                "Shell command line, written as you'd type it in a "
                "terminal. RELATIVE paths.", true)
         .param("timeout_sec", "integer",
-               "Max seconds before SIGTERM/SIGKILL. Default 30, max "
-               "300.", false)
+               "Max seconds before SIGTERM/SIGKILL. Default 120, max "
+               "600.", false)
+        .param("description", "string",
+               "5-10 word description of what the command does, in "
+               "active voice (e.g. \"Run the unit tests\"). Shown to "
+               "the user while the command runs.", false)
         .handle([sb, show_output](const ToolCall & c) {
             std::string cmd;
-            long long timeout_sec = 30;
+            long long timeout_sec = 120;
             if (!args::get_string(c.arguments_json, "command", cmd) || cmd.empty())
                 return ToolResult::error("missing arg: command");
             args::get_int(c.arguments_json, "timeout_sec", timeout_sec);
             if (timeout_sec < 1)   timeout_sec = 1;
-            if (timeout_sec > 300) timeout_sec = 300;
+            if (timeout_sec > 600) timeout_sec = 600;
             return run_capped_subprocess(
                 sb, CappedExecKind::Bash, cmd, cmd,
                 timeout_sec, show_output, "bash");
@@ -4415,6 +4985,99 @@ Tool tool_lookup(ToolListGetter get_tools) {
             if (manual_view) {
                 out << "(manual view for name=\"" << filter << "\"; "
                     << "call tool_lookup with no `name` for the full index)";
+            }
+            return ToolResult::ok(out.str());
+        })
+        .build();
+}
+
+// ============================================================================
+// question — ask the human at the terminal and wait for their answer
+// ----------------------------------------------------------------------------
+// Only useful in the interactive TUI: the handler bridges into
+// easyai::tui::ask_questions(), which pops a modal dialog and blocks
+// the agent turn until the user picks options (or dismisses). When no
+// TUI is active (one-shot run, plain REPL, server) the tool returns a
+// clean error so the model falls back to stating its assumption.
+// ============================================================================
+
+Tool question() {
+    return Tool::builder("question")
+        .short_describe(
+            "Ask the user 1-4 multiple-choice questions and wait for "
+            "their answers. Interactive sessions only.")
+        .describe(
+            "Ask the user one or more questions and BLOCK until they "
+            "answer. Use it only when you are genuinely stuck on a "
+            "decision that is the user's to make (ambiguous request, "
+            "irreversible choice, missing preference) — never for "
+            "facts you can discover with the other tools.\n"
+            "\n"
+            "Pass `questions`: an array of 1-4 objects, each:\n"
+            "  {\"question\": \"full question text?\",\n"
+            "   \"header\": \"short chip (≤12 chars)\",\n"
+            "   \"multiple\": false,\n"
+            "   \"options\": [{\"label\": \"choice\", "
+            "\"description\": \"what it implies\"}, ...]}\n"
+            "\n"
+            "2-4 options per question. The user can always type a "
+            "custom answer instead of picking one. The result lists "
+            "each question with the selected label(s); an error of "
+            "\"user dismissed\" means proceed with your best "
+            "judgement and say what you assumed.")
+        .param("questions", "array",
+               "Array of question objects (see description).", true)
+        .handle([](const ToolCall & c) -> ToolResult {
+            if (!tui::asker_active())
+                return ToolResult::error(
+                    "no interactive user available (question only "
+                    "works in the interactive TUI session)");
+            std::vector<std::string> items;
+            if (!args::get_array(c.arguments_json, "questions", items)
+                || items.empty())
+                return ToolResult::error(
+                    "missing arg: questions (array of question objects)");
+            if (items.size() > 4) items.resize(4);
+            std::vector<tui::QuestionItem> qs;
+            for (const auto & raw : items) {
+                tui::QuestionItem qi;
+                if (!args::get_string(raw, "question", qi.question)
+                    || qi.question.empty())
+                    return ToolResult::error(
+                        "each questions[] element needs a \"question\" "
+                        "string");
+                args::get_string(raw, "header", qi.header);
+                qi.multiple = args::get_bool_or(raw, "multiple", false);
+                std::vector<std::string> opts;
+                args::get_array(raw, "options", opts);
+                for (const auto & oraw : opts) {
+                    tui::QuestionOption op;
+                    if (!args::get_string(oraw, "label", op.label))
+                        continue;
+                    args::get_string(oraw, "description", op.description);
+                    if (!op.label.empty()) qi.options.push_back(op);
+                }
+                qs.push_back(std::move(qi));
+            }
+            std::vector<std::vector<std::string>> answers;
+            if (!tui::ask_questions(qs, answers))
+                return ToolResult::error(
+                    "user dismissed the question dialog — proceed "
+                    "with your best judgement and state the "
+                    "assumption in your reply");
+            std::ostringstream out;
+            for (size_t i = 0; i < qs.size(); ++i) {
+                out << "Q: " << qs[i].question << "\n";
+                out << "A: ";
+                if (i < answers.size() && !answers[i].empty()) {
+                    for (size_t k = 0; k < answers[i].size(); ++k) {
+                        if (k) out << ", ";
+                        out << answers[i][k];
+                    }
+                } else {
+                    out << "(no answer)";
+                }
+                out << "\n";
             }
             return ToolResult::ok(out.str());
         })

@@ -159,6 +159,7 @@ set(EASYAI_SOURCES
     src/presets.cpp
     src/plan.cpp
     src/ui.cpp
+    src/tui.cpp
     src/log.cpp
     src/cli.cpp
     src/backend.cpp

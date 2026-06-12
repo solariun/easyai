@@ -283,6 +283,83 @@ std::string cite_sources_block(bool has_memory) {
     return out.str();
 }
 
+std::string env_block(const EnvInfo & env) {
+    std::ostringstream out;
+    out << "[environment]\n";
+    if (!env.cwd.empty())
+        out << "working directory: " << env.cwd << "\n";
+    if (!env.platform.empty())
+        out << "platform: " << env.platform << "\n";
+    if (env.is_git >= 0)
+        out << "git repository: " << (env.is_git ? "yes" : "no") << "\n";
+    if (!env.date.empty())
+        out << "today's date: " << env.date << "\n";
+    return out.str();
+}
+
+std::string agent_style_block(bool has_fs_or_bash,
+                              bool has_plan,
+                              bool has_question) {
+    std::ostringstream out;
+    out <<
+        "[style]\n"
+        "Your replies render in a terminal. Be concise and direct: "
+        "answer first, detail after, no filler openers (\"Great "
+        "question\", \"Certainly\") and no recap of what you are "
+        "about to do when you can just do it. Short questions get "
+        "short answers. Use markdown sparingly — headings only when "
+        "they genuinely organise a long answer, fenced code blocks "
+        "for code, backticks for `paths`, `commands`, and `symbols`. "
+        "When you run a non-obvious or state-changing command, say "
+        "in one line what it does and why.\n";
+    if (has_fs_or_bash) {
+        out <<
+            "\n[code-conventions]\n"
+            "Before writing code, look at the neighbouring files: "
+            "match the project's naming, formatting, error handling "
+            "and comment density rather than your own habits. Never "
+            "assume a library or framework is available — check the "
+            "project's manifest / includes / lockfile first, and "
+            "imitate how existing code imports it. Add comments only "
+            "where the code cannot explain itself; never narrate "
+            "your edits in comments. Follow security best practice: "
+            "never hard-code or log secrets and keys, never commit "
+            "them. After you change code, verify it — build it, run "
+            "the tests, or execute the snippet — before you report "
+            "it as done; if verification fails, say so plainly with "
+            "the error instead of claiming success.\n";
+    }
+    if (has_plan) {
+        out <<
+            "\n[task-discipline]\n"
+            "For any task with 3+ distinct steps, keep the plan tool "
+            "current: add the steps before you start, set EXACTLY "
+            "one step to \"working\" before you begin it, and mark "
+            "it \"done\" the moment it is finished — never batch up "
+            "completions at the end. The user watches this list "
+            "live; a stale list is worse than none.\n";
+    }
+    out <<
+        "\n[proactiveness]\n"
+        "Do what was asked, completely, and nothing beyond it. "
+        "Fix-adjacent refactors, extra features, drive-by cleanups "
+        "and unrequested files are scope creep — mention them as "
+        "suggestions instead of doing them. When the user asks a "
+        "question about code, answer the question; do not start "
+        "editing files until they ask for a change.\n";
+    if (has_question) {
+        out <<
+            "\n[asking-the-user]\n"
+            "If you hit a genuine fork — an ambiguous request, an "
+            "irreversible action, a preference only the user holds — "
+            "use the question tool with 2-4 concrete options instead "
+            "of guessing or stalling. Never use it for anything you "
+            "can resolve yourself with the other tools, and never "
+            "ask more than once for the same decision.\n";
+    }
+    return out.str();
+}
+
 namespace {
 
 // Pull the `action` enum out of a JSON-schema parameters blob via a

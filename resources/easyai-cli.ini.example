@@ -166,6 +166,22 @@
 ;   both    — register both
 ;tools_mode    = split
 
+; Interactive surface. The full-screen chat TUI (opencode-style
+; look & feel) is the default whenever stdin and stdout are both
+; terminals; one-shot, piped, and --quiet runs never use it.
+; Set tui = off to keep the legacy line REPL everywhere.
+;tui           = on
+
+; TUI color theme: opencode (dark, default) | opencode-light.
+; Switchable live with /theme inside the TUI.
+;theme         = opencode
+
+; AGENTS.md discovery. on (default): walk up from the working
+; directory (first hit wins) and also load
+; ~/.config/easyai/AGENTS.md, injecting both into the system
+; prompt as [project-instructions]. off: skip entirely.
+;agents_md     = on
+
 ; Sandbox root for file work. When set, the `fs` and `python3`
 ; tools auto-register and operations outside this dir are
 ; rejected. Without sandbox AND without allow_bash, the model

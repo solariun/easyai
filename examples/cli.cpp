@@ -56,7 +56,14 @@
 #include "easyai/remote_model_tool.hpp"
 #include "easyai/text.hpp"
 #include "easyai/tool.hpp"
+#include "easyai/tui.hpp"
 #include "easyai/ui.hpp"
+
+// Shown on the TUI home screen. Tracks the CMake project version by
+// hand — the CLI deliberately has no configure-time header generation.
+#ifndef EASYAI_CLI_VERSION_STR
+#define EASYAI_CLI_VERSION_STR "0.1.0"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -75,6 +82,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>    // stat — .git probe, AGENTS.md discovery
 #include <sys/types.h>
 #include <sys/wait.h>    // waitpid
 #include <fcntl.h>       // open / O_* flags for atomic session write
@@ -233,28 +241,22 @@ constexpr const char * kCompressPrompt =
 // is up; /compress runs between turns where the per-run_one Spinner is
 // torn down).  A simple "compressing... done" pair on stderr is the
 // best we can do without plumbing a fresh Streaming/Spinner instance.
-bool do_compress(easyai::Client & cli, const Style & st) {
-    // Empty history → nothing to compress.  Return false so callers can
-    // refrain from saving a no-op state.
+// Core of /compress with NO terminal output — shared by the legacy
+// REPL wrapper below and the TUI hook (which owns the screen and must
+// not have stderr scribbled over it). On failure `err` carries the
+// reason and the original history is restored.
+bool do_compress_core(easyai::Client & cli, std::string * err) {
     const std::string before = cli.dump_history();
     if (before == "[]") {
-        std::fprintf(stderr,
-            "%scompress:%s history is empty — nothing to compress.\n",
-            st.yellow(), st.reset());
+        if (err) *err = "history is empty — nothing to compress";
         return false;
     }
-
-    std::fprintf(stderr, "%scompressing session...%s\n",
-                 st.dim(), st.reset());
-    std::fflush(stderr);
 
     const std::string summary = cli.chat(kCompressPrompt);
 
     if (summary.empty() || !cli.last_error().empty()) {
-        std::fprintf(stderr, "%scompress failed:%s %s\n",
-                     st.red(), st.reset(),
-                     cli.last_error().empty() ? "empty reply"
-                                               : cli.last_error().c_str());
+        if (err) *err = cli.last_error().empty() ? "empty reply"
+                                                 : cli.last_error();
         // Restore prior history so the failed compress turn doesn't
         // leave a half-mutated state behind.
         std::string ignored;
@@ -309,19 +311,29 @@ bool do_compress(easyai::Client & cli, const Style & st) {
 
     std::string lh_err;
     if (!cli.load_history(compressed_array, &lh_err)) {
-        std::fprintf(stderr,
-            "%scompress load_history failed:%s %s — keeping original "
-            "history.\n",
-            st.red(), st.reset(), lh_err.c_str());
+        if (err) *err = "load_history failed: " + lh_err
+                      + " — keeping original history";
         std::string ignored;
         cli.load_history(before, &ignored);
         return false;
     }
+    return true;
+}
 
-    std::fprintf(stderr,
-        "%scompressed.%s recap is %zu chars; original history "
-        "(%zu chars) replaced.\n",
-        st.dim(), st.reset(), summary.size(), before.size());
+// Legacy-REPL wrapper: same logic, with the status prints the line
+// REPL always had.
+bool do_compress(easyai::Client & cli, const Style & st) {
+    std::fprintf(stderr, "%scompressing session...%s\n",
+                 st.dim(), st.reset());
+    std::fflush(stderr);
+    std::string err;
+    if (!do_compress_core(cli, &err)) {
+        std::fprintf(stderr, "%scompress failed:%s %s\n",
+                     st.red(), st.reset(), err.c_str());
+        return false;
+    }
+    std::fprintf(stderr, "%scompressed.%s history replaced with recap.\n",
+                 st.dim(), st.reset());
     return true;
 }
 
@@ -638,6 +650,19 @@ struct Options {
     bool        shell_mode       = false;
     bool        shell_mode_cli_set = false;
 
+    // Interactive full-screen TUI (opencode-style chat). Default ON
+    // for interactive TTY sessions; --plain (or [cli] tui = off)
+    // keeps the legacy line REPL. --theme / [cli] theme picks the
+    // palette ("opencode" | "opencode-light"). --no-agents-md /
+    // [cli] agents_md = off skips AGENTS.md discovery.
+    bool        plain            = false;
+    bool        plain_cli_set    = false;
+    std::string theme            = "opencode";
+    bool        theme_cli_set    = false;
+    bool        agents_md        = true;
+    bool        agents_md_cli_set = false;
+    bool        use_tui          = false;   // resolved in main()
+
     // INI overlay (CLI > INI > hardcoded). Default is resolved at load
     // time via a layered lookup: $HOME/.easyai/easyai-cli.ini first
     // (per-user, the common case — easyai-cli runs as your user, not a
@@ -951,6 +976,19 @@ void usage(const char * argv0) {
 "                                easyai-cli.md §5 for the full table and\n"
 "                                resources/easyai-cli.ini.example for a\n"
 "                                pristine reference file to copy.\n"
+"    --plain                    use the legacy line REPL instead of the\n"
+"                                full-screen chat TUI. The TUI is the\n"
+"                                default for interactive terminal runs;\n"
+"                                non-TTY / --quiet / one-shot runs fall\n"
+"                                back automatically. INI: [cli] tui = off.\n"
+"    --tui                      force the full-screen TUI on (overrides an\n"
+"                                INI [cli] tui = off).\n"
+"    --theme NAME               TUI color theme: opencode (default) |\n"
+"                                opencode-light. INI: [cli] theme = NAME.\n"
+"    --no-agents-md             skip AGENTS.md discovery (cwd upwards +\n"
+"                                ~/.config/easyai/AGENTS.md are otherwise\n"
+"                                injected as [project-instructions]).\n"
+"                                INI: [cli] agents_md = off.\n"
 "    --shell                    hybrid AI shell: starts the user's $SHELL.\n"
 "                                Normal commands execute via the shell.\n"
 "                                Lines prefixed with > are sent to the AI.\n"
@@ -1064,6 +1102,11 @@ bool parse_args(int argc, char ** argv, Options & o) {
             o.config_path_cli_set = true;
         }
         else if (a == "--shell")           { o.shell_mode = true; o.shell_mode_cli_set = true; }
+        else if (a == "--plain")           { o.plain = true; o.plain_cli_set = true; }
+        else if (a == "--tui")             { o.plain = false; o.plain_cli_set = true; }
+        else if (a == "--theme")           { o.theme = need(i, "--theme");
+                                             o.theme_cli_set = true; }
+        else if (a == "--no-agents-md")    { o.agents_md = false; o.agents_md_cli_set = true; }
         else if (a == "--unattended")     { o.unattended = true; o.unattended_cli_set = true; }
         else if (a == "--use-google")     { o.use_google = true; o.use_google_cli_set = true; }
         else if (a == "--external-tools") { o.external_tools_dir = need(i, "--external-tools"); o.external_tools_cli_set = true; }
@@ -1381,6 +1424,16 @@ bool parse_args(int argc, char ** argv, Options & o) {
         load_str_flag  ("system",         o.system_prompt,  o.system_prompt_cli_set);
         load_str_flag  ("system_file",    o.system_file,    o.system_file_cli_set);
 
+        // ----- Interactive TUI ----------------------------------------
+        // [cli] tui = off ↔ --plain (key expresses the positive form).
+        {
+            bool tui_on = !o.plain;
+            load_bool_flag ("tui",        tui_on,           o.plain_cli_set);
+            o.plain = !tui_on;
+        }
+        load_str_flag  ("theme",          o.theme,          o.theme_cli_set);
+        load_bool_flag ("agents_md",      o.agents_md,      o.agents_md_cli_set);
+
         // ----- Sampling / penalty (sentinel-driven) -------------------
         load_float_sentinel("temperature",       o.temperature,       -1.0f);
         load_float_sentinel("top_p",             o.top_p,             -1.0f);
@@ -1657,6 +1710,15 @@ void register_tools(easyai::Client & cli,
                      spec.model.empty() ? "easyai" : spec.model.c_str());
             }
         }
+    }
+
+    // question — interactive-only: the handler bridges into the TUI's
+    // modal Q&A dialog. Registered ONLY when this run will actually
+    // present a TUI (resolved in main() before register_tools), so
+    // one-shot / piped / plain-REPL sessions never advertise a tool
+    // that would just error.
+    if (o.use_tui) {
+        cli.add_tool(easyai::tools::question());
     }
 
     // tool_lookup MUST be registered last so the snapshot it returns
@@ -2238,6 +2300,52 @@ int run_shell(easyai::Client & cli, easyai::Plan & plan,
     return 0;
 }
 
+// ---- interactive TUI (opencode-style full-screen chat) --------------------
+//
+// Presentation swap only: same Client, same tools, same session file,
+// same system prompt as the legacy REPL. The TUI owns the terminal for
+// the duration, so stderr (easyai::log retries, bash mirrors) is
+// parked on /dev/null while it runs — a --log-file keeps capturing
+// everything through its own FILE*.
+int run_tui(easyai::Client & cli, easyai::Plan & plan, const Options & o) {
+    easyai::tui::Options topt;
+    topt.model          = o.model;
+    topt.url            = o.url;
+    topt.theme          = o.theme;
+    topt.agent          = "Build";
+    topt.version        = "easyai-cli " EASYAI_CLI_VERSION_STR;
+    topt.show_reasoning = o.show_reasoning;
+    topt.session_path   = o.no_local_session
+                              ? std::string()
+                              : session_file_path(o.session_file).string();
+
+    easyai::tui::Hooks hooks;
+    if (!o.no_local_session) {
+        hooks.save_session = [&cli, &o](std::string * err) {
+            return save_session(cli, o.session_file, err);
+        };
+    }
+    hooks.compress = [&cli](std::string * err) {
+        return do_compress_core(cli, err);
+    };
+    hooks.list_models = [&cli]() {
+        std::vector<std::string> ids;
+        std::vector<easyai::RemoteModel> models;
+        if (cli.list_models(models))
+            for (const auto & m : models) ids.push_back(m.id);
+        return ids;
+    };
+    hooks.set_model = [&cli](const std::string & id) { cli.model(id); };
+
+    int saved_err = ::dup(2);
+    int devnull   = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (devnull >= 0) ::dup2(devnull, 2);
+    int rc = easyai::tui::run(cli, plan, topt, hooks);
+    if (saved_err >= 0) { ::dup2(saved_err, 2); ::close(saved_err); }
+    if (devnull >= 0)   ::close(devnull);
+    return rc;
+}
+
 int run_repl(easyai::Client & cli, easyai::Plan & plan,
              const Options & o, const Style & st) {
     std::fprintf(stderr,
@@ -2425,6 +2533,14 @@ int main(int argc, char ** argv) {
     // this just covers the common case where the operator forgot.
     if (!o.prompt.empty()) o.unattended = true;
 
+    // Resolve the interactive surface now — register_tools (question
+    // tool gate) and the system-prompt builder ([asking-the-user]
+    // paragraph) both depend on it. The TUI needs a real terminal on
+    // both ends and steps aside for every non-interactive mode.
+    o.use_tui = !o.plain && !o.quiet && !o.shell_mode
+             && o.prompt.empty() && !any_management(o)
+             && easyai::tui::terminal_capable();
+
     // Some diagnostics are purely LOCAL — no network call, so they
     // shouldn't require --url:
     //   --list-tools         (prints the tools registered in this CLI)
@@ -2539,10 +2655,34 @@ int main(int argc, char ** argv) {
             std::string abs_root = o.sandbox.empty() ? "." : o.sandbox;
             char rb[PATH_MAX];
             if (::realpath(abs_root.c_str(), rb) != nullptr) abs_root = rb;
-            prefix += "[environment]\n";
-            prefix += "sandbox root: " + abs_root + "\n";
-            prefix += "fs_* tools' virtual `/` maps here; bash runs with "
-                      "this as its cwd.\n";
+            // [environment] — opencode-style machine context: cwd,
+            // platform, git flag, date. Saves the model the pwd /
+            // "what OS is this" round-trips on turn 1.
+            easyai::preamble::EnvInfo env;
+            env.cwd = abs_root;
+#if defined(__APPLE__)
+            env.platform = "darwin";
+#elif defined(__linux__)
+            env.platform = "linux";
+#else
+            env.platform = "posix";
+#endif
+            {
+                struct stat gst {};
+                env.is_git = ::stat((abs_root + "/.git").c_str(), &gst) == 0
+                                 ? 1 : 0;
+            }
+            {
+                char db[16];
+                std::time_t now = std::time(nullptr);
+                std::tm tmv {};
+                if (localtime_r(&now, &tmv)
+                    && std::strftime(db, sizeof(db), "%Y-%m-%d", &tmv))
+                    env.date = db;
+            }
+            prefix += easyai::preamble::env_block(env);
+            prefix += "fs_* tools' virtual `/` maps to the working "
+                      "directory above; bash runs with it as cwd.\n";
         }
         if (any_fs_like || !o.no_plan) {
             if (!prefix.empty()) prefix += "\n";
@@ -2554,6 +2694,17 @@ int main(int argc, char ** argv) {
                 "No \"while I'm at it\" cleanups. The user's request is "
                 "the ceiling, not a starting point — they steer, you "
                 "implement what they pick.\n";
+        }
+        // [style] / [code-conventions] / [task-discipline] /
+        // [proactiveness] / [asking-the-user] — the coding-agent
+        // working agreement (preamble::agent_style_block). Gated per
+        // paragraph on the capabilities actually registered.
+        {
+            if (!prefix.empty()) prefix += "\n";
+            prefix += easyai::preamble::agent_style_block(
+                /*has_fs_or_bash=*/ any_fs_like,
+                /*has_plan=*/       !o.no_plan,
+                /*has_question=*/   o.use_tui);
         }
         // The old [tools] section lived here.  Its content — closed-set
         // rule + `tool_lookup` guidance — is now in
@@ -2599,6 +2750,66 @@ int main(int argc, char ** argv) {
             o.system_prompt = o.system_prompt.empty()
                                   ? prefix
                                   : prefix + "\n" + o.system_prompt;
+        }
+    }
+
+    // [project-instructions] — AGENTS.md discovery (opencode-style).
+    // Project file: walk up from cwd (the sandbox root after the chdir
+    // above) towards the filesystem root, max 8 levels, first hit
+    // wins. Global file: ~/.config/easyai/AGENTS.md, loaded first so
+    // project rules override it. Sanitized + capped like every other
+    // injected addendum. Disable with --no-agents-md / [cli]
+    // agents_md = off.
+    if (o.agents_md) {
+        auto read_small_file = [](const std::string & path,
+                                  std::string & out) -> bool {
+            int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+            if (fd < 0) return false;
+            char buf[8192];
+            out.clear();
+            for (;;) {
+                ssize_t n = ::read(fd, buf, sizeof(buf));
+                if (n < 0) { if (errno == EINTR) continue; break; }
+                if (n == 0) break;
+                out.append(buf, (size_t) n);
+                if (out.size() > 64 * 1024) break;  // hard stop
+            }
+            ::close(fd);
+            return !out.empty();
+        };
+        std::vector<std::string> found;  // (global first, project second)
+        if (const char * home = std::getenv("HOME")) {
+            std::string g = std::string(home) + "/.config/easyai/AGENTS.md";
+            struct stat stg {};
+            if (::stat(g.c_str(), &stg) == 0 && S_ISREG(stg.st_mode))
+                found.push_back(g);
+        }
+        {
+            char cwd_buf[PATH_MAX];
+            if (::getcwd(cwd_buf, sizeof(cwd_buf)) != nullptr) {
+                std::string dir = cwd_buf;
+                for (int depth = 0; depth < 8 && !dir.empty(); ++depth) {
+                    std::string cand = dir + "/AGENTS.md";
+                    struct stat stp {};
+                    if (::stat(cand.c_str(), &stp) == 0
+                        && S_ISREG(stp.st_mode)) {
+                        found.push_back(cand);
+                        break;
+                    }
+                    if (dir == "/") break;
+                    size_t cut = dir.find_last_of('/');
+                    dir = cut == 0 ? "/" : dir.substr(0, cut);
+                }
+            }
+        }
+        for (const auto & path : found) {
+            std::string body;
+            if (!read_small_file(path, body)) continue;
+            o.system_prompt +=
+                "\n\n[project-instructions]\n"
+                "Instructions from: " + path + "\n"
+                + easyai::preamble::sanitize_addendum(body, 32 * 1024)
+                + "\n";
         }
     }
 
@@ -2770,8 +2981,9 @@ int main(int argc, char ** argv) {
     } else if (o.shell_mode) {
         rc = run_shell(cli, plan, o, st);
     } else {
-        if (!o.prompt.empty()) rc = run_one(cli, plan, o.prompt, o, st);
-        else                   rc = run_repl(cli, plan, o, st);
+        if (!o.prompt.empty())  rc = run_one(cli, plan, o.prompt, o, st);
+        else if (o.use_tui)     rc = run_tui(cli, plan, o);
+        else                    rc = run_repl(cli, plan, o, st);
     }
     g_active_client = nullptr;
     close_log_fp();
