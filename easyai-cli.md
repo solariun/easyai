@@ -703,6 +703,19 @@ divider — so the prior context is visible, not just in effect.
 no "Thought" rows; per-turn durations are likewise unknown after a
 restart and are omitted.)
 
+Alongside the session file, every save also writes a
+**`.easyai_session.meta` sidecar** — one flat JSON line with the last
+turn's stats (`ctx_used`, `n_ctx`, `predicted_n`, `predicted_ms`,
+`turn_ms`).  On `--continue` it restores the footer badge and
+`/status` numbers — context fill, last token count, duration, t/s —
+from where the conversation left off.  The badge itself is **always
+on**: a fresh session starts at
+`ctx 0 / 262,144 (0%) · last 0 tok · 0.0s · 0.0 t/s` (the denominator
+comes from one `GET /props` at startup, zero retries) and every number
+corrects itself live as turns run.  The sidecar is cosmetic and never
+sent to the model: deleting it just means the badge starts at zeros.
+The session file itself stays the plain OpenAI-shape message array.
+
 ```bash
 $ cd ~/project
 $ easyai-cli --url http://ai.local

@@ -138,8 +138,21 @@ public:
     // fields).  -1 until the first turn lands.  predicted_n is the
     // completion-token count, predicted_ms the decode wall time —
     // divide for the average decode t/s the TUI footer badge shows.
+    // last_turn_ms is the WHOLE call wall clock (prompt processing,
+    // decode, tool dispatch, retries included).
     int    last_predicted_n () const;
     double last_predicted_ms() const;
+    double last_turn_ms     () const;
+
+    // Re-seed every last_* stat mirror above after a session resume, so
+    // a freshly-constructed Client reports the stats of the conversation
+    // it just load_history()'d as if the turn had run in this process.
+    // Pass -1 for anything unknown.  clear_history() resets them all
+    // EXCEPT last_n_ctx (the window size is a server property, not
+    // conversation state) — the stats describe the conversation, not
+    // the process.
+    Client & restore_turn_stats(int ctx_used, int n_ctx, int predicted_n,
+                                double predicted_ms, double turn_ms);
 
     // Hard stop when the chat context fills up.  After each agentic
     // hop, if the server-reported `timings.ctx_used / n_ctx` ratio is

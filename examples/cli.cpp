@@ -77,6 +77,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>      // istreambuf_iterator — session .meta sidecar read
 #include <limits.h>      // PATH_MAX (Linux: not pulled in transitively)
 #include <map>
 #include <set>
@@ -156,19 +157,17 @@ inline std::filesystem::path session_file_path(const std::string & override_name
 // at the session path doesn't redirect us out of cwd; mode 0600 because
 // the file echoes prompts, tool results, and reasoning content (which
 // can contain secrets, API keys mentioned in passing, or private notes).
-bool save_session(const easyai::Client & cli,
-                  const std::string & override_name = "",
-                  std::string * err = nullptr) {
-    const std::string body = cli.dump_history();
-    const auto target = session_file_path(override_name);
-    const std::string tmp = target.string() + ".tmp";
+bool write_file_atomic(const std::filesystem::path & target,
+                       const std::string & body,
+                       std::string * err = nullptr) {
+    const std::string tmp  = target.string() + ".tmp";
+    const std::string name = target.filename().string() + ".tmp";
 
     int fd = ::open(tmp.c_str(),
                     O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
                     0600);
     if (fd < 0) {
-        if (err) *err = std::string("open .easyai_session.tmp: ")
-                       + std::strerror(errno);
+        if (err) *err = "open " + name + ": " + std::strerror(errno);
         return false;
     }
     const char * data = body.data();
@@ -179,8 +178,7 @@ bool save_session(const easyai::Client & cli,
             if (errno == EINTR) continue;
             ::close(fd);
             ::unlink(tmp.c_str());
-            if (err) *err = std::string("write .easyai_session.tmp: ")
-                           + std::strerror(errno);
+            if (err) *err = "write " + name + ": " + std::strerror(errno);
             return false;
         }
         data += n;
@@ -190,11 +188,40 @@ bool save_session(const easyai::Client & cli,
     if (::rename(tmp.c_str(), target.c_str()) != 0) {
         const int e = errno;
         ::unlink(tmp.c_str());
-        if (err) *err = std::string("rename .easyai_session.tmp: ")
-                       + std::strerror(e);
+        if (err) *err = "rename " + name + ": " + std::strerror(e);
         return false;
     }
     return true;
+}
+
+bool save_session(const easyai::Client & cli,
+                  const std::string & override_name = "",
+                  std::string * err = nullptr) {
+    const auto target = session_file_path(override_name);
+    if (!write_file_atomic(target, cli.dump_history(), err)) return false;
+
+    // Stats sidecar (`<session>.meta`) — the last turn's ctx fill /
+    // token count / speed, so a `--continue` can restore the TUI footer
+    // badge and /status numbers instead of showing nothing until the
+    // first new turn.  Flat hand-built JSON (the CLI deliberately has
+    // no JSON dependency); read back with the easyai::args scanner.
+    // Unknown stats → remove the sidecar, so a rewritten session can't
+    // resurrect numbers from a conversation that no longer exists.
+    const std::filesystem::path meta(target.string() + ".meta");
+    if (cli.last_ctx_used() < 0 && cli.last_predicted_n() < 0) {
+        ::unlink(meta.c_str());
+        return true;
+    }
+    char buf[224];
+    std::snprintf(buf, sizeof(buf),
+                  "{\"ctx_used\":%d,\"n_ctx\":%d,\"predicted_n\":%d,"
+                  "\"predicted_ms\":%.1f,\"turn_ms\":%.1f}\n",
+                  cli.last_ctx_used(), cli.last_n_ctx(),
+                  cli.last_predicted_n(), cli.last_predicted_ms(),
+                  cli.last_turn_ms());
+    std::string meta_err;                       // badge restore is
+    write_file_atomic(meta, buf, &meta_err);    // cosmetic — never fail
+    return true;                                // the session save over it
 }
 
 // Returns true on success.  Sets `*err` on failure (and on the
@@ -211,7 +238,27 @@ bool load_session(easyai::Client & cli,
     }
     std::stringstream ss;
     ss << f.rdbuf();
-    return cli.load_history(ss.str(), err);
+    if (!cli.load_history(ss.str(), err)) return false;
+
+    // Optional stats sidecar (see save_session) — restores the footer
+    // badge / /status numbers from where the conversation left off.
+    // Missing, oversized or unparseable → silently start at "unknown",
+    // exactly the pre-sidecar behaviour.
+    std::ifstream mf(target.string() + ".meta");
+    if (mf) {
+        std::string mraw((std::istreambuf_iterator<char>(mf)),
+                         std::istreambuf_iterator<char>());
+        if (!mraw.empty() && mraw.size() <= 4096) {
+            namespace ea = easyai::args;
+            cli.restore_turn_stats(
+                (int) ea::get_int_or(mraw, "ctx_used",    -1),
+                (int) ea::get_int_or(mraw, "n_ctx",       -1),
+                (int) ea::get_int_or(mraw, "predicted_n", -1),
+                ea::get_double_or(mraw, "predicted_ms", -1.0),
+                ea::get_double_or(mraw, "turn_ms",      -1.0));
+        }
+    }
+    return true;
 }
 
 // The compress prompt is the entire instruction we hand to the model
@@ -2308,6 +2355,27 @@ int run_shell(easyai::Client & cli, easyai::Plan & plan,
 // parked on /dev/null while it runs — a --log-file keeps capturing
 // everything through its own FILE*.
 int run_tui(easyai::Client & cli, easyai::Plan & plan, const Options & o) {
+    // The footer badge is always on — give it a real ctx denominator
+    // from the start instead of waiting for the first turn's timings.
+    // One GET /props (n_ctx lives at default_generation_settings.n_ctx,
+    // llama-server-compatible), zero retries so a down server doesn't
+    // stall the TUI boot.  Resume-with-meta already restored real
+    // numbers — don't overwrite those.
+    if (cli.last_n_ctx() <= 0) {
+        cli.http_retries(0);
+        std::string pj;
+        if (cli.props(pj)) {
+            const long long nctx = easyai::args::get_int_or(pj, "n_ctx", -1);
+            if (nctx > 0)
+                cli.restore_turn_stats(std::max(0, cli.last_ctx_used()),
+                                       (int) nctx,
+                                       cli.last_predicted_n(),
+                                       cli.last_predicted_ms(),
+                                       cli.last_turn_ms());
+        }
+        cli.http_retries(o.http_retries);
+    }
+
     easyai::tui::Options topt;
     topt.model          = o.model;
     topt.url            = o.url;

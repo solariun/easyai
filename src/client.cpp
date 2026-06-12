@@ -299,6 +299,7 @@ struct Client::Impl {
     int         last_n_ctx          = -1;    // mirror of last turn's timings.n_ctx
     int         last_predicted_n    = -1;    // completion tokens, summed across hops
     double      last_predicted_ms   = -1.0;  // decode wall time (ms), summed across hops
+    double      last_turn_wall_ms   = -1.0;  // whole chat() call, prompt+tools included
     int         max_tool_hops       = 8;     // agentic loop safety cap; bumped by bash
     int         stop_at_ctx_pct     = 100;   // 0 disables; otherwise abort agentic
                                               // loop when ctx_used/n_ctx >= this %
@@ -898,7 +899,19 @@ struct Client::Impl {
     // For bash-enabled flows the caller bumps this much higher because
     // a single shell command can naturally span many turns.
 
+    // Timing shell: last_turn_wall_ms covers the WHOLE call — prompt
+    // processing, decode, tool dispatch, retries — on every exit path.
+    // It's the "how long did that turn take" number the TUI footer
+    // badge shows (and persists for session resume).
     std::string run_chat_loop() {
+        const auto t0 = std::chrono::steady_clock::now();
+        std::string out = run_chat_loop_inner();
+        last_turn_wall_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t0).count();
+        return out;
+    }
+
+    std::string run_chat_loop_inner() {
         last_was_incomplete         = false;
         last_was_ctx_full           = false;
         last_predicted_n            = -1;
@@ -1279,6 +1292,16 @@ int      Client::last_ctx_pct()               const  {
 }
 int      Client::last_predicted_n()           const  { return p_->last_predicted_n; }
 double   Client::last_predicted_ms()          const  { return p_->last_predicted_ms; }
+double   Client::last_turn_ms()               const  { return p_->last_turn_wall_ms; }
+Client & Client::restore_turn_stats(int ctx_used, int n_ctx, int predicted_n,
+                                    double predicted_ms, double turn_ms) {
+    p_->last_ctx_used     = ctx_used;
+    p_->last_n_ctx        = n_ctx;
+    p_->last_predicted_n  = predicted_n;
+    p_->last_predicted_ms = predicted_ms;
+    p_->last_turn_wall_ms = turn_ms;
+    return *this;
+}
 Client & Client::stop_at_ctx_pct(int pct) {
     if (pct < 0)   pct = 0;
     if (pct > 100) pct = 100;
@@ -1364,6 +1387,15 @@ std::string Client::chat_continue() {
 void Client::clear_history() {
     p_->history_json.clear();
     p_->last_error.clear();
+    // Turn stats describe THIS conversation — a cleared history has no
+    // "last turn", so the mirrors reset too (footer badge, /status,
+    // and the session meta sidecar all read these).  last_n_ctx stays:
+    // the context-window SIZE is a server property, not conversation
+    // state — the always-on badge keeps its denominator across /new.
+    p_->last_ctx_used     = -1;
+    p_->last_predicted_n  = -1;
+    p_->last_predicted_ms = -1.0;
+    p_->last_turn_wall_ms = -1.0;
 }
 
 std::string Client::dump_history() const {

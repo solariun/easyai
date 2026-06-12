@@ -1823,17 +1823,22 @@ void render_usage_badge(Ui & ui, bool compact,
     styled_out.clear(); width_out = 0;
 
     // (styled, plain) segments — fg() only inside, so the pill bg set
-    // once below stays in effect across the whole badge.
+    // once below stays in effect across the whole badge.  The badge is
+    // ALWAYS on: anything not known yet renders as zero and corrects
+    // itself the moment real numbers exist (a /props prefetch usually
+    // supplies the ctx denominator before the first turn).
     std::vector<std::pair<std::string, std::string>> segs;
     char b[64];
-    if (cu >= 0 && ct > 0) {
-        RGB pcol = cp >= 95 ? th.error : cp >= 80 ? th.warning : th.text;
-        std::snprintf(b, sizeof(b), "%d%%", cp < 0 ? 0 : cp);
+    if (ct > 0) {
+        const int u   = cu < 0 ? 0 : cu;
+        const int pct = cp < 0 ? 0 : cp;
+        RGB pcol = pct >= 95 ? th.error : pct >= 80 ? th.warning : th.text;
+        std::snprintf(b, sizeof(b), "%d%%", pct);
         if (compact) {
             segs.push_back({ fg(th.text_muted) + "ctx " + fg(pcol) + b,
                              "ctx " + std::string(b) });
         } else {
-            std::string used = fmt_thousands(cu), tot = fmt_thousands(ct);
+            std::string used = fmt_thousands(u), tot = fmt_thousands(ct);
             segs.push_back({
                 fg(th.text_muted) + "ctx " + fg(th.text) + used
                     + fg(th.text_muted) + " / " + fg(th.text) + tot
@@ -1855,21 +1860,19 @@ void render_usage_badge(Ui & ui, bool compact,
             std::snprintf(b, sizeof(b), "%.1f t/s", tps);
             segs.push_back({ fg(th.text) + b, b });
         }
-    } else if (ltok >= 0) {
-        std::string n = fmt_thousands(ltok);
+    } else {
+        std::string n = fmt_thousands(ltok < 0 ? 0 : ltok);
         segs.push_back({ fg(th.text_muted) + "last " + fg(th.text) + n
                              + fg(th.text_muted) + " tok",
                          "last " + n + " tok" });
-        if (lsecs >= 0) {
-            std::snprintf(b, sizeof(b), "%.1fs", lsecs);
-            segs.push_back({ fg(th.text) + b, b });
-        }
-        if (ltps >= 0 && !compact) {
-            std::snprintf(b, sizeof(b), "%.1f t/s", ltps);
+        std::snprintf(b, sizeof(b), "%.1fs", lsecs < 0.0 ? 0.0 : lsecs);
+        segs.push_back({ fg(th.text) + b, b });
+        if (!compact) {
+            std::snprintf(b, sizeof(b), "%.1f t/s",
+                          ltps < 0.0 ? 0.0 : ltps);
             segs.push_back({ fg(th.text) + b, b });
         }
     }
-    if (segs.empty()) return;
 
     std::string sty, plain;
     for (size_t i = 0; i < segs.size(); ++i) {
@@ -2919,7 +2922,11 @@ void run_slash(Ui & ui, const std::string & line) {
             std::lock_guard<std::mutex> lk(ui.mu);
             ui.msgs.clear();
             ui.cache.clear();
-            ui.ctx_pct = ui.ctx_used = ui.ctx_total = -1;
+            // fresh conversation, same server: usage resets to zero but
+            // the badge keeps its n_ctx denominator (clear_history()
+            // preserves it on the Client for the same reason)
+            ui.ctx_pct = ui.ctx_used = -1;
+            ui.ctx_total = ui.cli->last_n_ctx();
             ui.tps = 0;
             ui.turn_t0 = 0; ui.turn_tok = 0;
             ui.last_tok = -1; ui.last_secs = ui.last_tps = -1.0;
@@ -3438,6 +3445,21 @@ int run(Client & cli, Plan & plan, const Options & opt, const Hooks & hooks) {
         % (int)(sizeof(kPlaceholders) / sizeof(*kPlaceholders));
 
     seed_from_history(ui);   // --continue / --session-file scrollback replay
+    {
+        // Stats survive the restart too (the binary restores them onto
+        // the Client from the session's .meta sidecar before run()) —
+        // pre-fill the footer badge with where the conversation left
+        // off.  Fresh start: everything is -1 and the badge stays away.
+        ui.ctx_used  = cli.last_ctx_used();
+        ui.ctx_total = cli.last_n_ctx();
+        ui.ctx_pct   = cli.last_ctx_pct();
+        const int    ptok = cli.last_predicted_n();
+        const double pms  = cli.last_predicted_ms();
+        const double tms  = cli.last_turn_ms();
+        ui.last_tok  = ptok;
+        ui.last_secs = tms > 0.0 ? tms / 1000.0 : -1.0;
+        ui.last_tps  = ptok > 0 && pms > 1.0 ? ptok * 1000.0 / pms : -1.0;
+    }
     install_callbacks(ui);
     wrap_tools(ui);
 
