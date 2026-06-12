@@ -429,6 +429,15 @@ The template is refreshed on every `--upgrade` (it's the canonical
 by the installer once created — operator edits survive every
 `--upgrade` / `--force` run.
 
+Note (2026-06-12): `system.txt` (like the built-in "Deep" prompt) only
+applies to requests that do NOT carry their own `system` message. A
+client-supplied `system` message replaces it and is used verbatim —
+nothing is appended to it, not even the AUTHORITATIVE preamble —
+unless that request also sends `X-Easyai-Inject: on`. Agentic clients
+(easyai-cli, opencode, Claude Code) compose their own prompts, so
+this is what makes them behave identically against easyai-server and
+any other OpenAI-compatible endpoint.
+
 Customise to add domain context, persona, language preferences. If
 you want the model to use the `memory` tool aggressively, mention it
 here:

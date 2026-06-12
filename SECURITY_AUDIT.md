@@ -543,8 +543,10 @@ The `bash` tool is **explicitly NOT a hardened sandbox**.  It runs
 inside `cwd` set to the configured root directory.  Mitigations are
 cooperative, not isolating:
 
-- 32 KiB output cap (silently truncates with marker)
-- Per-command timeout (default 30 s, max 300 s; SIGTERM then SIGKILL
+- 50 KB / 2000-line output cap (truncates with an explicit marker;
+  values raised from 32 KiB / 30 s on 2026-06-12 for opencode-parity
+  agent flows — the bound is unchanged in kind, only in size)
+- Per-command timeout (default 120 s, max 600 s; SIGTERM then SIGKILL
   +2 s grace)
 - Server side: requires `--allow-bash` opt-in to register at all
   (default off, never appears in webui's tool list)
@@ -1952,10 +1954,11 @@ cooperative:
   reject any path resolving outside the cwd (the sandbox root).
   Defense-in-depth against accidental disk access; documented
   *bypassable* via `ctypes`, `subprocess`, `_io.FileIO`, etc.
-- 32 KB cap on the model-facing capture buffer.
+- 50 KB / 2000-line cap on the model-facing capture buffer
+  (raised from 32 KB on 2026-06-12; bound unchanged in kind).
 - 128 KB cap on the operator-facing live mirror (the same one as
   bash, fed through `sanitize_for_operator_tty()`).
-- Output cap, timeout (default 30 s, max 300 s), SIGTERM/SIGKILL
+- Output cap, timeout (default 120 s, max 600 s), SIGTERM/SIGKILL
   process-group teardown, `PR_SET_PDEATHSIG(SIGKILL)` on Linux,
   fds 3..maxfd closed before exec — all shared with bash via
   `run_capped_subprocess`.

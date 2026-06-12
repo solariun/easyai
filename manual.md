@@ -1033,8 +1033,11 @@ engine.max_tool_hops(99999);   // bash flows span many turns
 ```
 
 `bash` is a `/bin/sh -c` runner. Output (stdout + stderr) is captured
-and capped at 32 KiB; per-command timeout defaults to 30 s, max 300 s
-(SIGTERM, then SIGKILL +2 s grace). The cwd is pinned to the root.
+and capped at 50 KB / 2000 lines (head-biased — the truncation marker
+says how many lines were dropped); per-command timeout defaults to
+120 s, max 600 s (SIGTERM, then SIGKILL +2 s grace). The cwd is pinned
+to the root. The optional `description` parameter (5-10 words, active
+voice) is shown by the easyai-cli TUI as the running command's title.
 
 This is **NOT** a hardened sandbox — the command runs with your user
 privileges. It's appropriate for local single-user agents; for
@@ -3264,9 +3267,12 @@ Some shells/wrappers report a non-zero code because of the signal, but
 
 ### Forcing the model to ignore the server-injected AUTHORITATIVE preamble (QA only)
 
-The server appends an AUTHORITATIVE preamble to whichever system
-message reaches the model (`--inject-datetime on` is the default).
-The preamble has up to three blocks:
+The server appends an AUTHORITATIVE preamble to its OWN default
+system prompt (`--inject-datetime on` is the default). Since
+2026-06-12, a CLIENT-supplied `system` message is used **verbatim** —
+it replaces the server default and nothing is spliced into it; pass
+`X-Easyai-Inject: on` to opt the preamble back onto your own system
+message. The preamble has up to three blocks:
 
 * `# AUTHORITATIVE DATE/TIME` — current wall-clock + timezone.
 * `# KNOWLEDGE CUTOFF` — training-cutoff hint + rule to verify
@@ -3288,8 +3294,12 @@ curl http://ai.local:8080/v1/chat/completions \
 Header values:
 * `off` — skip the preamble for this request only.
 * `on`  — force injection on this request even when the server was
-          launched with `--inject-datetime off`.
-* (anything else, or absent header) — defer to the server flag.
+          launched with `--inject-datetime off`. With a client-supplied
+          `system` message this is ALSO the opt-in that appends the
+          preamble to it (the default for client prompts is verbatim,
+          nothing appended).
+* (anything else, or absent header) — defer to the server flag; a
+          client-supplied `system` message stays verbatim.
 
 WHY DEFAULT ON: most production deployments want the model to trust
 the server clock, flag post-cutoff facts as uncertain, and know

@@ -503,14 +503,37 @@ CLI flag + INI key `[cli] prompt_progress = on|off`. When off, the cli sends `st
 
 `on_prompt_eval` (the final summary, fires once per agentic hop) always calls `easyai::log::write` with the structured line `[prompt_eval] N tok (M cached) · X ms · Y t/s · ctx Z% (used/total)`. `log::write` tees stderr + the `--log-file` file (if set), so the final metrics land in the log regardless of `--verbose`.
 
-## fs_read Tool Behavior
+## fs_read Tool Behavior (opencode-parity since 2026-06-12)
 
-Output always prefixes every line with `<n>| ` (line numbers on by default in both modes). Reports total line count for files ≤ 8 MiB. Description tells the model to read before `fs_edit` for accurate line references.
+Output prefixes every line with `<n>: ` (line numbers on by default in both modes); individual lines longer than 2000 chars are cut with a `... (line truncated to 2000 chars)` marker. Reports total line count for files ≤ 8 MiB. Reading a DIRECTORY path returns its entries one per line (subdirectories get a trailing `/`, sorted, capped at 1000). A missing path suggests up to 3 similarly-named entries from the parent directory (`Did you mean: …?`). Every successful read registers the path in the read-before-write registry (next section).
 
 | Mode | Trigger | Default limit | Line numbers | Total count |
 |------|---------|---------------|-------------|-------------|
-| Line mode | `start_line` set | 200 lines (max 2000) | Always on | Yes |
+| Line mode | `start_line` set | 2000 lines (max 2000) | Always on | Yes |
 | Byte mode | default / `offset` set | 65536 bytes (max 1 MiB) | On (default true) | Yes (≤ 8 MiB files) |
+
+When line mode stops short of EOF the output ends with `(File has more lines. Pass start_line=N to read beyond this point — M more lines.)`.
+
+## Read-before-write registry (2026-06-12)
+
+`fs_write` (overwrite of an EXISTING non-empty file) and `fs_edit` (both modes) require the target to have been `fs_read` in this session first; otherwise they return a clear error telling the model to read first. The registry lives on the shared `Sandbox` (per tool-registration, process lifetime — on a long-running easyai-server it is process-wide), keyed by normalized path, capped at 16384 entries; on overflow it clears, which only forces a cheap re-read before the next overwrite. A successful write/edit also registers the path (the writer knows the content it just wrote). `fs_append` and brand-new files are exempt.
+
+## fs_edit string mode (2026-06-12)
+
+`fs_edit` accepts two parameter shapes, both atomic (temp file + rename):
+
+| Mode | Params | Contract |
+|---|---|---|
+| String (preferred) | `oldString`, `newString`, optional `replaceAll` | `oldString` must match the file content EXACTLY and be unique (otherwise: `found N matches … pass replaceAll=true`); `newString=""` deletes; identical old/new is an error; CRLF files accept LF-normalized `oldString` and stay CRLF on disk; empty `oldString` + missing file creates it. |
+| Line (legacy) | `start_line`, `end_line`, `content` | Replaces lines [start..end] (1-based, inclusive); `content=""` deletes; `end_line=start_line-1` inserts; `start_line=line_count+1` appends. |
+
+## fs_grep / fs_glob output (opencode-parity, 2026-06-12)
+
+`fs_grep`: header `Found N matches` (or `No files found`), then per file `path:` followed by `  Line <n>: <text>` rows, blank line between files; truncation note when `max_matches` (default 100) hits. Accepts `include` as the preferred alias of `file_glob`. `fs_glob`: plain newline-separated paths sorted newest-first by mtime, capped at `limit` (default 100, max 1000) with a `(Results are truncated: …)` note; empty → `No files found`.
+
+## bash caps (2026-06-12)
+
+Model-facing capture: 50 KB and 2000 lines (head-biased line cap with a `... N lines truncated ...` marker; byte overflow appends a re-run hint). Timeout: default 120 s, max 600 s (SIGTERM, then SIGKILL +2 s). Optional `description` param (5-10 words, active voice) — surfaced by the easyai-cli TUI as the running-command title.
 
 ## fs Batch Mode (`action="ops"`)
 
@@ -520,7 +543,7 @@ The unified `fs` tool accepts a batch via `ops` — an array of single-op shapes
 |---|---|---|
 | Ops per call | **50** | Bound the report length and the worst-case file-system churn per turn. |
 | Distinct files per call | **20** | Counted only over ops that name a `path` (`cwd`/`sandbox`/`glob`/`grep`/`list` are free). Stops a runaway batch from blasting many files at once. |
-| Same-path edits reorder | descending `start_line` | Each edit's `start_line` refers to the file's ORIGINAL line numbers — model doesn't have to track line drift. |
+| Same-path edits reorder | descending `start_line`, stable | Each edit's `start_line` refers to the file's ORIGINAL line numbers — model doesn't have to track line drift. String-mode edits (`oldString`/`newString`, no `start_line`) keep their authored order and run AFTER the line-mode edits on the same file (content matching is line-number-independent, so last is the safe slot). |
 | Read clip in batch | 2 KiB per op | Successful `read` ops are clipped to 2 KiB in the batch report; re-issue a standalone `read` for the full body. |
 | Error visibility | full body | Failed ops emit their complete diagnostic so the model can self-correct without re-running. |
 | `continue_on_error` | default `false` | Stop-on-first matches small-model debugging flow. |

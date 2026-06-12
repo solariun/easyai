@@ -1820,25 +1820,25 @@ static void prepare_engine_for_request(ServerCtx & ctx, const ChatRequest & req)
 
     // Build the request's history (everything except the final user
     // message — that one is pushed by the chat loop).  We work on a
-    // mutable copy so we can splice the authoritative-datetime
-    // preamble into whichever system message exists, regardless of
-    // whether the CLIENT supplied one or we fall back to the
-    // server's default.
+    // mutable copy because the no-client-system path appends the
+    // authoritative preamble to the server default below.
     //
-    // Critical scenario: opencode / Claude-Code style clients send
-    // their OWN system message in the messages array.  That message
-    // *replaces* the server's default in practice (the chat template
-    // would render two system blocks otherwise, which most templates
-    // collapse into one with unpredictable order).  We want the
-    // datetime + cutoff hint to ride along regardless of who owns
-    // the system prompt — so we APPEND the preamble to whichever
-    // system message goes into the prompt:
+    // System-prompt ownership (policy since 2026-06-12):
     //
-    //   * Client sent a system message → append to its content.
-    //   * Client sent no system message → append to ctx.default_system.
+    //   * Client sent a system message → it REPLACES the server's
+    //     default and is used VERBATIM. No preamble, no session-info,
+    //     no addenda are spliced into it — opencode / Claude-Code
+    //     style clients compose their own complete prompt client-side
+    //     and double-injection corrupts it. (Engine::replace_history
+    //     already prefers a history-supplied system message over the
+    //     baseline, so the default never renders in this case.)
+    //     Escape hatch: `X-Easyai-Inject: on` opts back into having
+    //     the server's preamble (datetime / cutoff / memory vocab /
+    //     first-turn tool catalogue) appended to the client's system
+    //     message, for thin clients that want both.
     //
-    // Either way, the preamble is in there exactly once and lands as
-    // part of the model's actual context.
+    //   * Client sent no system message → server default + preamble,
+    //     exactly as before.
     // When last is "tool" (the client is feeding a previous turn's tool
     // result back), keep the WHOLE conversation in history — the model
     // needs to see the tool message to produce its next reply.  When
@@ -1896,20 +1896,26 @@ static void prepare_engine_for_request(ServerCtx & ctx, const ChatRequest & req)
         addendum += easyai::preamble::build_session_info(ctx.engine.tools());
     }
 
-    if (!addendum.empty()) {
-        // Find the LAST system message in the client-supplied history.
-        // (Most clients put it at index 0, but we walk backwards to be
-        // safe — multi-system histories pick the most recent.)
-        auto it = std::find_if(hist_minus_last.rbegin(), hist_minus_last.rend(),
-            [](const easyai::Engine::HistoryMessage & m) {
-                return m.role == "system";
-            });
-        if (it != hist_minus_last.rend()) {
-            it->content += addendum;
-            ctx.engine.system(ctx.default_system);
-        } else {
-            ctx.engine.system(ctx.default_system + addendum);
+    // Find the LAST system message in the client-supplied history.
+    // (Most clients put it at index 0, but we walk backwards to be
+    // safe — multi-system histories pick the most recent.)
+    auto client_sys = std::find_if(
+        hist_minus_last.rbegin(), hist_minus_last.rend(),
+        [](const easyai::Engine::HistoryMessage & m) {
+            return m.role == "system";
+        });
+    if (client_sys != hist_minus_last.rend()) {
+        // Client owns the prompt — verbatim replace semantics. The
+        // baseline below never renders (replace_history skips it when
+        // the history carries a system message); set it anyway so a
+        // subsequent request WITHOUT a client system message starts
+        // from the clean default rather than a stale composition.
+        if (req.inject_override == "on" && !addendum.empty()) {
+            client_sys->content += addendum;   // explicit opt-in only
         }
+        ctx.engine.system(ctx.default_system);
+    } else if (!addendum.empty()) {
+        ctx.engine.system(ctx.default_system + addendum);
     } else {
         ctx.engine.system(ctx.default_system);
     }

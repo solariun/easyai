@@ -23,7 +23,7 @@ the lib surface.
 | Binary               | What it gives you                                                                                                                                  |
 |----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
 | `easyai-local`       | Local-only REPL: loads a GGUF in-process via `easyai::Engine` (driven through `easyai::Session`). Drop-in `llama-cli` replacement — one-shot scripting (`-p`), tools, presets, optional `<think>` strip, sandboxed `fs_*` tools, opt-in `bash` tool. |
-| `easyai-cli`         | Agentic OpenAI-protocol client — no local model.  REPL, `--shell` (hybrid AI shell), or `-p` one-shot.  Full sampling control (`--temperature`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--frequency-penalty`, `--presence-penalty`, `--seed`, `--max-tokens`, `--stop`), plan tool, server-management subcommands (`--list-models`, `--list-tools`, `--health`, `--props`, `--metrics`, `--set-preset`).  HTTPS via OpenSSL; `--insecure-tls` / `--ca-cert` for dev/internal CAs.  Full doc: [`easyai-cli.md`](easyai-cli.md). |
+| `easyai-cli`         | Agentic OpenAI-protocol client — no local model.  Full-screen chat **TUI** (opencode-style look & feel: markdown, live tool rows with diffs, `/`-command + `@`-file completion, themes — default for interactive terminals; `--plain` for the legacy line REPL), `--shell` (hybrid AI shell), or `-p` one-shot.  Full sampling control (`--temperature`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--frequency-penalty`, `--presence-penalty`, `--seed`, `--max-tokens`, `--stop`), plan tool, server-management subcommands (`--list-models`, `--list-tools`, `--health`, `--props`, `--metrics`, `--set-preset`).  HTTPS via OpenSSL; `--insecure-tls` / `--ca-cert` for dev/internal CAs.  Full doc: [`easyai-cli.md`](easyai-cli.md). |
 | `easyai-server`      | Drop-in `llama-server` replacement: OpenAI-compat HTTP **with full SSE streaming**, embedded SvelteKit webui, Bearer auth, Prometheus `/metrics`, KV-cache controls, flash-attn, mlock.  Speaks MCP, OpenAI, Ollama from one process.  Full doc: [`easyai-server.md`](easyai-server.md). |
 | `easyai-mcp-server`  | **Standalone Model Context Protocol provider — no model loaded.** Same tool catalogue as `easyai-server` (built-ins + knowledge tools + external-tools), exposed over `POST /mcp` with a configurable cpp-httplib worker pool (`--threads`) and an in-flight `tools/call` cap (`--max-concurrent-calls`) for thousands-of-clients deployments.  Full doc: [`easyai-mcp-server.md`](easyai-mcp-server.md). |
 | `easyai-library-demo`| Five-line `easyai::Session` template — pair with [`LIB_GUIDE.md`](LIB_GUIDE.md).  The smallest "build an agent, register a tool, chat" program in the repo. |
@@ -754,9 +754,10 @@ The model gets one extra tool when enabled:
   fails with `ModuleNotFoundError`, by design — predictable behaviour
   regardless of host Python configuration.
 * Same hardening as `bash`: cwd pinned to `--sandbox`, fds 3+ closed
-  before exec, SIGTERM/SIGKILL deadline, 32 KB stdout+stderr cap,
-  optional operator-facing live mirror via `--no-show-python` to opt
-  out (default ON when `--allow-python` is on).
+  before exec, SIGTERM/SIGKILL deadline, 50 KB / 2000-line
+  stdout+stderr cap, optional operator-facing live mirror via
+  `--no-show-python` to opt out (default ON when `--allow-python`
+  is on).
 * Internally, `bash` and `python3` now share one `run_capped_subprocess`
   helper — the fork/fd-close/chdir/drain/wait machinery only lives in
   one place.
@@ -1422,7 +1423,13 @@ reference: [`easyai-mcp-server.md`](easyai-mcp-server.md).
 ### `easyai-cli` — interactive remote CLI
 
 Talks to any OpenAI-compatible endpoint (our `easyai-server`,
-upstream `llama-server`, OpenAI itself, etc.).
+upstream `llama-server`, OpenAI itself, etc.). Interactive terminal
+runs open a full-screen chat **TUI** (opencode-style look & feel —
+markdown rendering, live per-tool rows with diff views, todo
+checklists, `/`-command and `@`-file completion, `opencode` /
+`opencode-light` themes, `esc esc` interrupt); `--plain` (or
+`[cli] tui = off`) keeps the legacy line REPL, and every non-TTY /
+one-shot / `--quiet` path falls back automatically.
 
 | Flag | Default | What it does |
 |---|---|---|

@@ -1987,11 +1987,17 @@ struct Sandbox {
     // Read-before-write registry (opencode contract): a file that
     // already exists must have been fs_read in this session before
     // fs_write / fs_edit may modify it. Keyed by normalized real path;
-    // process-lifetime scope (one CLI session = one process).
+    // process-lifetime scope (one CLI session = one process; on a
+    // long-running easyai-server the registry is process-wide and
+    // capped — when it overflows we clear it, which only means the
+    // model must re-read before its next overwrite, a cheap and safe
+    // degradation).
+    static constexpr size_t       kReadRegistryCap = 16384;
     std::mutex                    read_mu;
     std::set<std::string>         read_paths;
     void note_read(const stdfs::path & p) {
         std::lock_guard<std::mutex> lk(read_mu);
+        if (read_paths.size() >= kReadRegistryCap) read_paths.clear();
         read_paths.insert(p.lexically_normal().string());
     }
     bool was_read(const stdfs::path & p) {
@@ -3768,7 +3774,7 @@ Tool fs(std::string root) {
                "max 1048576).",
                false)
         .param("line_numbers",      "boolean",
-               "read only. Prefix each line `<n>| `. Default false.",
+               "read only. Prefix each line `<n>: `. Default false.",
                false)
         .param("pattern",           "string",
                "glob: wildcard. grep: ECMAScript regex (matched per "
@@ -3901,7 +3907,12 @@ Tool fs(std::string root) {
                 }
             }
             for (auto & kv : edits_by_path) {
-                std::sort(kv.second.begin(), kv.second.end(),
+                // stable: string-mode edits (oldString/newString, no
+                // start_line → key 0) keep their authored order and run
+                // AFTER the line-mode edits — content matching is
+                // line-number-independent, so applying them last keeps
+                // the line-mode ops anchored to the original file.
+                std::stable_sort(kv.second.begin(), kv.second.end(),
                     [&](size_t a, size_t b) {
                         long long sa = ops_arr[a].value("start_line", 0LL);
                         long long sb = ops_arr[b].value("start_line", 0LL);

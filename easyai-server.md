@@ -466,21 +466,33 @@ for that single request:
   message.
 
 Either way the server-supplied `system.txt` is used **only** when the
-request doesn't already include a `system` message. The
-authoritative-datetime preamble (§"Hardening" below) appends to
-whichever system message reaches the model.
+request doesn't already include a `system` message.
 
-### `X-Easyai-Inject: off` to skip the date/time preamble
+**System-prompt ownership (since 2026-06-12):** a client-supplied
+`system` message REPLACES the server default and is used **verbatim**
+— the server splices nothing into it: no AUTHORITATIVE preamble, no
+first-turn tool catalogue, no addenda. Agentic clients (easyai-cli,
+opencode, Claude Code) compose their own complete prompt client-side,
+and double-injection corrupted it. When the request has **no** system
+message, the server default (`system.txt` / `--system`) plus the
+AUTHORITATIVE preamble (§"Hardening" below) is used, exactly as
+before. Thin clients that send their own persona but still want the
+server's datetime / cutoff / memory-vocabulary blocks appended can opt
+back in per-request with `X-Easyai-Inject: on`.
 
-Useful for A/B regression suites:
+### `X-Easyai-Inject` — preamble control per request
+
+Useful for A/B regression suites and for thin clients (see above):
 
 ```bash
 curl -H "X-Easyai-Inject: off" ...
 ```
 
-Header values: `off` (skip preamble for this request only), `on`
-(force injection on this request even when the server was launched
-with `--inject-datetime off`), or absent (defer to the server flag).
+Header values: `off` (skip the preamble for this request only), `on`
+(force injection on this request — also the opt-in that appends the
+preamble to a client-supplied `system` message), or absent (defer to
+the server flag; with a client-supplied `system` message absent means
+verbatim, no preamble).
 
 ### `stream_options.easyai_prompt_progress: false` to skip per-batch progress events
 
