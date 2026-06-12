@@ -333,11 +333,12 @@ ini_file="$config_dir/easyai.ini"
 # in /etc, agent-generated state goes in /var/lib (FHS).
 rag_dir="/var/lib/easyai/rag"
 
-# 256 K context — needed for long agentic flows, deep research, and
-# large codebases.  Paired with --rope-scaling yarn + --rope-scale 2
-# + --yarn-orig-ctx 131072 to extend models trained at 128 K.
-# Override with --ctx-size.
-ctx_size=262144
+# 1 M context window — sized for long agentic flows, deep research,
+# and whole-codebase work on the AI box.  Paired with --rope-scaling
+# yarn + --rope-scale 4 + --yarn-orig-ctx 131072 to extend models
+# trained at 128 K (per-model [MODEL_*] profiles override both knobs
+# for models that want different scaling).  Override with --ctx-size.
+ctx_size=1048576
 # --ngl 99: force all layers onto GPU.  The research/coding agent
 # workload assumes a GPU with enough VRAM to hold the full model.
 # Use --ngl -1 for auto-fit or --ngl 0 for CPU-only.
@@ -393,10 +394,12 @@ no_mmap=1
 # where slow-loris resilience matters more than long-thinking-turn support.
 http_timeout=86400
 # RoPE / YaRN context extension — needed when ctx_size exceeds the
-# model's native training context. "yarn" scaling with scale=2 and
-# yarn_orig_ctx=131072 doubles a 128K-trained model to 256K.
+# model's native training context. "yarn" scaling with scale=4 and
+# yarn_orig_ctx=131072 stretches a 128K-trained model toward the 1M
+# ctx_size above; per-model [MODEL_*] profiles pick their own scale
+# (e.g. ×8 for the Huihui / Gemma-4 profiles).
 rope_scaling="yarn"
-rope_freq_scale="2"
+rope_freq_scale="4"
 yarn_orig_ctx=131072
 # GPU split mode: none=single GPU, layer=split layers across GPUs (default
 # in llama.cpp), row=tensor parallelism, tensor=full tensor parallelism.
@@ -1564,8 +1567,10 @@ no_mmap          = $([[ "$no_mmap" -eq 1 ]] && echo on || echo off)
 split_mode       = $split_mode
 
 # RoPE / YaRN context extension — required when ctx exceeds the model's
-# native training context. "yarn" scaling with rope_freq_scale=2 and
-# yarn_orig_ctx=131072 doubles a 128K-trained model to 256K.
+# native training context. "yarn" scaling with rope_freq_scale=4 and
+# yarn_orig_ctx=131072 stretches a 128K-trained model toward the 1M
+# context above. Per-model [MODEL_*] sections override all three when
+# a model wants different scaling (see the profiles below).
 rope_scaling      = $rope_scaling
 rope_freq_scale   = $rope_freq_scale
 yarn_orig_ctx     = $yarn_orig_ctx
@@ -1581,8 +1586,9 @@ frequency_penalty = $frequency_penalty
 max_tokens       = $max_tokens
 
 # ------------------------------------------------------------
-# Speculative decoding — off by default. Uncomment ONE of the
-# pairs below when the served model supports the backend.
+# Speculative decoding — n-gram self-speculation ON by default
+# (works with ANY model). Switch the active spec_type line to
+# change backend, or comment both out to disable.
 # ------------------------------------------------------------
 #
 # MTP — Multi-Token Prediction heads embedded in the main model.
@@ -1593,11 +1599,11 @@ max_tokens       = $max_tokens
 # into the unit's ExecStart — use INI here if you'd rather edit
 # easyai.ini than re-run the installer.
 #spec_type        = draft-mtp
-#spec_draft_n_max = 6
+spec_draft_n_max = 2
 #
 # Self-speculative via n-grams — works with ANY model, no MTP
 # heads needed. Smaller speedup than MTP but free.
-#spec_type        = ngram-cache
+spec_type        = ngram-cache
 #
 # Classic standalone draft model — NOT yet wired in easyai-server.
 # (--draft-model PATH is accepted by llama.cpp but easyai doesn't
@@ -1667,18 +1673,19 @@ max_tokens       = $max_tokens
 #
 # 'alias' is NOT a match key — it is the public model-id this profile
 # advertises (via /v1/models, the webui badge, chat responses) once
-# matched, OVERRIDING the [SERVER] alias above. Each profile below sets
-# 'alias = $service_alias' so the served name stays '$service_alias' for
-# whichever model the box loads; change a profile's alias to give that
-# specific model its own session name. An explicit --alias on the
-# command line still wins.
+# matched, OVERRIDING the [SERVER] alias above. Each profile below
+# ships its own public name (the family name + '+', e.g.
+# 'Qwen3-Coder-Next+') so clients can tell which tuned profile is
+# serving them; set a profile's alias to '$service_alias' if you'd
+# rather keep one stable served name for whichever model the box
+# loads. An explicit --alias on the command line still wins.
 
 # Research + coding agent profile for Qwen3-Coder-Next.
 # Low temperature, tight top_p/min_p, mild penalties — tuned for
 # deterministic code output and structured tool-calling.
-# KV K-cache at bf16, V-cache at q8_0 for precision + memory balance.
+# Symmetric q8_0 KV cache (matches the [ENGINE] default posture).
 [MODEL_Qwen3-Coder-Next]
-alias            = $service_alias
+alias            = Qwen3-Coder-Next+
 temperature      = 0.2
 top_p            = 0.92
 top_k            = 50
@@ -1688,17 +1695,74 @@ presence_penalty = 0.1
 frequency_penalty = 0.05
 max_tokens       = 12288
 context          = 128000
-cache_type_k     = bf16
+cache_type_k     = q8_0
 cache_type_v     = q8_0
 #rope_scaling     = yarn
 #rope_freq_scale  = 2
 #yarn_orig_ctx    = 131072
 
+# Abliterated Qwen3-Coder-Next variant (Huihui). Fully pinned in RAM
+# (mlock + no_mmap), ×8 YaRN over the 128K base for the full 1M
+# [ENGINE] window, n-gram self-speculation, creative-leaning sampling
+# with a strong presence penalty as the anti-loop net.
+[MODEL_Huihui-Qwen3-Coder-Next]
+alias            = Huihui-Qwen3-Coder-Next+
+flash_attn       = on
+cache_type_k     = q8_0
+cache_type_v     = q8_0
+mlock            = on
+no_mmap          = on
+split_mode       = none
+
+rope_scaling      = yarn
+rope_freq_scale   = 8
+yarn_orig_ctx     = 131072
+
+spec_type        = ngram-cache
+spec_draft_n_max = 2
+
+temperature      = 1.0
+top_p            = 0.95
+top_k            = 20
+min_p            = 0.0
+repeat_penalty   = 1.0
+presence_penalty = 1.5
+frequency_penalty = 0.05
+max_tokens       = 12288
+
+# Gemma-4 — same fully-pinned posture as the Huihui profile: ×8 YaRN
+# over a 128K base, n-gram self-speculation, creative sampling with
+# the presence-penalty anti-loop net.
+[MODEL_Gemma-4]
+alias            = Gemma-4
+flash_attn       = on
+cache_type_k     = q8_0
+cache_type_v     = q8_0
+mlock            = on
+no_mmap          = on
+split_mode       = none
+
+rope_scaling      = yarn
+rope_freq_scale   = 8
+yarn_orig_ctx     = 131072
+
+spec_type        = ngram-cache
+spec_draft_n_max = 2
+
+temperature      = 1.0
+top_p            = 0.95
+top_k            = 20
+min_p            = 0.0
+repeat_penalty   = 1.0
+presence_penalty = 1.5
+frequency_penalty = 0.05
+max_tokens       = 12288
+
 # Qwen3.6 family — balanced chat defaults.
 # Moderate temperature for natural conversation, no presence penalty
 # (the model's own MoE gating handles diversity), repeat off.
 [MODEL_Qwen3.6]
-alias            = $service_alias
+alias            = Qwen3.6+
 temperature      = 0.4
 top_p            = 0.95
 top_k            = 20
