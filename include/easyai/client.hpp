@@ -132,6 +132,15 @@ public:
     // -1 when either side is unknown.
     int  last_ctx_pct  () const;
 
+    // Generation stats for the most recent chat()/chat_continue() call,
+    // summed across agentic hops (mirror of the server's
+    // timings.{predicted_n,predicted_ms}; llama-server emits the same
+    // fields).  -1 until the first turn lands.  predicted_n is the
+    // completion-token count, predicted_ms the decode wall time —
+    // divide for the average decode t/s the TUI footer badge shows.
+    int    last_predicted_n () const;
+    double last_predicted_ms() const;
+
     // Hard stop when the chat context fills up.  After each agentic
     // hop, if the server-reported `timings.ctx_used / n_ctx` ratio is
     // >= this percentage, run_chat_loop aborts: it stops dispatching

@@ -391,6 +391,11 @@ struct Ui {
     int  ctx_pct = -1, ctx_used = -1, ctx_total = -1;
     double tps = 0.0;
     long long tok_t0 = 0; int tok_n = 0;  // t/s window
+    long long turn_t0 = 0;                // current/last turn start (ms)
+    int    turn_tok = 0;                  // pieces streamed this turn (≈ tokens, live)
+    int    last_tok  = -1;                // last turn: completion tokens (server count)
+    double last_secs = -1.0;              // last turn: wall-clock seconds
+    double last_tps  = -1.0;              // last turn: average decode t/s
     std::atomic<uint64_t> ver{1};
 
     // editor
@@ -1739,13 +1744,13 @@ PromptLayout render_prompt(Ui & ui) {
 std::string render_status(Ui & ui) {
     const Theme & th = ui.theme;
     std::string left, right;
-    bool busy; std::string label; int tpct, cpct; double tps;
+    bool busy; std::string label; int tpct;
     {
         std::lock_guard<std::mutex> lk(ui.mu);
         busy = ui.busy; label = ui.spin_label;
-        tpct = ui.thinking_pct; cpct = ui.ctx_pct; tps = ui.tps;
+        tpct = ui.thinking_pct;
     }
-    std::string lplain, rplain;
+    std::string lplain;
     RGB lcol = th.text_muted;
     if (busy) {
         if (label.empty()) label = "Thinking";
@@ -1758,16 +1763,9 @@ std::string render_status(Ui & ui) {
             right = fg(th.text) + "esc" + RESET + fg(th.text_muted)
                   + " interrupt" + RESET;
     } else {
+        // ctx fill + t/s used to sit here; they now live in the
+        // footer's center badge, full-time and with real numbers.
         lplain = "enter send · shift+enter newline · / commands · @ files";
-        std::string usage;
-        if (cpct >= 0) usage = std::to_string(cpct) + "%";
-        if (tps > 0.1) {
-            char b[32];
-            std::snprintf(b, sizeof(b), "%.1f t/s", tps);
-            usage += (usage.empty() ? "" : " · ") + std::string(b);
-        }
-        if (!usage.empty())
-            right = fg(th.text_muted) + usage + RESET;
     }
     int rw = styled_width(right);
     int lmax = ui.cols - 2 * kMargin - rw - 1;
@@ -1784,6 +1782,97 @@ std::string render_status(Ui & ui) {
 }
 
 // --------------------------------------------------------------- footer ----
+// 262144 → "262,144" for the footer badge's token counts.
+std::string fmt_thousands(long long v) {
+    std::string s = std::to_string(v);
+    size_t i = s.size();
+    while (i > 3) { i -= 3; s.insert(i, ","); }
+    return s;
+}
+
+// Center-of-footer usage badge:
+//   "ctx 17,505 / 262,144 (7%) · last 1742 tok · 228.9s · 12.0 t/s"
+// While a turn is streaming the stats half ticks live (tokens so far,
+// elapsed wall clock, rolling t/s — repaints ride the 80 ms spinner
+// tick); idle it freezes on the previous turn's totals (server
+// predicted_n / decode t/s).  The ctx half refreshes after every
+// agentic hop via the on_tool callback.  `compact` collapses the ctx
+// part to its percentage and drops t/s for narrow terminals.  Out
+// params: the styled pill (bg_element, 1-space padding) + its width.
+void render_usage_badge(Ui & ui, bool compact,
+                        std::string & styled_out, int & width_out) {
+    const Theme & th = ui.theme;
+    bool busy, compacting;
+    int cu, ct, cp, ltok, ttok; double lsecs, ltps, tps; long long t0;
+    {
+        std::lock_guard<std::mutex> lk(ui.mu);
+        busy = ui.busy; compacting = ui.compacting;
+        cu = ui.ctx_used; ct = ui.ctx_total; cp = ui.ctx_pct;
+        ltok = ui.last_tok; ttok = ui.turn_tok;
+        lsecs = ui.last_secs; ltps = ui.last_tps; tps = ui.tps;
+        t0 = ui.turn_t0;
+    }
+    styled_out.clear(); width_out = 0;
+
+    // (styled, plain) segments — fg() only inside, so the pill bg set
+    // once below stays in effect across the whole badge.
+    std::vector<std::pair<std::string, std::string>> segs;
+    char b[64];
+    if (cu >= 0 && ct > 0) {
+        RGB pcol = cp >= 95 ? th.error : cp >= 80 ? th.warning : th.text;
+        std::snprintf(b, sizeof(b), "%d%%", cp < 0 ? 0 : cp);
+        if (compact) {
+            segs.push_back({ fg(th.text_muted) + "ctx " + fg(pcol) + b,
+                             "ctx " + std::string(b) });
+        } else {
+            std::string used = fmt_thousands(cu), tot = fmt_thousands(ct);
+            segs.push_back({
+                fg(th.text_muted) + "ctx " + fg(th.text) + used
+                    + fg(th.text_muted) + " / " + fg(th.text) + tot
+                    + fg(th.text_muted) + " (" + fg(pcol) + b
+                    + fg(th.text_muted) + ")",
+                "ctx " + used + " / " + tot + " (" + b + ")" });
+        }
+    }
+    const bool generating = busy && !compacting && t0 > 0;
+    if (generating) {
+        if (ttok > 0) {
+            std::string n = fmt_thousands(ttok);
+            segs.push_back({ fg(th.text) + n + fg(th.text_muted) + " tok",
+                             n + " tok" });
+        }
+        std::snprintf(b, sizeof(b), "%.1fs", (now_ms() - t0) / 1000.0);
+        segs.push_back({ fg(th.text) + b, b });
+        if (tps > 0.05 && !compact) {
+            std::snprintf(b, sizeof(b), "%.1f t/s", tps);
+            segs.push_back({ fg(th.text) + b, b });
+        }
+    } else if (ltok >= 0) {
+        std::string n = fmt_thousands(ltok);
+        segs.push_back({ fg(th.text_muted) + "last " + fg(th.text) + n
+                             + fg(th.text_muted) + " tok",
+                         "last " + n + " tok" });
+        if (lsecs >= 0) {
+            std::snprintf(b, sizeof(b), "%.1fs", lsecs);
+            segs.push_back({ fg(th.text) + b, b });
+        }
+        if (ltps >= 0 && !compact) {
+            std::snprintf(b, sizeof(b), "%.1f t/s", ltps);
+            segs.push_back({ fg(th.text) + b, b });
+        }
+    }
+    if (segs.empty()) return;
+
+    std::string sty, plain;
+    for (size_t i = 0; i < segs.size(); ++i) {
+        if (i) { sty += fg(th.text_muted) + " · "; plain += " · "; }
+        sty += segs[i].first;
+        plain += segs[i].second;
+    }
+    styled_out = bg(th.bg_element) + " " + sty + " " + RESET;
+    width_out = disp_width(plain) + 2;
+}
+
 std::string render_footer(Ui & ui) {
     const Theme & th = ui.theme;
     std::string cwd = ui.opt.cwd;
@@ -1797,14 +1886,43 @@ std::string render_footer(Ui & ui) {
     right += "  ";
     right += fg(th.text_muted) + "/help" + RESET;
     int rw = styled_width(right);
-    std::string left = fg(th.text_muted)
-        + clip_w(cwd, ui.cols - rw - 2 * kMargin - 2) + RESET;
-    int lw = styled_width(left);
+
+    // usage badge in the center; cwd keeps >= 8 cols on the left.
+    // full → compact → none, whichever fits with 2-space gaps.
+    std::string badge; int bw = 0;
+    auto fits = [&](int w) {
+        return w > 0 && 2 * kMargin + 8 + 2 + w + 2 + rw <= ui.cols;
+    };
+    render_usage_badge(ui, false, badge, bw);
+    if (!fits(bw)) {
+        render_usage_badge(ui, true, badge, bw);
+        if (!fits(bw)) { badge.clear(); bw = 0; }
+    }
+
+    int cwd_max = bw > 0 ? ui.cols - 2 * kMargin - rw - bw - 4
+                         : ui.cols - 2 * kMargin - rw - 2;
+    std::string cl = clip_w(cwd, std::max(4, cwd_max));
+    std::string left = fg(th.text_muted) + cl + RESET;
+    int lw = disp_width(cl);
+
     std::string row(kMargin, ' ');
     row += left;
-    int fill = ui.cols - kMargin - lw - rw - kMargin;
-    if (fill < 1) fill = 1;
-    row += std::string((size_t) fill, ' ');
+    if (bw > 0) {
+        // center on the full terminal width, nudged inward so the
+        // 2-space gaps to cwd and the tools cluster always survive
+        int start = (ui.cols - bw) / 2;
+        const int minstart = kMargin + lw + 2;
+        const int maxstart = ui.cols - kMargin - rw - 2 - bw;
+        if (start < minstart) start = minstart;
+        if (start > maxstart) start = maxstart;
+        row += std::string((size_t)(start - kMargin - lw), ' ');
+        row += badge;
+        row += std::string((size_t)(ui.cols - kMargin - rw - start - bw), ' ');
+    } else {
+        int fill = ui.cols - kMargin - lw - rw - kMargin;
+        if (fill < 1) fill = 1;
+        row += std::string((size_t) fill, ' ');
+    }
     row += right;
     return row;
 }
@@ -2433,6 +2551,7 @@ void note_token_rate(Ui & ui) {
     long long t = now_ms();
     if (ui.tok_t0 == 0) { ui.tok_t0 = t; ui.tok_n = 0; }
     ++ui.tok_n;
+    ++ui.turn_tok;
     long long dt = t - ui.tok_t0;
     if (dt >= 1500) {
         ui.tps = ui.tok_n * 1000.0 / (double) dt;
@@ -2491,8 +2610,17 @@ void install_callbacks(Ui & ui) {
         ui.bump();
     });
     // session checkpoint after every tool round-trip (same contract as
-    // the legacy REPL's on_tool handler).
+    // the legacy REPL's on_tool handler).  Also the earliest moment the
+    // hop's timings are in — refresh the footer ctx gauge here so it
+    // tracks the conversation mid-turn instead of only at turn end.
     cli.on_tool([&ui](const ToolCall &, const ToolResult &) {
+        {
+            std::lock_guard<std::mutex> lk(ui.mu);
+            ui.ctx_pct   = ui.cli->last_ctx_pct();
+            ui.ctx_used  = ui.cli->last_ctx_used();
+            ui.ctx_total = ui.cli->last_n_ctx();
+            ui.bump();
+        }
         if (!ui.hooks.save_session) return;
         std::string err;
         ui.hooks.save_session(&err);  // best-effort; errors surface at turn end
@@ -2572,6 +2700,7 @@ void start_turn(Ui & ui, const std::string & prompt) {
         ui.spin_label = "Thinking";
         ui.thinking_pct = -1;
         ui.tok_t0 = 0; ui.tok_n = 0;
+        ui.turn_t0 = now_ms(); ui.turn_tok = 0;
         Message u;
         u.role = Message::User;
         Part p; p.kind = PartKind::Text; p.text = prompt;
@@ -2614,6 +2743,19 @@ void start_turn(Ui & ui, const std::string & prompt) {
             ui.ctx_pct  = ui.cli->last_ctx_pct();
             ui.ctx_used = ui.cli->last_ctx_used();
             ui.ctx_total= ui.cli->last_n_ctx();
+            // freeze this turn's totals for the idle footer badge.
+            // Server count (predicted_n) wins; the streamed-piece
+            // counter is the fallback for servers without timings.
+            const int    ptok = ui.cli->last_predicted_n();
+            const double pms  = ui.cli->last_predicted_ms();
+            ui.last_tok  = ptok >= 0 ? ptok
+                         : ui.turn_tok > 0 ? ui.turn_tok : -1;
+            ui.last_secs = ui.turn_t0 > 0
+                         ? (now_ms() - ui.turn_t0) / 1000.0 : -1.0;
+            ui.last_tps  = ptok > 0 && pms > 1.0
+                         ? ptok * 1000.0 / pms
+                         : ui.last_tok > 0 && ui.last_secs > 0.05
+                               ? ui.last_tok / ui.last_secs : -1.0;
             ui.bump();
         }
         if (ui.hooks.save_session) {
@@ -2771,6 +2913,8 @@ void run_slash(Ui & ui, const std::string & line) {
             ui.cache.clear();
             ui.ctx_pct = ui.ctx_used = ui.ctx_total = -1;
             ui.tps = 0;
+            ui.turn_t0 = 0; ui.turn_tok = 0;
+            ui.last_tok = -1; ui.last_secs = ui.last_tps = -1.0;
         }
         if (ui.hooks.save_session) {
             std::string err;

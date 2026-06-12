@@ -297,6 +297,8 @@ struct Client::Impl {
     bool        last_was_incomplete = false; // mirror of last turn's timings.incomplete
     int         last_ctx_used       = -1;    // mirror of last turn's timings.ctx_used
     int         last_n_ctx          = -1;    // mirror of last turn's timings.n_ctx
+    int         last_predicted_n    = -1;    // completion tokens, summed across hops
+    double      last_predicted_ms   = -1.0;  // decode wall time (ms), summed across hops
     int         max_tool_hops       = 8;     // agentic loop safety cap; bumped by bash
     int         stop_at_ctx_pct     = 100;   // 0 disables; otherwise abort agentic
                                               // loop when ctx_used/n_ctx >= this %
@@ -514,6 +516,8 @@ struct Client::Impl {
         bool                         incomplete = false;  // mirrors timings.incomplete
         int                          ctx_used   = -1;     // tokens currently in KV
         int                          n_ctx      = -1;     // configured context window
+        int                          predicted_n  = -1;   // completion tokens this hop
+        double                       predicted_ms = -1.0; // decode wall time this hop
     };
 
     bool stream_chat(AssistantTurn & out) {
@@ -656,6 +660,12 @@ struct Client::Impl {
                     }
                     if (tm.contains("n_ctx") && tm["n_ctx"].is_number_integer()) {
                         out.n_ctx = tm["n_ctx"].get<int>();
+                    }
+                    if (tm.contains("predicted_n") && tm["predicted_n"].is_number_integer()) {
+                        out.predicted_n = tm["predicted_n"].get<int>();
+                    }
+                    if (tm.contains("predicted_ms") && tm["predicted_ms"].is_number()) {
+                        out.predicted_ms = tm["predicted_ms"].get<double>();
                     }
                 }
             }
@@ -891,6 +901,8 @@ struct Client::Impl {
     std::string run_chat_loop() {
         last_was_incomplete         = false;
         last_was_ctx_full           = false;
+        last_predicted_n            = -1;
+        last_predicted_ms           = -1.0;
         int incomplete_retries      = 0;
 
         // Snapshot history size before the loop runs. We use this on the
@@ -953,6 +965,17 @@ struct Client::Impl {
                         "[easyai-cli]   content tail: %s\n", tail.c_str());
                 }
             }
+
+            // Accumulate generation stats across hops — including
+            // incomplete-retry re-issues; the decode work happened
+            // either way — so last_predicted_* reflect the whole
+            // chat() call, not just its final hop.
+            if (turn.predicted_n >= 0)
+                last_predicted_n = std::max(0, last_predicted_n)
+                                 + turn.predicted_n;
+            if (turn.predicted_ms >= 0)
+                last_predicted_ms = std::max(0.0, last_predicted_ms)
+                                  + turn.predicted_ms;
 
             // Opt-in retry on incomplete turns.  Discards the bad
             // assistant entry from history (we never push it) and
@@ -1254,6 +1277,8 @@ int      Client::last_ctx_pct()               const  {
     if (pct > 100) pct = 100;
     return pct;
 }
+int      Client::last_predicted_n()           const  { return p_->last_predicted_n; }
+double   Client::last_predicted_ms()          const  { return p_->last_predicted_ms; }
 Client & Client::stop_at_ctx_pct(int pct) {
     if (pct < 0)   pct = 0;
     if (pct > 100) pct = 100;
