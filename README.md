@@ -1362,7 +1362,7 @@ has a matching INI key (see [`easyai-server.md`](easyai-server.md) §1).
 | `--max-tokens N` | 12288 | Cap tokens per request. |
 | `--seed U32` | random | RNG seed (0 = random). |
 | `--max-incomplete-retries N` | 10 | Retry budget for "announce-only" turns; 0 disables. |
-| `-c, --ctx N` | 262144 | Context size. |
+| `-c, --ctx N` | 262144 (binary) / 1048576 (installer INI) | Context size. The systemd installer writes `[ENGINE] context = 1048576` paired with YaRN ×4 over a 128K base; per-model `[MODEL_*]` profiles override it. |
 | `--batch N` | = ctx | Logical batch size. |
 | `--ngl N` | 99 | GPU layers (0 = CPU only). |
 | `--split-mode, -sm MODE` | `none` | Multi-GPU split strategy: `none`, `layer`, `row`, `tensor`. |
