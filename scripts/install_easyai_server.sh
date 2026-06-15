@@ -44,7 +44,7 @@
 #                                                    # hostname (so <host>.local
 #                                                    # — e.g. ai-pro → ai-pro.local)
 #                                                    # ignored under --no-avahi
-#   ./install_easyai_server.sh --ctx-size 32768   # default 100000 (100 K)
+#   ./install_easyai_server.sh --ctx-size 32768   # default 524288 (512 K)
 #   ./install_easyai_server.sh --ngl 99            # GPU layers (-1=auto, 0=CPU)
 #   ./install_easyai_server.sh --no-mlock --use-mmap
 #   ./install_easyai_server.sh --temperature 0.2 --top-k 50 --min-p 0.03
@@ -333,12 +333,12 @@ ini_file="$config_dir/easyai.ini"
 # in /etc, agent-generated state goes in /var/lib (FHS).
 rag_dir="/var/lib/easyai/rag"
 
-# 1 M context window — sized for long agentic flows, deep research,
-# and whole-codebase work on the AI box.  Paired with --rope-scaling
-# yarn + --rope-scale 4 + --yarn-orig-ctx 131072 to extend models
-# trained at 128 K (per-model [MODEL_*] profiles override both knobs
-# for models that want different scaling).  Override with --ctx-size.
-ctx_size=1048576
+# 512 K context window — sized for long agentic flows, deep research,
+# and whole-codebase work on the AI box.  Exactly the window a 128 K-
+# trained model reaches under the --rope-scaling yarn + --rope-scale 4
+# + --yarn-orig-ctx 131072 defaults below (128 K × 4 = 512 K).  The
+# shipped [MODEL_*] profiles inherit this; override with --ctx-size.
+ctx_size=524288
 # --ngl 99: force all layers onto GPU.  The research/coding agent
 # workload assumes a GPU with enough VRAM to hold the full model.
 # Use --ngl -1 for auto-fit or --ngl 0 for CPU-only.
@@ -395,9 +395,9 @@ no_mmap=1
 http_timeout=86400
 # RoPE / YaRN context extension — needed when ctx_size exceeds the
 # model's native training context. "yarn" scaling with scale=4 and
-# yarn_orig_ctx=131072 stretches a 128K-trained model toward the 1M
-# ctx_size above; per-model [MODEL_*] profiles pick their own scale
-# (e.g. ×8 for the Huihui / Gemma-4 profiles).
+# yarn_orig_ctx=131072 stretches a 128K-trained model to the 512K
+# ctx_size above (128K × 4). The shipped [MODEL_*] profiles inherit
+# these; uncomment a profile's knobs to scale it differently.
 rope_scaling="yarn"
 rope_freq_scale="4"
 yarn_orig_ctx=131072
@@ -1568,9 +1568,9 @@ split_mode       = $split_mode
 
 # RoPE / YaRN context extension — required when ctx exceeds the model's
 # native training context. "yarn" scaling with rope_freq_scale=4 and
-# yarn_orig_ctx=131072 stretches a 128K-trained model toward the 1M
-# context above. Per-model [MODEL_*] sections override all three when
-# a model wants different scaling (see the profiles below).
+# yarn_orig_ctx=131072 stretches a 128K-trained model to the 512K
+# context above (128K × 4). Per-model [MODEL_*] sections may override
+# all three; the shipped profiles inherit them for a uniform 512K.
 rope_scaling      = $rope_scaling
 rope_freq_scale   = $rope_freq_scale
 yarn_orig_ctx     = $yarn_orig_ctx
@@ -1694,7 +1694,8 @@ repeat_penalty   = 1.04
 presence_penalty = 0.1
 frequency_penalty = 0.05
 max_tokens       = 12288
-context          = 128000
+# context + YaRN inherit [ENGINE] (512K via 128K × 4) — uncomment to pin.
+#context          = 128000
 cache_type_k     = q8_0
 cache_type_v     = q8_0
 #rope_scaling     = yarn
@@ -1702,9 +1703,9 @@ cache_type_v     = q8_0
 #yarn_orig_ctx    = 131072
 
 # Abliterated Qwen3-Coder-Next variant (Huihui). Fully pinned in RAM
-# (mlock + no_mmap), ×8 YaRN over the 128K base for the full 1M
-# [ENGINE] window, n-gram self-speculation, creative-leaning sampling
-# with a strong presence penalty as the anti-loop net.
+# (mlock + no_mmap), n-gram self-speculation, creative-leaning sampling
+# with a strong presence penalty as the anti-loop net. Context/YaRN
+# inherit [ENGINE] (512K via 128K × 4) — see commented overrides below.
 [MODEL_Huihui-Qwen3-Coder-Next]
 alias            = Huihui-Qwen3-Coder-Next+
 flash_attn       = on
@@ -1714,9 +1715,11 @@ mlock            = on
 no_mmap          = on
 split_mode       = none
 
-rope_scaling      = yarn
-rope_freq_scale   = 8
-yarn_orig_ctx     = 131072
+# Context + YaRN inherit [ENGINE] (512K via 128K × 4). Uncomment and
+# set rope_freq_scale = 8 to pin this profile back to the full 1M window.
+#rope_scaling      = yarn
+#rope_freq_scale   = 8
+#yarn_orig_ctx     = 131072
 
 spec_type        = ngram-cache
 spec_draft_n_max = 2
@@ -1730,9 +1733,9 @@ presence_penalty = 1.5
 frequency_penalty = 0.05
 max_tokens       = 12288
 
-# Gemma-4 — same fully-pinned posture as the Huihui profile: ×8 YaRN
-# over a 128K base, n-gram self-speculation, creative sampling with
-# the presence-penalty anti-loop net.
+# Gemma-4 — same fully-pinned posture as the Huihui profile: n-gram
+# self-speculation, creative sampling with the presence-penalty
+# anti-loop net. Context/YaRN inherit [ENGINE] (512K via 128K × 4).
 [MODEL_Gemma-4]
 alias            = Gemma-4
 flash_attn       = on
@@ -1742,9 +1745,11 @@ mlock            = on
 no_mmap          = on
 split_mode       = none
 
-rope_scaling      = yarn
-rope_freq_scale   = 8
-yarn_orig_ctx     = 131072
+# Context + YaRN inherit [ENGINE] (512K via 128K × 4). Uncomment and
+# set rope_freq_scale = 8 to pin this profile back to the full 1M window.
+#rope_scaling      = yarn
+#rope_freq_scale   = 8
+#yarn_orig_ctx     = 131072
 
 spec_type        = ngram-cache
 spec_draft_n_max = 2
@@ -1771,7 +1776,8 @@ repeat_penalty   = 1.0
 presence_penalty = 0.0
 frequency_penalty = 0.05
 max_tokens       = 12288
-context          = 128000
+# context + YaRN inherit [ENGINE] (512K via 128K × 4) — uncomment to pin.
+#context          = 128000
 cache_type_k     = bf16
 cache_type_v     = q8_0
 #rope_scaling     = yarn
