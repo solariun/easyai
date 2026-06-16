@@ -452,6 +452,66 @@ command is running and resumes `waitpid` on EINTR.
 
 Green `●` icon (same style as tool-call success markers in streaming output).
 
+## Markdown table rendering (2026-06-15)
+
+The CLI renders GitHub-flavoured markdown tables in the model's streamed
+reply as aligned Unicode box-drawing tables. Implemented in
+`easyai::ui::MdTableStream` (`include/easyai/ui.hpp` + `src/ui.cpp`) and
+wired onto the content stream inside `easyai::ui::Streaming` — so it
+benefits every `Streaming` consumer (currently `easyai-cli`).
+
+### Streaming contract
+
+Token output must keep streaming, but a table cannot be laid out until
+every row is known (column widths span all rows). Resolution: the filter
+is **line-oriented and selective** — only a line whose first non-blank
+character is `|` is held back. Everything else streams token-by-token,
+unchanged.
+
+State machine over completed lines (`State::NORMAL → HEADER_SEEN → IN_TABLE`):
+
+| State | Next line | Action |
+|---|---|---|
+| NORMAL | row candidate (`\|…`) | stash as header, → HEADER_SEEN |
+| NORMAL | anything else | emit immediately (prose streams) |
+| HEADER_SEEN | separator row (`\|:?-+:?\|…`) | → IN_TABLE (header + separator buffered) |
+| HEADER_SEEN | not a separator | false alarm: emit stashed header raw, reprocess line |
+| IN_TABLE | row candidate | append to table |
+| IN_TABLE | anything else | render the buffered table, reprocess line |
+
+A trailing partial line (no `\n` yet) is held only when it could belong
+to a table (mid-table, starts like a row, or is leading whitespace);
+otherwise it streams at once, preserving the token-by-token feel for
+prose.
+
+### Flush points
+
+The buffered table is drained (`Streaming::flush_pending()` →
+`MdTableStream::flush()`) at every content-stream boundary:
+
+- **end of turn** — `run_one()` calls `flush_pending()` after `chat()`
+  returns, before `spinner.finish()` (covers a table that is the last
+  thing in the reply).
+- **content → reasoning** — `emit_reason_()` flushes first.
+- **content → tool marker** — `on_tool_()` flushes first.
+
+### Rendering
+
+- Columns sized to the widest cell; width counts UTF-8 code points
+  (continuation bytes `0b10xxxxxx` skipped), so accented Latin text
+  aligns. CJK double-width glyphs are undercounted (accepted edge).
+- Alignment from the separator row: `:--` left, `--:` right, `:-:`
+  centre, `---` left (GFM default).
+- Header cells bold; box-drawing borders (`┌┬┐├┼┤└┴┘─│`) dim.
+- `\|` inside a cell is an escaped literal pipe.
+
+### Colour-off passthrough
+
+When `Style::color` is false (non-TTY stdout or `NO_COLOR`),
+`MdTableStream` is a **pure passthrough**: raw markdown is emitted
+unchanged so piped output / captured logs stay valid markdown. No
+buffering occurs in this mode.
+
 ## Spinner Transition Report
 
 When the spinner transitions FROM token-streaming mode (showing tk/s) TO

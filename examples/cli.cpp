@@ -2030,6 +2030,10 @@ int run_one(easyai::Client & cli, easyai::Plan & plan,
     g_in_chat.store(false, std::memory_order_relaxed);
 
     spinner.set_thinking(false);
+    // Render any markdown table that was still buffered when the turn
+    // ended (a table is the last thing in the reply, so no following
+    // non-table line triggered its render mid-stream).
+    streaming.flush_pending();
     spinner.stop_heartbeat();
     spinner.finish();
     std::fputc('\n', stdout);

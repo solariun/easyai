@@ -8,11 +8,14 @@
 #include "easyai/tool.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
+#include <string>
 #include <string_view>
 #include <unistd.h>
+#include <vector>
 
 namespace easyai::ui {
 
@@ -427,23 +430,277 @@ void print_tool_row(const std::string & name,
     }
 }
 
+// ---------------------------------------------------------------- Markdown tables
+namespace {
+
+// Visible width: count UTF-8 code points (skip 0b10xxxxxx continuation
+// bytes).  Good enough for Latin / accented text; CJK double-width
+// glyphs are undercounted, an accepted edge for a terminal table.
+std::size_t disp_width(const std::string & s) {
+    std::size_t w = 0;
+    for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++w;
+    return w;
+}
+
+std::string md_rstrip_nl(std::string s) {
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    return s;
+}
+
+std::string md_trim(const std::string & s) {
+    std::size_t a = 0, b = s.size();
+    while (a < b && (s[a] == ' ' || s[a] == '\t')) ++a;
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t')) --b;
+    return s.substr(a, b - a);
+}
+
+bool md_is_blank(const std::string & s) {
+    for (char c : s) if (c != ' ' && c != '\t') return false;
+    return true;
+}
+
+// A line is a table-row candidate iff its first non-blank char is `|`.
+// This is the leading-pipe GFM form LLMs emit; restricting to it keeps
+// prose (which may contain an inline `a | b`) streaming uninterrupted.
+bool md_is_row(const std::string & line) {
+    std::size_t i = 0;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    return i < line.size() && line[i] == '|';
+}
+
+// Split a `| a | b |` row into trimmed cells, dropping the bordering
+// pipes and honouring a `\|` escape inside a cell.
+std::vector<std::string> md_cells(const std::string & line) {
+    std::string s = md_trim(md_rstrip_nl(line));
+    if (!s.empty() && s.front() == '|') s.erase(0, 1);
+    if (!s.empty() && s.back()  == '|') s.pop_back();
+    std::vector<std::string> out;
+    std::string cur;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '\\' && i + 1 < s.size() && s[i + 1] == '|') {
+            cur.push_back('|');
+            ++i;
+        } else if (c == '|') {
+            out.push_back(md_trim(cur));
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    out.push_back(md_trim(cur));
+    return out;
+}
+
+// A separator row: every cell is `:?-+:?` (e.g. ---, :--, --:, :-:).
+bool md_is_separator(const std::string & line) {
+    std::vector<std::string> cells = md_cells(line);
+    if (cells.empty()) return false;
+    for (const std::string & c : cells) {
+        std::size_t i = 0, n = c.size();
+        if (n == 0) return false;
+        if (c[i] == ':') ++i;
+        std::size_t dashes = 0;
+        while (i < n && c[i] == '-') { ++i; ++dashes; }
+        if (i < n && c[i] == ':') ++i;
+        if (i != n || dashes == 0) return false;
+    }
+    return true;
+}
+
+// Alignment from a separator cell: 'l' left (default), 'r' right, 'c' centre.
+char md_align(const std::string & c) {
+    bool l = !c.empty() && c.front() == ':';
+    bool r = !c.empty() && c.back()  == ':';
+    if (l && r) return 'c';
+    if (r)      return 'r';
+    return 'l';
+}
+
+std::string md_pad(const std::string & s, std::size_t width, char align) {
+    std::size_t w   = disp_width(s);
+    std::size_t pad = width > w ? width - w : 0;
+    if (align == 'r') return std::string(pad, ' ') + s;
+    if (align == 'c') { std::size_t l = pad / 2; return std::string(l, ' ') + s + std::string(pad - l, ' '); }
+    return s + std::string(pad, ' ');
+}
+
+// Render rows[0]=header, rows[1]=separator, rows[2..]=body as a boxed,
+// column-aligned table.  Only called in colour mode (see MdTableStream).
+std::string render_md_table(const std::vector<std::string> & rows, const Style & st) {
+    std::vector<std::string>              header = md_cells(rows[0]);
+    std::vector<std::string>              sep    = md_cells(rows[1]);
+    std::vector<std::vector<std::string>> body;
+    for (std::size_t i = 2; i < rows.size(); ++i) body.push_back(md_cells(rows[i]));
+
+    std::size_t ncols = header.size();
+    for (const auto & b : body) ncols = std::max(ncols, b.size());
+    if (ncols == 0) return std::string();
+
+    std::vector<char>        aligns(ncols, 'l');
+    for (std::size_t c = 0; c < ncols && c < sep.size(); ++c) aligns[c] = md_align(sep[c]);
+
+    std::vector<std::size_t> w(ncols, 1);
+    for (std::size_t c = 0; c < ncols; ++c) {
+        std::size_t mx = c < header.size() ? disp_width(header[c]) : 0;
+        for (const auto & b : body) if (c < b.size()) mx = std::max(mx, disp_width(b[c]));
+        w[c] = std::max<std::size_t>(mx, 1);
+    }
+
+    const std::string bar = std::string(st.dim()) + "│" + st.reset();
+    auto hbar = [&](const char * l, const char * m, const char * r) {
+        std::string s = st.dim();
+        s += l;
+        for (std::size_t c = 0; c < ncols; ++c) {
+            for (std::size_t k = 0; k < w[c] + 2; ++k) s += "─";
+            s += (c + 1 < ncols) ? m : r;
+        }
+        s += st.reset();
+        s += "\n";
+        return s;
+    };
+    auto rowline = [&](const std::vector<std::string> & cells, bool head) {
+        std::string s;
+        for (std::size_t c = 0; c < ncols; ++c) {
+            std::string cell = c < cells.size() ? cells[c] : std::string();
+            std::string p    = md_pad(cell, w[c], aligns[c]);
+            s += bar;
+            s += " ";
+            if (head) { s += st.bold(); s += p; s += st.reset(); }
+            else      { s += p; }
+            s += " ";
+        }
+        s += bar;
+        s += "\n";
+        return s;
+    };
+
+    std::string out;
+    out += hbar("┌", "┬", "┐");
+    out += rowline(header, true);
+    out += hbar("├", "┼", "┤");
+    for (const auto & b : body) out += rowline(b, false);
+    out += hbar("└", "┴", "┘");
+    return out;
+}
+
+}  // namespace
+
+std::string MdTableStream::step_line_(const std::string & line) {
+    switch (state_) {
+    case State::NORMAL:
+        if (md_is_row(line)) {
+            rows_.clear();
+            rows_.push_back(line);
+            state_ = State::HEADER_SEEN;
+            return std::string();
+        }
+        return line;
+    case State::HEADER_SEEN:
+        if (md_is_separator(line)) {
+            rows_.push_back(line);
+            state_ = State::IN_TABLE;
+            return std::string();
+        } else {
+            // Header candidate was a false alarm — emit it raw, then
+            // reprocess this line from the neutral state.
+            std::string out = rows_.empty() ? std::string() : rows_[0];
+            rows_.clear();
+            state_ = State::NORMAL;
+            out += step_line_(line);
+            return out;
+        }
+    case State::IN_TABLE:
+        if (md_is_row(line)) {
+            rows_.push_back(line);
+            return std::string();
+        } else {
+            std::string out = render_md_table(rows_, st_);
+            rows_.clear();
+            state_ = State::NORMAL;
+            out += step_line_(line);
+            return out;
+        }
+    }
+    return std::string();
+}
+
+std::string MdTableStream::finalize_() {
+    std::string out;
+    if (state_ == State::IN_TABLE)                          out = render_md_table(rows_, st_);
+    else if (state_ == State::HEADER_SEEN && !rows_.empty()) out = rows_[0];
+    rows_.clear();
+    state_ = State::NORMAL;
+    return out;
+}
+
+std::string MdTableStream::feed(const std::string & seg) {
+    if (!color_) return seg;
+    pending_ += seg;
+    std::string out;
+    for (;;) {
+        std::size_t nl = pending_.find('\n');
+        if (nl == std::string::npos) {
+            // Incomplete trailing line.  Hold it only if it could belong
+            // to a table (we're already inside one, or it starts like a
+            // row, or it's leading whitespace that might precede a row);
+            // otherwise stream the prose immediately.
+            if (state_ != State::NORMAL || md_is_row(pending_) || md_is_blank(pending_))
+                break;
+            out += pending_;
+            pending_.clear();
+            break;
+        }
+        std::string line = pending_.substr(0, nl + 1);
+        pending_.erase(0, nl + 1);
+        out += step_line_(line);
+    }
+    return out;
+}
+
+std::string MdTableStream::flush() {
+    if (!color_) return std::string();
+    std::string out;
+    if (!pending_.empty()) {
+        out += step_line_(pending_);   // fold the trailing partial as a final line
+        pending_.clear();
+    }
+    out += finalize_();
+    return out;
+}
+
 // ---------------------------------------------------------------- Streaming
 Streaming::Streaming(Spinner & spinner, StreamStats & stats, const Style & style)
-    : spinner_(spinner), stats_(stats), style_(style) {}
+    : spinner_(spinner), stats_(stats), style_(style), md_(style) {}
 
 Streaming & Streaming::show_reasoning(bool v) { show_reasoning_ = v; return *this; }
 Streaming & Streaming::verbose       (bool v) { verbose_        = v; return *this; }
 
 void Streaming::emit_content_(const std::string & seg) {
     if (seg.empty()) return;
-    std::string out = seg;
-    if (last_kind_ == StreamKind::REASON) out.insert(0, "\n");
+    std::string in = seg;
+    if (last_kind_ == StreamKind::REASON) in.insert(0, "\n");
     last_kind_ = StreamKind::CONTENT;
-    spinner_.write(out);
+    // Run the content through the markdown-table filter: prose passes
+    // straight through, table blocks are buffered and rendered once
+    // complete.  flush_md_() (end of turn / reasoning / tool boundary)
+    // drains anything still buffered.
+    std::string out = md_.feed(in);
+    if (!out.empty()) spinner_.write(out);
 }
+
+void Streaming::flush_md_() {
+    std::string out = md_.flush();
+    if (!out.empty()) spinner_.write(out);
+}
+
+void Streaming::flush_pending() { flush_md_(); }
 
 void Streaming::emit_reason_(const std::string & seg) {
     if (seg.empty()) return;
+    // Reasoning interrupts the content stream — close any open table
+    // first so it renders above the reasoning rather than swallowing it.
+    flush_md_();
     if (show_reasoning_) {
         std::string buf;
         buf.reserve(seg.size() + 16);
@@ -570,6 +827,9 @@ void Streaming::on_reason_(const std::string & piece_in) {
 }
 
 void Streaming::on_tool_(const ToolCall & call, const ToolResult & result) {
+    // A tool marker interrupts the content stream — render any buffered
+    // table before the ●/✗ line so the table doesn't absorb it.
+    flush_md_();
     spinner_.emit_speed_report();
     spinner_.set_thinking(false);
     ++stats_.tool_calls;

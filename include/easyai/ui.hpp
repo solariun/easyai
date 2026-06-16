@@ -14,6 +14,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace easyai::ui {
 
@@ -240,6 +241,49 @@ struct ToolResult;
 
 namespace easyai::ui {
 
+// MdTableStream — buffers GitHub-flavoured markdown tables out of a
+// content token stream and renders them as aligned Unicode box-drawing
+// tables.  Everything else passes straight through, so normal prose
+// still streams token-by-token: only a contiguous table block (a row
+// starting with `|`, immediately followed by a `---` separator row) is
+// held back until it is complete, because column widths need every row.
+//
+// When the Style has colour off (piped stdout / NO_COLOR) the stream is
+// a pure pass-through — the raw markdown is emitted unchanged so a
+// downstream markdown processor or a captured log keeps valid input.
+//
+// Usage mirrors text::ThinkStripper: feed() per content piece, flush()
+// once at end of the content block (end of turn, or before reasoning /
+// a tool marker interrupts the stream).
+class MdTableStream {
+public:
+    explicit MdTableStream(const Style & st) : st_(st), color_(st.color) {}
+
+    // Bytes ready to print now: prose flushed immediately, completed
+    // tables rendered.  Bytes belonging to an in-progress table block
+    // are buffered internally and returned later by a subsequent feed()
+    // (once the block closes) or by flush().
+    std::string feed(const std::string & seg);
+
+    // Render/emit anything still buffered — a table at end of stream, or
+    // a held partial line — and reset to the neutral state.
+    std::string flush();
+
+private:
+    enum class State { NORMAL, HEADER_SEEN, IN_TABLE };
+
+    // Process one input line (kept verbatim, trailing '\n' optional).
+    std::string step_line_(const std::string & line);
+    // Render/emit the currently buffered table block.
+    std::string finalize_();
+
+    const Style &            st_;
+    bool                     color_;
+    State                    state_ = State::NORMAL;
+    std::string              pending_;  // unprocessed tail (current line)
+    std::vector<std::string> rows_;     // raw table lines (header, sep, body…)
+};
+
 // Streaming — fluent helper that wires the canonical SSE/agent-loop
 // streaming UX onto an Engine, Client, or Plan: spinner-locked content
 // writes, dimmed reasoning, tool-call markers (🔧/✗), per-piece
@@ -282,6 +326,12 @@ public:
     //   });
     void notify_tool(const ToolCall & call, const ToolResult & result);
 
+    // Render any markdown table still buffered in the content stream.
+    // MUST be called once after the turn's chat() returns (and is also
+    // called internally on the content→reasoning / content→tool
+    // boundaries) so a table that ends the turn is not left unrendered.
+    void flush_pending();
+
 private:
     // Helpers shared between Engine/Client attach paths.
     void on_token_(const std::string & piece);
@@ -296,11 +346,15 @@ private:
     void emit_content_(const std::string & seg);
     void emit_reason_ (const std::string & seg);
 
-    Spinner &     spinner_;
-    StreamStats & stats_;
-    const Style & style_;
-    bool          show_reasoning_ = true;
-    bool          verbose_        = false;
+    // Drain the markdown-table buffer to the spinner (no-op when empty).
+    void flush_md_();
+
+    Spinner &      spinner_;
+    StreamStats &  stats_;
+    const Style &  style_;
+    MdTableStream  md_;            // markdown table renderer on the content stream
+    bool           show_reasoning_ = true;
+    bool           verbose_        = false;
 
     // Tracks which stream emitted last so we can insert a newline on
     // the reasoning↔content transition (otherwise the two glue
