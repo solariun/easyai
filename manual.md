@@ -538,10 +538,10 @@ against the process's cwd).  `--allow-bash` adds the shell tool,
 also pinned to `<dir>` when `--sandbox` is set.  All three default
 OFF — fresh installs don't expose write access or shell to the
 model until the operator
-opts in. Note that `--sandbox <dir>` alone does NOT register fs_*;
+opts in. Note that `--sandbox <dir>` alone does NOT register *_file;
 prior versions implied it but as of 2026-05-08 the flags are
 honoured independently so an operator can run with a sandbox
-boundary and no fs_* registered.
+boundary and no *_file registered.
 
 If you pass `-s system.txt`, that text becomes the default system
 prompt for any request that doesn't already include one.
@@ -2575,7 +2575,7 @@ to "verify first."
 
 ### 5.5 Sandboxing
 
-The built-in `fs_*` family takes a root directory and refuses to
+The built-in `*_file` family takes a root directory and refuses to
 escape it (`..` and absolute paths are rejected).  The check is
 **path-component aware** — a sandbox at `/srv/user` rejects
 `/srv/userMALICIOUS/secret` (no string-prefix match). Symlinks
@@ -2833,7 +2833,7 @@ The installer writes these as commented-out examples in
 ### 6.5 Backups
 
 Stateless except for whatever you put in `/var/lib/easyai/`
-(model files, sandboxed fs_* roots).  Snapshot that directory.
+(model files, sandboxed *_file roots).  Snapshot that directory.
 
 ---
 
@@ -2974,7 +2974,7 @@ thinking models that otherwise rephrase the same intent before
 acting.  It works for short turns.  On *long agentic flows* (10+
 tool hops) it starts misfiring — by the fifth `fs_read_file` call
 the literal tokens of the tool name fall inside the window, the
-model paraphrases ("read_file", "read_fs"), the dispatcher fails
+model paraphrases ("read_file", "read_file"), the dispatcher fails
 with "unknown tool".
 
 `frequency_penalty` (default `0.05`) applies an additive cost
@@ -3445,7 +3445,7 @@ If you want to go deeper:
 * `include/easyai/plan.hpp` — `Plan` checklist + `Plan::tool()`
   factory.
 * `include/easyai/builtin_tools.hpp` — factories for `datetime`,
-  `search_web`, `fetch_web`, `fs_*`.
+  `search_web`, `fetch_web`, `*_file`.
 * `include/easyai/presets.hpp` — sampling presets and the runtime
   override parser (`/temp`, `creative 0.9`, …).
 * `src/engine.cpp` — the `chat()` loop is annotated step by step;

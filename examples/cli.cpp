@@ -597,8 +597,8 @@ struct Options {
     std::set<std::string> tools_enabled;       // empty = all defaults
     std::string external_tools_dir;            // dir of EASYAI-*.tools files
     std::string rag_dir;                        // optional RAG persistent-registry dir
-    // Default "split": focused one-verb-per-tool surfaces (read_fs,
-    // edit_fs, learning_knowledge, …) instead of the legacy single dispatcher
+    // Default "split": focused one-verb-per-tool surfaces (read_file,
+    // edit_file, learning_knowledge, …) instead of the legacy single dispatcher
     // (fs(action="read"), …). Smaller / quantised tool-callers
     // dispatch much more reliably against the split shape; large
     // models handle either. Pass --tools-mode unified to opt back into
@@ -864,7 +864,7 @@ void usage(const char * argv0) {
 "    --tools-mode MODE          how the multi-action tool families (fs, web,\n"
 "                                 knowledge) are exposed to the model:\n"
 "                                   \"split\"  — one focused tool per action\n"
-"                                     (read_fs, edit_fs, glob_fs, …, search_web,\n"
+"                                     (read_file, edit_file, glob_file, …, search_web,\n"
 "                                     fetch_web, learning_knowledge, …); flat schemas,\n"
 "                                     no \"unknown action\" failure mode. DEFAULT\n"
 "                                     since 2026-05-15 — works reliably across\n"
@@ -1612,7 +1612,7 @@ void register_tools(easyai::Client & cli,
 
     // fs — scoped to --sandbox if given, otherwise CWD. Unified
     // dispatcher (`fs(action="...")`) and/or focused per-action tools
-    // (`read_fs`, `edit_fs`, …) per --tools-mode.
+    // (`read_file`, `edit_file`, …) per --tools-mode.
     const std::string root = o.sandbox.empty() ? "." : o.sandbox;
     if (wants("fs")) {
         if (tm_unified) cli.add_tool(easyai::tools::fs(root));
@@ -1749,7 +1749,7 @@ void register_tools(easyai::Client & cli,
     }
 
     // tool_lookup MUST be registered last so the snapshot it returns
-    // covers every other tool (built-ins, plan, fs_*, bash, RAG,
+    // covers every other tool (built-ins, plan, *_file, bash, RAG,
     // external-tools manifests).  The factory captures a getter that
     // re-reads cli.tools() at every call, so even tools registered
     // dynamically (e.g. webui-side runtime additions) show up.
@@ -2682,9 +2682,8 @@ int main(int argc, char ** argv) {
                 "schema for this session — the AVAILABLE TOOLS block "
                 "is the authoritative catalogue. Do NOT invent tools. "
                 "Do NOT call paraphrases of names you remember from "
-                "other systems (`read_file` is not the same as the "
-                "filesystem tool you actually have; `shell` is not "
-                "the same as `bash`). When unsure of a name, call "
+                "other systems (`shell` is not the same as `bash`). "
+                "When unsure of a name, call "
                 "`tool_lookup` first — a no-match result is "
                 "authoritative.\n"
                 "\n"
@@ -2727,7 +2726,7 @@ int main(int argc, char ** argv) {
                     env.date = db;
             }
             prefix += easyai::preamble::env_block(env);
-            prefix += "fs_* tools' virtual `/` maps to the working "
+            prefix += "*_file tools' virtual `/` maps to the working "
                       "directory above; bash runs with it as cwd.\n";
         }
         if (any_fs_like || !o.no_plan) {

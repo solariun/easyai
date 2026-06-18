@@ -198,7 +198,7 @@ roughly:
 | `/etc/easyai/favicon[.ext]` | root:easyai | 644 | optional webui favicon |
 | `/var/lib/easyai/` | easyai:easyai | 750 | mutable agent state |
 | `/var/lib/easyai/rag/` | easyai:easyai | 750 | `memory` tool long-term store |
-| `/var/lib/easyai/workspace/` | easyai:easyai | 750 | sandbox for fs_* and bash tools |
+| `/var/lib/easyai/workspace/` | easyai:easyai | 750 | sandbox for *_file and bash tools |
 | `/var/lib/easyai/models/` | easyai:easyai | 750 | the GGUF symlink target |
 | `/etc/systemd/system/easyai-server.service` | root:root | 644 | the unit file |
 | `/etc/systemd/system/easyai-server.service.d/override.conf` | root:root | 644 | LimitMEMLOCK / LimitCORE / Environment overrides |
@@ -485,7 +485,7 @@ swap.
 | Dir | What lives here | Watch out for |
 | --- | --- | --- |
 | `/var/lib/easyai/models/` | GGUF symlink target. The unit's `-m` arg points here. | Big files. Easy to fill the disk. |
-| `/var/lib/easyai/workspace/` | The sandbox for `bash` / `fs_*` tools. | The agent reads / writes here. Keep it on a partition with room. |
+| `/var/lib/easyai/workspace/` | The sandbox for `bash` / `*_file` tools. | The agent reads / writes here. Keep it on a partition with room. |
 | `/var/lib/easyai/rag/` | The `memory` tool's long-term store (one `.md` per entry). | Tiny. Backup-friendly. See `RAG.md`. |
 | `/etc/easyai/external-tools/` | Operator-defined tools (`EASYAI-*.tools`). | Operator-curated. See `EXTERNAL_TOOLS.md`. |
 
@@ -793,7 +793,7 @@ sudo -u easyai easyai-server --config /etc/easyai/easyai.ini \
                              --show-system-prompt | grep -E 'bash|fs_'
 ```
 
-If you see `bash` / `fs_*` listed and the corresponding INI flag is
+If you see `bash` / `*_file` listed and the corresponding INI flag is
 `off`, edit `system.txt` to drop those lines.
 
 ### Webui blank / shows yesterday's UI

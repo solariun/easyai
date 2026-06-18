@@ -163,7 +163,7 @@ ci       = THIRD-TOKEN
 
 512 worker threads, 384 in-flight `tools/call` cap (leaves 128
 threads for cheap methods + one-off probes), Bearer required on every
-endpoint. fs_* enabled, bash deliberately off (this is multi-tenant —
+endpoint. *_file enabled, bash deliberately off (this is multi-tenant —
 prefer focused external-tools manifests).
 
 #### Disable MCP auth temporarily for one-off debug
@@ -256,7 +256,7 @@ populates it with:
      READ-ONLY on disk, FORBIDDEN to do subprocess/network/ctypes.
    - The filesystem tool(s) listed in `tools/list` are the
      authoritative writer (`fs(action=...)` in Unified mode, the
-     `write_fs`/`edit_fs`/... family in Split mode).
+     `write_file`/`edit_file`/... family in Split mode).
    - **Read-before-write** (2026-06-12): an EXISTING file must first
      be read with the filesystem read tool in this session before a
      write/edit on it is accepted; blind overwrites come back as an
@@ -315,7 +315,7 @@ pool. Default pool size is **256** workers; configurable via
 `--threads N` or `[SERVER] threads = N`. The bottleneck on real
 workloads is the tools themselves (libcurl outbound for `web_*`,
 `fork`+`execve` for `bash` / external-tools, disk for the `memory`
-tool / fs_*), not the dispatcher — so a few hundred workers is plenty
+tool / *_file), not the dispatcher — so a few hundred workers is plenty
 for most deployments.
 
 Resource note: each pthread on Linux/glibc costs ~8 MiB of *virtual*
@@ -682,7 +682,7 @@ the agent process can do.
 | Serves a webui? | Yes (embedded SvelteKit) | No |
 | Speaks `/mcp` (JSON-RPC 2.0)? | Yes | Yes |
 | Designed for thousands of parallel MCP clients? | No (single engine, mutex-serialised) | Yes (256+ workers, in-flight limiter) |
-| `knowledge_*` tools, external-tools, fs_*, bash | Yes | Yes (same factories) |
+| `knowledge_*` tools, external-tools, *_file, bash | Yes | Yes (same factories) |
 | systemd unit ships with the installer | Yes (`scripts/install_easyai_server.sh`) | No (run under your own supervisor) |
 | Right binary when… | …you want one process to BOTH chat AND expose tools to other AI apps | …you want a dedicated tool API for thousands of parallel clients without the model in the loop |
 

@@ -361,7 +361,7 @@ wrong thing.  Examples we hit in production:
 * The model has called `fs(action="read")` four times. On the fifth
   call, the literal tokens for the tool name are inside the
   recent-token window.  `repeat_penalty` discounts them.  The model
-  substitutes a paraphrase — `read_file`, `read_fs`, `read` — which
+  substitutes a paraphrase — `read_file`, `read_file`, `read` — which
   doesn't match any registered tool and causes an "unknown tool"
   failure.
 * During a long planning section, the model has used the word
@@ -2109,7 +2109,7 @@ The following code paths are **stack-safe** under any input:
 
 ### 10.4  Open risks — HIGH
 
-#### 10.4.1  `grep_fs` accepts an LLM-supplied regex
+#### 10.4.1  `grep_file` accepts an LLM-supplied regex
 
 **Site:** `src/builtin_tools.cpp:685–688`.
 
@@ -2129,7 +2129,7 @@ Patterns like `(a+)+$` against `"aaaaaa…b"` cause classical
 catastrophic backtracking → stack overflow → SIGSEGV — the same
 class of bug as the `strip_html` incident.
 
-**Why we haven't fixed yet:** ripping `std::regex` out of `grep_fs`
+**Why we haven't fixed yet:** ripping `std::regex` out of `grep_file`
 means re-implementing meaningful subset of regex (alternation,
 quantifiers, character classes) by hand, or pulling in a non-
 backtracking engine (RE2, Hyperscan).  Tracked as work.
@@ -2139,12 +2139,12 @@ backtracking engine (RE2, Hyperscan).  Tracked as work.
   bombs but not all).
 * Run `regex_search` in a worker thread with a hard timeout.
 * Switch the tool's grammar to **glob-only** (no regex), like
-  `glob_fs`.  The agent loses substring-regex power but gains
+  `glob_file`.  The agent loses substring-regex power but gains
   bounded execution time.
 * Pull in Google's RE2 (no backtracking, linear time, separate
   compile-time dep).  This is the right long-term answer.
 
-Until one of those lands, **`grep_fs` is unsafe in adversarial
+Until one of those lands, **`grep_file` is unsafe in adversarial
 multi-tenant deployments**.  In single-user mode it's still
 practical because the operator chose to run it.
 
@@ -2328,7 +2328,7 @@ following rules apply to all easyai source from this point on:
 
 | Priority | Item                                                                                  |
 |----------|---------------------------------------------------------------------------------------|
-| HIGH     | Replace `std::regex` in `grep_fs` with RE2 or restrict to glob-only matching         |
+| HIGH     | Replace `std::regex` in `grep_file` with RE2 or restrict to glob-only matching         |
 | HIGH     | Add SAX-based depth-bounded parser for HTTP `req.body` JSON                          |
 | MEDIUM   | Rewrite `search_web`'s DDG result extraction as a forward-only scanner               |
 | LOW      | Add a fuzz harness against `strip_html` and `recover_qwen_tool_calls` (libfuzzer)    |

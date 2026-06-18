@@ -148,7 +148,7 @@ std::string cite_sources_block(bool has_memory = true);
 //
 // env_block: machine-context header for coding sessions — working
 // directory, platform, git-repo flag, date. Models without this waste
-// the first hop on `pwd` / `cwd_fs`; with it they path correctly from
+// the first hop on `pwd` / `cwd_file`; with it they path correctly from
 // turn 1. All fields optional: empty strings are skipped.
 struct EnvInfo {
     std::string cwd;        // absolute working dir / sandbox root

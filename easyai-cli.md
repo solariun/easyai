@@ -236,7 +236,7 @@ prepended (see [§7](#7-system-prompt--injected-blocks)).
 | `-q`, `--quiet` | Disable the spinner glyph + context-fill gauge. Use for batch / scripted runs. **Also changes `Ctrl-C` / `SIGTERM` semantics**: first signal hard-cancels and exits (`rc=130`). See [Ctrl-C and SIGTERM](#ctrl-c-and-sigterm). |
 | `--no-prompt-progress` | Ask the server to skip per-batch `easyai.prompt_progress` SSE events for this session. The spinner loses its live `thinking N% · ctx M%` gauge during prompt eval (falls back to a static "thinking" word); in return the wire goes quiet during eval. The final `easyai.prompt_eval` summary still fires and is **always** logged to stderr + the `--log-file` file, regardless of `--verbose`. INI: `[cli] prompt_progress = on\|off`. |
 | `--log-file PATH` | Opt in to a raw transaction log at PATH (request body + every SSE chunk + every tool dispatch input/output, mode 0600). Default OFF — no log file is written without this flag. Implies `--verbose`. |
-| `--tools-mode MODE` | How `fs` / `web` are exposed to the model. **MODE** is one of `split` (**default** — one focused tool per action: `read_fs`, `edit_fs`, `search_web`, `fetch_web`, …; small models dispatch more reliably here), `unified` (single dispatcher per family with `action=`; this is where the `fs(action="ops")` batch lives — up to 50 ops / 20 files per call), or `both` (register both surfaces side-by-side). Same handlers under the hood; only the registration shape differs. INI: `[cli] tools_mode = unified\|split\|both`. |
+| `--tools-mode MODE` | How `fs` / `web` are exposed to the model. **MODE** is one of `split` (**default** — one focused tool per action: `read_file`, `edit_file`, `search_web`, `fetch_web`, …; small models dispatch more reliably here), `unified` (single dispatcher per family with `action=`; this is where the `fs(action="ops")` batch lives — up to 50 ops / 20 files per call), or `both` (register both surfaces side-by-side). Same handlers under the hood; only the registration shape differs. INI: `[cli] tools_mode = unified\|split\|both`. |
 | `--continue` | Load `.easyai_session` from cwd before the first prompt. **Default OFF** (since 2026-05-13) — any existing session file is ignored and overwritten on the first turn unless this flag is set. INI: `[cli] auto_continue = true\|false`. See [§11](#11-session-persistence). |
 | `--no-continue` | Explicit form of the default — ignore any existing `.easyai_session` and overwrite on the first turn. Useful to override `[cli] auto_continue = on` set in INI. |
 | `--compress` | After loading, ask the model for one lossless recap of the conversation and replace the history with that recap. Also reachable mid-REPL via `/compress`. No-op without `--continue` (nothing in memory to recap). INI: `[cli] auto_compress = true\|false`. |
@@ -533,13 +533,13 @@ See [`AI_TOOLS.md`](AI_TOOLS.md) for the deep dive on what a tool is, and
 
 ## 7. System prompt + injected blocks
 
-When the agent has any create/mutate affordance (fs_* / bash / plan),
+When the agent has any create/mutate affordance (*_file / bash / plan),
 the CLI prepends two small in-binary blocks to the user's system prompt:
 
 ```
 [environment]
 sandbox root: /Users/.../projects/foo
-fs_* tools' virtual `/` maps here; bash runs with this as its cwd.
+*_file tools' virtual `/` maps here; bash runs with this as its cwd.
 
 [guidance]
 When asked to create something, pick one viable implementation and

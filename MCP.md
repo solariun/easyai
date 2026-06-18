@@ -176,7 +176,7 @@ it with:
      regardless of path.
    - The filesystem tool(s) named in `tools/list` are the
      authoritative writer — names differ by mode (`fs(action=...)`
-     in Unified mode, the `write_fs` / `edit_fs` / ... family in
+     in Unified mode, the `write_file` / `edit_file` / ... family in
      Split mode).
    - **Read-before-write** (2026-06-12): an EXISTING file must first
      be read with the filesystem read tool in this session before a

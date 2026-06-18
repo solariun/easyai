@@ -2326,7 +2326,7 @@ static void handle_chat_stream(ServerCtx & ctx,
                 // Best-effort target hint: the most useful field of the
                 // arguments JSON for "what is the model trying to reach".
                 // We pick `url` (web action=fetch) first, then `query`
-                // (web action=search), then `path` (fs_*), then `command`
+                // (web action=search), then `path` (*_file), then `command`
                 // (bash).
                 // Falls back to a short prefix of the raw args blob so
                 // lesser-known tools still get *something* on the line.
@@ -3399,7 +3399,7 @@ static bool require_auth(const ServerCtx & ctx, const httplib::Request & req,
         "  -s, --system-file <path>     Server-default system prompt from file\n"
         "      --system <text>          Inline system prompt\n"
         "      --no-local-tools         Don't expose the LOCAL built-in\n"
-        "                                toolbelt (datetime, web_*, fs_*,\n"
+        "                                toolbelt (datetime, web_*, *_file,\n"
         "                                bash, etc). Has no effect on memory\n"
         "                                (--memory), external tools\n"
         "                                (--external-tools), or remote\n"
@@ -3631,7 +3631,7 @@ struct ServerArgs {
     int         ngl        = -1;
     int         n_threads  = 0;
     bool        local_tools = true;  // master switch for the LOCAL built-in
-                                     // toolbelt (datetime, web_*, fs_*, bash,
+                                     // toolbelt (datetime, web_*, *_file, bash,
                                      // RAG when --RAG is set, ...). Has no
                                      // effect on remote tools fetched via
                                      // --mcp; those are governed only by

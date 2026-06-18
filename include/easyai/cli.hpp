@@ -64,7 +64,7 @@ namespace easyai::cli {
 //              Best for large models that can hold the discriminated
 //              union schema in their head.
 //
-//   Split    — one focused tool per action (`read_fs`, `edit_fs`, …).
+//   Split    — one focused tool per action (`read_file`, `edit_file`, …).
 //              Flat schemas, name == semantic anchor, no "unknown
 //              action" failure mode.  Best for smaller / quantised
 //              tool-callers (7-8B and below) — they consistently work
@@ -129,7 +129,7 @@ private:
     std::string sandbox_;
     // allow_fs_ defaults TRUE so callers that pre-date this flag (Agent,
     // backend.cpp, examples/cli.cpp) keep the legacy "sandbox dir auto-
-    // enables fs_*" behaviour.  Server flips it OFF unless --allow-fs.
+    // enables *_file" behaviour.  Server flips it OFF unless --allow-fs.
     bool        allow_fs_     = true;
     bool        allow_bash_   = false;
     // python3 defaults ON: a stdlib-only interpreter with the disk

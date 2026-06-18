@@ -100,7 +100,7 @@ constexpr char   kDefaultHost[]               = "127.0.0.1";
 // kDefaultThreads — cpp-httplib worker pool size. 256 is plenty for a
 // per-host MCP daemon; the bottleneck on real workloads is the tools
 // themselves (libcurl outbound for web_*, fork/execve for external-tools
-// + bash, disk for RAG / fs_*), not the dispatcher. Each worker thread
+// + bash, disk for RAG / *_file), not the dispatcher. Each worker thread
 // costs ~8 MiB of pthread stack on Linux/glibc → 256 ≈ 2 GiB virtual
 // (commit-on-touch, real RSS far smaller). Larger pools are routinely
 // fine on modern hosts; 256 is the safe default.

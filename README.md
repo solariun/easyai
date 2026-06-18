@@ -22,7 +22,7 @@ the lib surface.
 
 | Binary               | What it gives you                                                                                                                                  |
 |----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `easyai-local`       | Local-only REPL: loads a GGUF in-process via `easyai::Engine` (driven through `easyai::Session`). Drop-in `llama-cli` replacement — one-shot scripting (`-p`), tools, presets, optional `<think>` strip, sandboxed `fs_*` tools, opt-in `bash` tool. |
+| `easyai-local`       | Local-only REPL: loads a GGUF in-process via `easyai::Engine` (driven through `easyai::Session`). Drop-in `llama-cli` replacement — one-shot scripting (`-p`), tools, presets, optional `<think>` strip, sandboxed `*_file` tools, opt-in `bash` tool. |
 | `easyai-cli`         | Agentic OpenAI-protocol client — no local model.  Full-screen chat **TUI** (opencode-style look & feel: markdown, live tool rows with diffs, `/`-command + `@`-file completion, themes — default for interactive terminals; `--plain` for the legacy line REPL), `--shell` (hybrid AI shell), or `-p` one-shot.  Full sampling control (`--temperature`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--frequency-penalty`, `--presence-penalty`, `--seed`, `--max-tokens`, `--stop`), plan tool, server-management subcommands (`--list-models`, `--list-tools`, `--health`, `--props`, `--metrics`, `--set-preset`).  HTTPS via OpenSSL; `--insecure-tls` / `--ca-cert` for dev/internal CAs.  Full doc: [`easyai-cli.md`](easyai-cli.md). |
 | `easyai-server`      | Drop-in `llama-server` replacement: OpenAI-compat HTTP **with full SSE streaming**, embedded SvelteKit webui, Bearer auth, Prometheus `/metrics`, KV-cache controls, flash-attn, mlock.  Speaks MCP, OpenAI, Ollama from one process.  Full doc: [`easyai-server.md`](easyai-server.md). |
 | `easyai-mcp-server`  | **Standalone Model Context Protocol provider — no model loaded.** Same tool catalogue as `easyai-server` (built-ins + knowledge tools + external-tools), exposed over `POST /mcp` with a configurable cpp-httplib worker pool (`--threads`) and an in-flight `tools/call` cap (`--max-concurrent-calls`) for thousands-of-clients deployments.  Full doc: [`easyai-mcp-server.md`](easyai-mcp-server.md). |
@@ -269,7 +269,7 @@ worth it for everyone, surprising for nobody.
 
 | Surface | Registered out of the box | Old behaviour | New default |
 | --- | --- | --- | --- |
-| Multi-action families | `fs`, `web` | 2 dispatchers + 7 knowledge tools | `read_fs`, `write_fs`, `append_fs`, `edit_fs`, `list_fs`, `glob_fs`, `grep_fs`, `check_path_fs`, `cwd_fs`, `sandbox_fs`, `search_web`, `fetch_web`, `knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` — 19 focused tools |
+| Multi-action families | `fs`, `web` | 2 dispatchers + 7 knowledge tools | `read_file`, `write_file`, `append_file`, `edit_file`, `list_file`, `glob_file`, `grep_file`, `check_path_file`, `cwd_file`, `sandbox_file`, `search_web`, `fetch_web`, `knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` — 19 focused tools |
 
 ```bash
 # new default (no flag)
@@ -294,7 +294,7 @@ INI: `[cli] tools_mode = unified|split|both` (default `split`).
 `action` parameter (e.g. `fs(action="read", ...)`).  That shape keeps
 the system prompt small and lets a large model batch many actions, but
 **smaller / quantised tool-callers** (Llama 3 8B, Qwen 2.5 7B, Phi-3.5,
-GPT-OSS-20B) gravitate toward one-purpose tools — `read_fs`, `edit_fs`,
+GPT-OSS-20B) gravitate toward one-purpose tools — `read_file`, `edit_file`,
 etc. — because the verb IS the tool name and the parameter schema is
 flat.
 
@@ -310,7 +310,7 @@ easyai-cli --tools-mode both        # register both surfaces side-by-side
 | Mode | Tools registered (with `--sandbox` + `--memory`) |
 | --- | --- |
 | `unified` | `fs`, `web` — 2 dispatchers + 7 `knowledge_*` tools |
-| `split` (new default) | `read_fs`, `write_fs`, `append_fs`, `edit_fs`, `list_fs`, `glob_fs`, `grep_fs`, `check_path_fs`, `cwd_fs`, `sandbox_fs`, `search_web`, `fetch_web`, `knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` — 19 focused tools |
+| `split` (new default) | `read_file`, `write_file`, `append_file`, `edit_file`, `list_file`, `glob_file`, `grep_file`, `check_path_file`, `cwd_file`, `sandbox_file`, `search_web`, `fetch_web`, `knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` — 19 focused tools |
 | `both` | unified + split, same handlers under both names |
 
 Same handlers under the hood — behaviour is identical to the unified
@@ -801,7 +801,7 @@ mirrors the rag dispatcher introduced 2026-05-04.
 * **Public-API breakage.** Anyone consuming `libeasyai` directly: the
   individual `easyai::tools::search_web()` / `fetch_web()` /
   `web_google()` / `fs_read_file()` / `fs_write_file()` / `fs_list_dir()`
-  / `glob_fs()` / `grep_fs()` / `check_path_fs()` / `get_current_dir()`
+  / `glob_file()` / `grep_file()` / `check_path_file()` / `get_current_dir()`
   / `get_sandbox_path()` factories are removed. Switch to
   `easyai::tools::web(google_enabled)`,
   `easyai::tools::fs(root)`, and
@@ -863,14 +863,14 @@ and the build.
   so future external SSE consumers can render their own timing UI.
 * **`allow_fs = off` in the INI is now honoured.** The server read
   the flag but never propagated it to the toolbelt — a non-empty
-  `[SERVER] sandbox` re-enabled `fs_*` regardless. Default install
+  `[SERVER] sandbox` re-enabled `*_file` regardless. Default install
   ships `allow_fs = off` + `sandbox = /var/lib/easyai/workspace`,
   which hit exactly this. Now `allow_fs` and `allow_bash` are
   honoured independently of `sandbox`. **Behaviour change:**
   `--sandbox /foo` alone NO LONGER implies `--allow-fs`; pass
-  `--allow-fs` explicitly to register fs_*.
+  `--allow-fs` explicitly to register *_file.
 * **Built-in system prompt is tool-aware.** The hardcoded prompt
-  used to list `fs_*` / `bash` / `plan` / host-metric tools by name
+  used to list `*_file` / `bash` / `plan` / host-metric tools by name
   whether or not they were registered. Models hallucinated calls to
   unregistered tools (especially `bash` after the `allow_fs` fix
   above). The `Tool notes:` section is now built dynamically:
@@ -1007,11 +1007,11 @@ Driven by a production "models drift, use bash for file work, ignore
 tools" report. The fix landed across the tool descriptions, the
 default prompts, and the CLI flag wiring at once.
 
-* **`--sandbox` and `--allow-bash` now imply `fs_*`.** The previous
+* **`--sandbox` and `--allow-bash` now imply `*_file`.** The previous
   matrix had operators passing `--allow-bash --sandbox DIR` and ending
   up with bash but no file tools — so the model fell back to
   `cat > file` / `cat <<EOF` / `sed -i` for everything. Bash is
-  strictly more permissive than `fs_*`, so requiring an extra flag
+  strictly more permissive than `*_file`, so requiring an extra flag
   was inverted. Both flags now register the full file set (and the
   new `get_sandbox_path` companion) at once. `--allow-fs` still works
   for the no-sandbox / no-bash case; otherwise it's redundant.
@@ -1028,7 +1028,7 @@ default prompts, and the CLI flag wiring at once.
   (make / cmake / cargo / npm), git, package managers, sed/awk for
   in-place edits.
 * **System prompts inject `[environment]` + `[guidance]`.** When
-  any create/mutate affordance is registered (fs_* / bash / plan),
+  any create/mutate affordance is registered (*_file / bash / plan),
   the cli prepends two short blocks to the user's `--system` content:
   the absolute sandbox path (saves a "where am I" tool hop on turn 1)
   and a stay-in-scope behavioral rule (build EXACTLY what the user
@@ -1153,7 +1153,7 @@ default prompts, and the CLI flag wiring at once.
   read top-to-bottom: `file_mtime_unix()` (replaces three copies of
   the C++17 file_clock→system_clock idiom in `rag_tools.cpp`),
   `glob_to_regex()` + `kGlobRegexMetachars` (lifts the wildcard
-  state machine out of `glob_fs` in `builtin_tools.cpp`), and
+  state machine out of `glob_file` in `builtin_tools.cpp`), and
   `looks_like_announce_phrase()` (lifts the 30-line retry predicate
   out of `Engine::chat_continue` in `engine.cpp`, where it was
   used twice). All seven binaries build clean.
@@ -1300,7 +1300,7 @@ default prompts, and the CLI flag wiring at once.
   focused powers without flipping `--allow-bash`. See
   [`EXTERNAL_TOOLS.md`](EXTERNAL_TOOLS.md).
 * **`get_current_dir` builtin** — the model can ask where it is,
-  so relative paths in `bash` / `fs_*` calls land where you expect.
+  so relative paths in `bash` / `*_file` calls land where you expect.
 * **Cancel-on-disconnect on the server** — closing the browser
   tab actually stops the decode loop. No more zombie generation
   eating tokens after the user walked away.
@@ -1409,8 +1409,8 @@ reference: [`easyai-mcp-server.md`](easyai-mcp-server.md).
 | `--max-body N` | 1 MiB | Cap on request body. |
 | `-t, --threads N` | 256 | cpp-httplib worker pool. |
 | `--max-concurrent-calls N` | 256 | In-flight `tools/call` cap (503 on saturation). |
-| `--sandbox DIR` | cwd | Root for `fs_*` / `bash` / `$SANDBOX`. |
-| `--allow-fs` | off | Register `fs_*` tools. |
+| `--sandbox DIR` | cwd | Root for `*_file` / `bash` / `$SANDBOX`. |
+| `--allow-fs` | off | Register `*_file` tools. |
 | `--allow-bash` | off | Register `bash`. |
 | `--no-tools` | off | Skip the built-in toolbelt entirely. |
 | `--external-tools DIR` | — | Load `EASYAI-*.tools` manifests. |
@@ -1460,7 +1460,7 @@ one-shot / `--quiet` path falls back automatically.
 | `--use-google` | off | Enable engine=`"google"` inside the unified `web` tool. |
 | `--external-tools DIR` | — | Load `EASYAI-*.tools` manifests. |
 | `--memory DIR` | — | Enable persistent memory (seven `knowledge_*` tools; alias `--RAG`). |
-| `--tools-mode MODE` | `split` | How `fs` / `web` are exposed. Default `split` (since 2026-05-15): one focused tool per action — `read_fs`, `edit_fs`, …, `search_web`, `fetch_web`. Knowledge tools are always split (seven separate tools). `unified` registers the legacy single dispatcher per `fs`/`web` family with `action=`. `both` registers both surfaces. INI: `[cli] tools_mode`. |
+| `--tools-mode MODE` | `split` | How `fs` / `web` are exposed. Default `split` (since 2026-05-15): one focused tool per action — `read_file`, `edit_file`, …, `search_web`, `fetch_web`. Knowledge tools are always split (seven separate tools). `unified` registers the legacy single dispatcher per `fs`/`web` family with `action=`. `both` registers both surfaces. INI: `[cli] tools_mode`. |
 | `--no-plan` | off | Don't auto-register the planning tool. |
 | `-p, --prompt TEXT` | (REPL) | One-shot prompt; without it you get a REPL. |
 | `--no-reasoning` | shown | Hide `delta.reasoning_content`. |
@@ -1547,7 +1547,7 @@ fluent setters, call `ask()`. Header:
 | `Agent(model_path)` | ctor | — | Local model. |
 | `Agent::remote(base_url, api_key="")` | static | — | Remote endpoint. |
 | `.system(prompt)` | `string` | — | System prompt. |
-| `.sandbox(dir)` | `string` | — | Enable `fs_*` scoped to `dir`. |
+| `.sandbox(dir)` | `string` | — | Enable `*_file` scoped to `dir`. |
 | `.allow_bash(on=true)` | `bool` | off | Register `bash`. |
 | `.preset(name)` | `string` | `precise` | Sampling profile. |
 | `.remote_model(id)` | `string` | — | Remote model id (remote mode only). |

@@ -78,7 +78,7 @@ chained statement. None of them throw.
 |------|------|-------------|
 | `datetime` | `!no_datetime()` | Wall-clock UTC + local time. |
 | `web` (or `search_web` + `fetch_web`) | `!no_web()` | Search the web and fetch URLs. Engine cascade: google → brave → ddg-lite → bing → ddg. `use_google()` opts into Google's billed API (needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`). |
-| `fs` (or split `read_fs`/`write_fs`/…) | `.sandbox(dir)` set OR `.allow_bash` / `.allow_python` | Read/write/edit/list/glob/grep, scoped to the sandbox root. |
+| `fs` (or split `read_file`/`write_file`/…) | `.sandbox(dir)` set OR `.allow_bash` / `.allow_python` | Read/write/edit/list/glob/grep, scoped to the sandbox root. |
 | `bash` | `.allow_bash()` | Shell command via `/bin/sh -c`. Not a hardened sandbox. |
 | `evaluate` (legacy name `python3`) | `.allow_python()` (default ON when fs is on) | Read-only Python 3 stdlib evaluator, sandboxed. |
 | `knowledge_save`/`search_knowledge`/`knowledge_load`/… (7 tools) | `.memory(dir)` | Persistent registry (markdown per entry). |
@@ -90,7 +90,7 @@ Tool-mode controls how multi-action tools are exposed:
 | Mode | Schema shape |
 |------|-------------|
 | `Unified` | `fs(action="read")` — one dispatcher tool. |
-| `Split` (default) | `read_fs`, `edit_fs`, … — one verb per tool. |
+| `Split` (default) | `read_file`, `edit_file`, … — one verb per tool. |
 | `Both` | Registers both surfaces side-by-side. |
 
 Smaller / quantised models dispatch more reliably against `Split`; that

@@ -128,26 +128,26 @@ json tool_descriptor(const Tool & t) {
 //
 // The block is keyed off the active tool set so we don't tell the
 // client "use bash for writes" when bash isn't registered. Tool
-// names (`fs` / `write_fs` / `bash`) are detected by family, not
-// hardcoded, so split-mode (`write_fs` / `edit_fs` / ...) and
+// names (`fs` / `write_file` / `bash`) are detected by family, not
+// hardcoded, so split-mode (`write_file` / `edit_file` / ...) and
 // unified-mode (`fs(action=...)`) both work without drift.
 std::string build_instructions(const std::vector<Tool> & tools) {
     bool has_evaluate = false;       // model-facing compute tool (Python 3 runtime)
-    bool has_fs       = false;       // any fs surface — unified `fs` OR split `*_fs`
+    bool has_fs       = false;       // any fs surface — unified `fs` OR split `*_file`
     bool has_bash     = false;
     for (const auto & t : tools) {
         if (t.name == "evaluate" || t.name == "python3") has_evaluate = true;
         if (t.name == "fs")                              has_fs       = true;
-        if (t.name.size() > 3 &&
-            t.name.compare(t.name.size() - 3, 3, "_fs") == 0) has_fs = true;
+        if (t.name.size() > 5 &&
+            t.name.compare(t.name.size() - 5, 5, "_file") == 0) has_fs = true;
         if (t.name == "bash")                            has_bash     = true;
     }
 
     std::string s;
     s += "easyai MCP server. Call ONLY tools listed in tools/list — no "
-         "paraphrases (`read_file` is not the filesystem tool; `shell` "
-         "is not `bash`). If a name isn't in tools/list, it does NOT "
-         "exist on this server; do not invent calls.\n";
+         "paraphrases or invented names (`shell` is not `bash`). If a "
+         "name isn't in tools/list, it does NOT exist on this server; "
+         "do not invent calls.\n";
     if (has_evaluate || has_fs || has_bash) {
         s += "\nWrite/edit policy:\n";
         if (has_evaluate) {

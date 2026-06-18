@@ -1956,7 +1956,7 @@ struct Sandbox {
     // Render a real on-disk path back into the model's relative view.
     // The sandbox base is hidden; the model sees `report.md`,
     // `src/main.cpp`, `.` for the root itself.  Relative form matches
-    // what every fs_* / bash description tells the model to USE as
+    // what every *_file / bash description tells the model to USE as
     // input — so grep/glob output can be fed straight back into
     // read_file without a leading-slash dance.
     std::string virtual_path(const stdfs::path & real) const {
@@ -1981,12 +1981,12 @@ struct Sandbox {
     //      root. When canonicalisation FAILS (typically EACCES on a
     //      0000 parent dir, or ENOENT racing rmdir), we fall back to
     //      the lexical answer instead of rejecting — failing closed
-    //      here used to break check_path_fs on exactly the paths the
+    //      here used to break check_path_file on exactly the paths the
     //      operator most wanted to probe (e.g. files inside an
     //      0000-perm parent that the model wants to know about).
     // Read-before-write registry (opencode contract): a file that
-    // already exists must have been read_fs in this session before
-    // write_fs / edit_fs may modify it. Keyed by normalized real path;
+    // already exists must have been read_file in this session before
+    // write_file / edit_file may modify it. Keyed by normalized real path;
     // process-lifetime scope (one CLI session = one process; on a
     // long-running easyai-server the registry is process-wide and
     // capped — when it overflows we clear it, which only means the
@@ -2408,7 +2408,7 @@ ToolHandler make_fs_write_handler(std::shared_ptr<Sandbox> sb) {
         }
 
         // Read-before-write (opencode contract): overwriting an
-        // EXISTING, non-empty file requires a prior read_fs in this
+        // EXISTING, non-empty file requires a prior read_file in this
         // session, so the model can't blind-clobber content it never
         // looked at. New files and explicit appends are exempt.
         if (!append) {
@@ -2418,7 +2418,7 @@ ToolHandler make_fs_write_handler(std::shared_ptr<Sandbox> sb) {
                 && !sb->was_read(p)) {
                 return ToolResult::error(
                     sb->virtual_path(p) + " already exists and has not "
-                    "been read in this session. Read it first (read_fs) "
+                    "been read in this session. Read it first (read_file) "
                     "so the overwrite is informed, then write.");
             }
         }
@@ -2567,7 +2567,7 @@ ToolResult fs_edit_strings(const std::shared_ptr<Sandbox> & sb,
         if (!sb->was_read(p))
             return ToolResult::error(
                 sb->virtual_path(p) + " has not been read in this "
-                "session. read_fs it first so oldString matches the "
+                "session. read_file it first so oldString matches the "
                 "real content, then edit.");
         std::ifstream f(p, std::ios::binary);
         if (!f) return ToolResult::error("cannot open for edit: "
@@ -4110,15 +4110,15 @@ std::vector<Tool> fs_split(std::string root) {
     std::vector<Tool> out;
     out.reserve(10);
 
-    out.push_back(Tool::builder("read_fs")
+    out.push_back(Tool::builder("read_file")
         .describe(
             "Read a UTF-8 text file. RELATIVE path under the sandbox "
             "root. Every output line is prefixed `<n>: `; lines longer "
             "than 2000 chars are truncated. Reading a DIRECTORY path "
             "lists its entries (subdirectories get a trailing `/`). "
             "If the path doesn't exist, similar names from the parent "
-            "directory are suggested. Read a file BEFORE write_fs / "
-            "edit_fs — both refuse to modify an existing file that "
+            "directory are suggested. Read a file BEFORE write_file / "
+            "edit_file — both refuse to modify an existing file that "
             "wasn't read this session.\n"
             "  Line mode (recommended): pass start_line (1-based). "
             "limit = lines (default 2000, max 2000); a trailing "
@@ -4142,13 +4142,13 @@ std::vector<Tool> fs_split(std::string root) {
         .handle(make_fs_read_handler(sb))
         .build());
 
-    out.push_back(Tool::builder("write_fs")
+    out.push_back(Tool::builder("write_file")
         .describe(
             "Write UTF-8 text to a file (OVERWRITES existing "
             "content). Creates parent dirs. An EXISTING non-empty "
-            "file must have been read_fs this session first "
+            "file must have been read_file this session first "
             "(read-before-write) so the overwrite is informed. "
-            "Prefer edit_fs for partial changes.")
+            "Prefer edit_file for partial changes.")
         .param("path",    "string",
                "Relative path. `.` for root.", true)
         .param("content", "string",
@@ -4158,7 +4158,7 @@ std::vector<Tool> fs_split(std::string root) {
         .handle(make_fs_write_handler(sb))
         .build());
 
-    out.push_back(Tool::builder("append_fs")
+    out.push_back(Tool::builder("append_file")
         .describe(
             "Append UTF-8 text to the END of a file (creates if "
             "missing).")
@@ -4169,10 +4169,10 @@ std::vector<Tool> fs_split(std::string root) {
         .handle(make_fs_append_handler(sb))
         .build());
 
-    out.push_back(Tool::builder("edit_fs")
+    out.push_back(Tool::builder("edit_file")
         .describe(
             "Edit an existing file in place. Atomic. The file must "
-            "have been read_fs this session first (read-before-edit). "
+            "have been read_file this session first (read-before-edit). "
             "Two modes:\n"
             "  String mode (PREFERRED): pass oldString + newString. "
             "oldString must match the current file text EXACTLY — "
@@ -4186,7 +4186,7 @@ std::vector<Tool> fs_split(std::string root) {
             "replace lines [start..end] (1-based, inclusive). "
             "content=\"\" deletes the range; end_line=start_line-1 "
             "inserts before start_line; start_line=line_count+1 "
-            "appends at EOF. Plan with read_fs first.")
+            "appends at EOF. Plan with read_file first.")
         .param("path",       "string",
                "Relative path under the sandbox root.", true)
         .param("oldString",  "string",
@@ -4209,7 +4209,7 @@ std::vector<Tool> fs_split(std::string root) {
         .handle(make_fs_edit_handler(sb))
         .build());
 
-    out.push_back(Tool::builder("list_fs")
+    out.push_back(Tool::builder("list_file")
         .describe(
             "Non-recursive directory listing. One entry per line "
             "(`d`/`f` prefix + size).")
@@ -4218,7 +4218,7 @@ std::vector<Tool> fs_split(std::string root) {
         .handle(make_fs_list_handler(sb))
         .build());
 
-    out.push_back(Tool::builder("glob_fs")
+    out.push_back(Tool::builder("glob_file")
         .describe(
             "Recursive wildcard file search. `*` single segment, "
             "`**` crosses dirs, `?` one char, `[abc]` a set. Results "
@@ -4235,7 +4235,7 @@ std::vector<Tool> fs_split(std::string root) {
         .handle(make_fs_glob_handler(sb))
         .build());
 
-    out.push_back(Tool::builder("grep_fs")
+    out.push_back(Tool::builder("grep_file")
         .describe(
             "Recursive regex content search. Output starts with "
             "`Found N matches`, then per file:\n"
@@ -4259,7 +4259,7 @@ std::vector<Tool> fs_split(std::string root) {
         .handle(make_fs_grep_handler(sb))
         .build());
 
-    out.push_back(Tool::builder("check_path_fs")
+    out.push_back(Tool::builder("check_path_file")
         .describe(
             "Pre-flight: existence, type, size, r/w/x rights. Run "
             "before reading/writing any unfamiliar path.")
@@ -4271,17 +4271,17 @@ std::vector<Tool> fs_split(std::string root) {
         .handle(make_fs_check_path_handler(sb))
         .build());
 
-    out.push_back(Tool::builder("cwd_fs")
+    out.push_back(Tool::builder("cwd_file")
         .describe(
             "Current working directory at call time (getcwd). For "
-            "day-to-day work use sandbox_fs. No parameters.")
+            "day-to-day work use sandbox_file. No parameters.")
         .handle(make_fs_cwd_handler())
         .build());
 
-    out.push_back(Tool::builder("sandbox_fs")
+    out.push_back(Tool::builder("sandbox_file")
         .describe(
             "Absolute sandbox root, pinned at registration. The "
-            "anchor every fs_* / bash relative path resolves "
+            "anchor every *_file / bash relative path resolves "
             "against. Run once at the start of any filesystem task. "
             "No parameters.")
         .handle(make_fs_sandbox_handler(root))

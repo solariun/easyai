@@ -70,7 +70,7 @@ public:
     struct Config {
         std::string model_path;
         std::string system_prompt;
-        std::string sandbox;            // empty = fs_* tools NOT registered
+        std::string sandbox;            // empty = *_file tools NOT registered
         bool        allow_bash = false; // explicit opt-in for the bash tool
         // python3 defaults ON: the unified `python3` tool ships a Python
         // preamble that auto-restricts disk access (open / os.open /
@@ -157,7 +157,7 @@ public:
         std::string api_key;        // optional Bearer token
         std::string model = "easyai";
         std::string system_prompt;
-        std::string sandbox;        // empty = fs_* NOT registered (even with_tools)
+        std::string sandbox;        // empty = *_file NOT registered (even with_tools)
         bool        allow_bash = false;
         Preset      preset{};
         long        timeout_seconds = 300;

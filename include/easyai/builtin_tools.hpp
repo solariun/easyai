@@ -91,9 +91,9 @@ std::vector<Tool> web_split(bool google_enabled = false);
 // the boundary obvious and matches what bash with the pinned cwd sees.
 Tool fs(std::string root = ".");
 
-// Focused per-action variants of `fs` (read_fs, write_fs, append_fs,
-// edit_fs, list_fs, glob_fs, grep_fs, check_path_fs, cwd_fs,
-// sandbox_fs). Same handlers as the unified surface — see fs_split's
+// Focused per-action variants of `fs` (read_file, write_file, append_file,
+// edit_file, list_file, glob_file, grep_file, check_path_file, cwd_file,
+// sandbox_file). Same handlers as the unified surface — see fs_split's
 // banner in builtin_tools.cpp for the rationale. Use the Toolbelt's
 // tool_mode(Split | Both) to register these alongside (or instead of)
 // the unified `fs`.

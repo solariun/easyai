@@ -181,7 +181,7 @@ struct CliArgs {
         "      --ngl <n>                 GPU layers (-1=auto, 0=CPU)\n"
         "  -t, --threads <n>             CPU threads\n"
         "      --no-tools                Don't register the built-in toolbelt\n"
-        "      --sandbox <dir>           Enable fs_* tools (read_file,\n"
+        "      --sandbox <dir>           Enable *_file tools (read_file,\n"
         "                                 list_dir, glob, grep, write_file),\n"
         "                                 ALL scoped to <dir>. Without\n"
         "                                 --sandbox these tools are NOT\n"

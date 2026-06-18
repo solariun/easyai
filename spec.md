@@ -563,7 +563,7 @@ CLI flag + INI key `[cli] prompt_progress = on|off`. When off, the cli sends `st
 
 `on_prompt_eval` (the final summary, fires once per agentic hop) always calls `easyai::log::write` with the structured line `[prompt_eval] N tok (M cached) · X ms · Y t/s · ctx Z% (used/total)`. `log::write` tees stderr + the `--log-file` file (if set), so the final metrics land in the log regardless of `--verbose`.
 
-## read_fs Tool Behavior (opencode-parity since 2026-06-12)
+## read_file Tool Behavior (opencode-parity since 2026-06-12)
 
 Output prefixes every line with `<n>: ` (line numbers on by default in both modes); individual lines longer than 2000 chars are cut with a `... (line truncated to 2000 chars)` marker. Reports total line count for files ≤ 8 MiB. Reading a DIRECTORY path returns its entries one per line (subdirectories get a trailing `/`, sorted, capped at 1000). A missing path suggests up to 3 similarly-named entries from the parent directory (`Did you mean: …?`). Every successful read registers the path in the read-before-write registry (next section).
 
@@ -576,20 +576,20 @@ When line mode stops short of EOF the output ends with `(File has more lines. Pa
 
 ## Read-before-write registry (2026-06-12)
 
-`write_fs` (overwrite of an EXISTING non-empty file) and `edit_fs` (both modes) require the target to have been `read_fs` in this session first; otherwise they return a clear error telling the model to read first. The registry lives on the shared `Sandbox` (per tool-registration, process lifetime — on a long-running easyai-server it is process-wide), keyed by normalized path, capped at 16384 entries; on overflow it clears, which only forces a cheap re-read before the next overwrite. A successful write/edit also registers the path (the writer knows the content it just wrote). `append_fs` and brand-new files are exempt.
+`write_file` (overwrite of an EXISTING non-empty file) and `edit_file` (both modes) require the target to have been `read_file` in this session first; otherwise they return a clear error telling the model to read first. The registry lives on the shared `Sandbox` (per tool-registration, process lifetime — on a long-running easyai-server it is process-wide), keyed by normalized path, capped at 16384 entries; on overflow it clears, which only forces a cheap re-read before the next overwrite. A successful write/edit also registers the path (the writer knows the content it just wrote). `append_file` and brand-new files are exempt.
 
-## edit_fs string mode (2026-06-12)
+## edit_file string mode (2026-06-12)
 
-`edit_fs` accepts two parameter shapes, both atomic (temp file + rename):
+`edit_file` accepts two parameter shapes, both atomic (temp file + rename):
 
 | Mode | Params | Contract |
 |---|---|---|
 | String (preferred) | `oldString`, `newString`, optional `replaceAll` | `oldString` must match the file content EXACTLY and be unique (otherwise: `found N matches … pass replaceAll=true`); `newString=""` deletes; identical old/new is an error; CRLF files accept LF-normalized `oldString` and stay CRLF on disk; empty `oldString` + missing file creates it. |
 | Line (legacy) | `start_line`, `end_line`, `content` | Replaces lines [start..end] (1-based, inclusive); `content=""` deletes; `end_line=start_line-1` inserts; `start_line=line_count+1` appends. |
 
-## grep_fs / glob_fs output (opencode-parity, 2026-06-12)
+## grep_file / glob_file output (opencode-parity, 2026-06-12)
 
-`grep_fs`: header `Found N matches` (or `No files found`), then per file `path:` followed by `  Line <n>: <text>` rows, blank line between files; truncation note when `max_matches` (default 100) hits. Accepts `include` as the preferred alias of `file_glob`. `glob_fs`: plain newline-separated paths sorted newest-first by mtime, capped at `limit` (default 100, max 1000) with a `(Results are truncated: …)` note; empty → `No files found`.
+`grep_file`: header `Found N matches` (or `No files found`), then per file `path:` followed by `  Line <n>: <text>` rows, blank line between files; truncation note when `max_matches` (default 100) hits. Accepts `include` as the preferred alias of `file_glob`. `glob_file`: plain newline-separated paths sorted newest-first by mtime, capped at `limit` (default 100, max 1000) with a `(Results are truncated: …)` note; empty → `No files found`.
 
 ## bash caps (2026-06-12)
 
@@ -613,7 +613,7 @@ Exposed only on the **unified** `fs` surface. Default `ToolMode` is `Split` (one
 
 ## ToolMode default
 
-`easyai::cli::Toolbelt::tool_mode_` defaults to `ToolMode::Split` — one focused tool per action (`read_fs`, `write_fs`, `edit_fs`, …, `search_web`, `fetch_web`, `search_knowledge`, `recall_knowledge`, …). Small / weaker tool-callers dispatch more reliably against flat one-verb-per-tool schemas than against an `action`-discriminated union.
+`easyai::cli::Toolbelt::tool_mode_` defaults to `ToolMode::Split` — one focused tool per action (`read_file`, `write_file`, `edit_file`, …, `search_web`, `fetch_web`, `search_knowledge`, `recall_knowledge`, …). Small / weaker tool-callers dispatch more reliably against flat one-verb-per-tool schemas than against an `action`-discriminated union.
 
 To pick up the unified `fs(action="ops")` batch (or the `web(action=…)` dispatcher), opt in with `.tool_mode(ToolMode::Unified)` or `--tools-mode unified`. `Both` registers both surfaces side-by-side.
 
@@ -706,7 +706,7 @@ Authoring rule: every tool sets both `.short_describe(...)` and `.describe(...)`
 
 | Tool | Disk reads | Disk writes/edits |
 |---|---|---|
-| `fs` (or split `fs_*`) | yes | **YES — primary** |
+| `fs` (or split `*_file`) | yes | **YES — primary** |
 | `bash` | yes | **YES — for shell features fs can't do** |
 | `evaluate` (legacy alias `python3`; runtime is Python 3) | yes (read-only) | **NO** — sandbox preamble rejects any write-mode `open()`, even inside the sandbox root |
 
@@ -745,6 +745,6 @@ The `kPythonSandboxPreamble` injected before every `evaluate` snippet enforces T
 1. **Sandbox containment** — open() / io.open() / os.open() reject paths resolving outside the cwd (sandbox root).
 2. **Read-only** — write-mode `open(...)` rejected regardless of path. Mode chars `w/a/x/+` (any case) on `builtins.open` / `io.open`; flags `O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND` on `os.open`.
 
-PermissionError messages point the model at the filesystem write tool registered this session (the exact callable name is read from the model's AVAILABLE TOOLS list — that way the error message stays correct whether the operator chose Split mode `write_fs` or Unified mode `fs(action="write")`). Read-only opens inside the sandbox continue to work (legitimate "load CSV, compute, print result" flows are unaffected).
+PermissionError messages point the model at the filesystem write tool registered this session (the exact callable name is read from the model's AVAILABLE TOOLS list — that way the error message stays correct whether the operator chose Split mode `write_file` or Unified mode `fs(action="write")`). Read-only opens inside the sandbox continue to work (legitimate "load CSV, compute, print result" flows are unaffected).
 
 **Documented residual:** Python's `__closure__` introspection on `builtins.open` recovers the unwrapped open from the closure cell, bypassing both checks. Same class as the existing `ctypes` / `_io.FileIO` / `subprocess` bypasses — adversarial intent is out of scope; defense is against accident. See SECURITY_AUDIT §23.2.

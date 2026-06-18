@@ -1240,19 +1240,19 @@ void render_tool(std::vector<std::string> & rows, const Ui & ui, Message & m,
         block_rows(rows, ui, "# " + desc, body);
         return;
     }
-    if (name == "read_fs") {
+    if (name == "read_file") {
         std::string extra = args_suffix(a, { "start_line", "offset", "limit" });
         inline_tool_rows(rows, ui, tc, "→",
             "Read " + tool_path_arg(a) + (extra.empty() ? "" : " " + extra));
         return;
     }
-    if (name == "write_fs" || name == "append_fs") {
+    if (name == "write_file" || name == "append_file") {
         inline_tool_rows(rows, ui, tc, "←",
-            std::string(name == "write_fs" ? "Write " : "Append ")
+            std::string(name == "write_file" ? "Write " : "Append ")
             + tool_path_arg(a));
         return;
     }
-    if (name == "edit_fs") {
+    if (name == "edit_file") {
         std::string olds = S(a, "oldString"), news = S(a, "newString");
         if (tc.state == ToolState::Done && (!olds.empty() || !news.empty())) {
             std::vector<std::string> styled =
@@ -1266,8 +1266,8 @@ void render_tool(std::vector<std::string> & rows, const Ui & ui, Message & m,
             "Edit " + tool_path_arg(a) + (extra.empty() ? "" : " " + extra));
         return;
     }
-    if (name == "glob_fs" || name == "grep_fs") {
-        const bool grep = name == "grep_fs";
+    if (name == "glob_file" || name == "grep_file") {
+        const bool grep = name == "grep_file";
         std::string pat = S(a, "pattern");
         std::string where = S(a, "path");
         int n = 0;
@@ -1288,7 +1288,7 @@ void render_tool(std::vector<std::string> & rows, const Ui & ui, Message & m,
         inline_tool_rows(rows, ui, tc, "✱", body);
         return;
     }
-    if (name == "list_fs") {
+    if (name == "list_file") {
         inline_tool_rows(rows, ui, tc, "→", "List " + tool_path_arg(a));
         return;
     }
@@ -2666,11 +2666,11 @@ void wrap_tools(Ui & ui) {
                 std::string n = easyai::canonical_tool_name(tname);
                 ui.spin_label =
                     n == "bash"      ? "Writing command" :
-                    n == "read_fs"   ? "Reading file" :
-                    n == "edit_fs"   ? "Preparing edit" :
-                    n == "write_fs"  ? "Preparing write" :
-                    n == "glob_fs"   ? "Finding files" :
-                    n == "grep_fs"   ? "Searching content" :
+                    n == "read_file"   ? "Reading file" :
+                    n == "edit_file"   ? "Preparing edit" :
+                    n == "write_file"  ? "Preparing write" :
+                    n == "glob_file"   ? "Finding files" :
+                    n == "grep_file"   ? "Searching content" :
                     n == "fetch_web" ? "Fetching from the web" :
                     n == "search_web"? "Searching web" :
                     n == "question"  ? "Asking questions" :

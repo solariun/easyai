@@ -63,7 +63,7 @@ public:
     // model, url) is locked in.
     // -----------------------------------------------------------------
     Agent & system     (std::string prompt);     // system prompt
-    Agent & sandbox    (std::string dir);        // enable fs_* tools, scoped here
+    Agent & sandbox    (std::string dir);        // enable *_file tools, scoped here
     Agent & allow_bash (bool on = true);         // enable the bash tool
     Agent & preset     (std::string name);       // "deterministic"…"wild"
     Agent & remote_model (std::string id);       // remote-mode only ("gpt-4o-mini" etc)

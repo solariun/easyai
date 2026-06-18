@@ -98,7 +98,7 @@ The HTTP layer, paths, tool gating, MCP auth.
 | `host` | string | `--host` | `127.0.0.1` | Bind address. `0.0.0.0` to listen on every interface. |
 | `port` | int | `--port` | `8080` | TCP port. |
 | `alias` | string | `-a`, `--alias` | basename of `model` | Public model id reported by `/v1/models` and `/api/tags`. |
-| `sandbox` | path | `--sandbox` | (none) | Root directory for `bash` and `fs_*` tools. **Auto-registers the `fs_*` tools** when set (no need to also pass `--allow-fs`). `bash` still requires `--allow-bash`. |
+| `sandbox` | path | `--sandbox` | (none) | Root directory for `bash` and `*_file` tools. **Auto-registers the `*_file` tools** when set (no need to also pass `--allow-fs`). `bash` still requires `--allow-bash`. |
 | `system_file` | path | `-s`, `--system-file` | (none — uses built-in default) | File containing the server-default system prompt. |
 | `system_inline` | string | `--system` | (none) | Inline system prompt. Beats `system_file` if both are set. |
 | `external_tools` | path | `--external-tools` | (none — feature off) | Directory of `EASYAI-*.tools` manifests. See `EXTERNAL_TOOLS.md`. |

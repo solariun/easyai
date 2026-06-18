@@ -798,7 +798,7 @@ ToolsetView ToolsetView::from_tools(const std::vector<easyai::Tool> & tools) {
             v.datetime_on = true;
         else if (n == "web" || n == "search_web" || n == "fetch_web")
             v.web_on = true;
-        else if (n == "fs" || (n.size() > 3 && n.compare(n.size() - 3, 3, "_fs") == 0))
+        else if (n == "fs" || (n.size() > 5 && n.compare(n.size() - 5, 5, "_file") == 0))
             v.fs_on = true;
         else if (n == "bash")
             v.bash_on = true;
