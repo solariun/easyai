@@ -684,12 +684,6 @@ struct Options {
     bool        metrics           = false;
     std::string set_preset;
     bool        show_system_prompt = false;   // print resolved prompt and exit
-    // unattended: tells the model there is no human at the terminal —
-    // it cannot ask clarifying questions, request approval, or present
-    // a numbered choice and wait. Auto-set when a prompt is given on
-    // the command line (one-shot mode, including `-p`, positional arg,
-    // and stdin pipe); --unattended forces it on regardless.
-    bool        unattended       = false;
 
     // --shell: hybrid AI shell. Normal commands execute via the user's
     // $SHELL. Lines prefixed with > are sent to the AI model. CWD and
@@ -755,7 +749,6 @@ struct Options {
     bool        tls_ca_path_cli_set    = false;
     bool        session_file_cli_set   = false;
     bool        no_local_session_cli_set = false;
-    bool        unattended_cli_set     = false;
     bool        tools_enabled_cli_set  = false;  // --tools was passed
     bool        stop_cli_set           = false;  // any --stop seen
     bool        extra_body_cli_set     = false;
@@ -1043,17 +1036,6 @@ void usage(const char * argv0) {
 "                                Ctrl+C stops AI generation or the running\n"
 "                                command and returns to the prompt.\n"
 "                                /exit to quit. Implies --allow-bash.\n"
-"    --unattended               inject an [unattended] block into the system\n"
-"                                prompt: tells the model there is no human at\n"
-"                                the terminal, so it cannot ask clarifying\n"
-"                                questions, request approval, or present a\n"
-"                                numbered menu and wait. The model picks the\n"
-"                                most reasonable interpretation and drives\n"
-"                                the task to completion in this turn.\n"
-"                                Auto-set whenever a prompt is given on the\n"
-"                                command line (-p / positional / piped\n"
-"                                stdin). Has no effect in interactive REPL\n"
-"                                mode unless passed explicitly.\n"
 "\n"
 "  Management subcommands (use one, no chat):\n"
 "    --list-tools               list LOCAL tools (registered in this CLI)\n"
@@ -1154,7 +1136,6 @@ bool parse_args(int argc, char ** argv, Options & o) {
         else if (a == "--theme")           { o.theme = need(i, "--theme");
                                              o.theme_cli_set = true; }
         else if (a == "--no-agents-md")    { o.agents_md = false; o.agents_md_cli_set = true; }
-        else if (a == "--unattended")     { o.unattended = true; o.unattended_cli_set = true; }
         else if (a == "--use-google")     { o.use_google = true; o.use_google_cli_set = true; }
         else if (a == "--external-tools") { o.external_tools_dir = need(i, "--external-tools"); o.external_tools_cli_set = true; }
         else if (a == "--memory" ||
@@ -1528,7 +1509,6 @@ bool parse_args(int argc, char ** argv, Options & o) {
         load_bool_flag ("quiet",          o.quiet,          o.quiet_cli_set);
         load_bool_flag ("auto_log",       o.auto_log,       /*cli_set=*/false);
         load_str_flag  ("log_file",       o.log_file_path,  o.log_file_path_cli_set);
-        load_bool_flag ("unattended",     o.unattended,     o.unattended_cli_set);
 
         // ----- Session ------------------------------------------------
         load_bool_flag ("auto_continue",     o.auto_continue,     o.auto_continue_cli_set);
@@ -2599,12 +2579,6 @@ int main(int argc, char ** argv) {
         }
     }
 
-    // One-shot runs (--prompt / positional / piped stdin) imply
-    // unattended: no human is at the REPL to answer a clarifying
-    // question or pick from a menu. Explicit --unattended already won;
-    // this just covers the common case where the operator forgot.
-    if (!o.prompt.empty()) o.unattended = true;
-
     // Resolve the interactive surface now — register_tools (question
     // tool gate) and the system-prompt builder ([asking-the-user]
     // paragraph) both depend on it. The TUI needs a real terminal on
@@ -2690,7 +2664,7 @@ int main(int argc, char ** argv) {
     // the guidance is irrelevant and we leave the prompt alone.
     {
         const bool any_fs_like = o.allow_bash || !o.sandbox.empty();
-        const bool any_prefix  = any_fs_like || !o.no_plan || o.unattended;
+        const bool any_prefix  = any_fs_like || !o.no_plan;
         std::string prefix;
 
         // [tool-discipline] — closed-set rule. The server's own system
@@ -2782,30 +2756,6 @@ int main(int argc, char ** argv) {
         // rule + `tool_lookup` guidance — is now in
         // preamble::tools_block() emitted at the top of this prefix,
         // so the hand-rolled version is gone.
-        // [unattended] — emitted on --unattended OR any one-shot mode
-        // (--prompt / positional / piped stdin). Overrides the "ask
-        // the user" parts of [guidance]: there's no REPL on the other
-        // side to answer, so the model has to commit to a choice and
-        // drive the task to completion in this turn.
-        if (o.unattended) {
-            if (!prefix.empty()) prefix += "\n";
-            prefix +=
-                "[unattended]\n"
-                "This run is UNATTENDED — no human is at the terminal. "
-                "You CANNOT ask clarifying questions, request approval "
-                "before tool calls, present a numbered menu and wait, "
-                "or pause for confirmation. The user has delegated full "
-                "authority for this turn; nobody will read a follow-up "
-                "question or pick an option.\n"
-                "\n"
-                "When the request is ambiguous, PICK the most reasonable "
-                "interpretation, briefly note the choice in your final "
-                "answer, and execute. Do not stop after a draft to ask "
-                "\"should I continue?\" — carry the task to completion in "
-                "this turn. This OVERRIDES step 3 of [guidance] above: "
-                "instead of asking which next-step the user wants, list "
-                "any ideas in your final answer and stop.\n";
-        }
         // [cite-sources] — unconditional. The server's built-in prompt
         // carries the same rule, but a CLI that passes --system to
         // override the server default would otherwise lose it. Render

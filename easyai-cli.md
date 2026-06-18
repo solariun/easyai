@@ -402,7 +402,6 @@ the server's preset drives sampling. Set explicitly to override.
 | `quiet`       | bool | `-q` / `--quiet`    | `false` | Disable spinner + ctx-% gauge (batch / scripted use). |
 | `log_file`    | path | `--log-file`        | (empty) | Raw transaction log path. Empty = no log file. |
 | `auto_log`    | bool | (no CLI flag)       | `false` | Legacy `/tmp` auto-log; the `log_file` key is the recommended replacement. |
-| `unattended`  | bool | `--unattended`      | (auto)  | Tell the model no human is at the terminal. Auto-set when a prompt is passed on the command line. |
 
 #### Session
 

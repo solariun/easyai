@@ -267,12 +267,6 @@
 ; --log-file / log_file path is the recommended replacement.
 ;auto_log      = false
 
-; Mark the session as unattended (no human at the terminal). The
-; model is told it cannot ask clarifying questions, request
-; approval, or present a numbered menu and wait. Auto-set when a
-; prompt is given on the command line; this key forces it on.
-;unattended    = false
-
 ; ============================================================
 ; Session persistence
 ; ============================================================
