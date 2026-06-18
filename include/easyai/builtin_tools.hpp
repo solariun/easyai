@@ -93,7 +93,7 @@ Tool fs(std::string root = ".");
 
 // Focused per-action variants of `fs` (read_file, write_file, append_file,
 // edit_file, list_file, glob_file, grep_file, check_path_file, cwd_file,
-// sandbox_file). Same handlers as the unified surface — see fs_split's
+// sandbox_path_file). Same handlers as the unified surface — see fs_split's
 // banner in builtin_tools.cpp for the rationale. Use the Toolbelt's
 // tool_mode(Split | Both) to register these alongside (or instead of)
 // the unified `fs`.

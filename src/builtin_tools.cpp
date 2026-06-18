@@ -4274,11 +4274,11 @@ std::vector<Tool> fs_split(std::string root) {
     out.push_back(Tool::builder("cwd_file")
         .describe(
             "Current working directory at call time (getcwd). For "
-            "day-to-day work use sandbox_file. No parameters.")
+            "day-to-day work use sandbox_path_file. No parameters.")
         .handle(make_fs_cwd_handler())
         .build());
 
-    out.push_back(Tool::builder("sandbox_file")
+    out.push_back(Tool::builder("sandbox_path_file")
         .describe(
             "Absolute sandbox root, pinned at registration. The "
             "anchor every *_file / bash relative path resolves "

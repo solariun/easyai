@@ -269,7 +269,7 @@ worth it for everyone, surprising for nobody.
 
 | Surface | Registered out of the box | Old behaviour | New default |
 | --- | --- | --- | --- |
-| Multi-action families | `fs`, `web` | 2 dispatchers + 7 knowledge tools | `read_file`, `write_file`, `append_file`, `edit_file`, `list_file`, `glob_file`, `grep_file`, `check_path_file`, `cwd_file`, `sandbox_file`, `search_web`, `fetch_web`, `knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` — 19 focused tools |
+| Multi-action families | `fs`, `web` | 2 dispatchers + 7 knowledge tools | `read_file`, `write_file`, `append_file`, `edit_file`, `list_file`, `glob_file`, `grep_file`, `check_path_file`, `cwd_file`, `sandbox_path_file`, `search_web`, `fetch_web`, `knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` — 19 focused tools |
 
 ```bash
 # new default (no flag)
@@ -310,7 +310,7 @@ easyai-cli --tools-mode both        # register both surfaces side-by-side
 | Mode | Tools registered (with `--sandbox` + `--memory`) |
 | --- | --- |
 | `unified` | `fs`, `web` — 2 dispatchers + 7 `knowledge_*` tools |
-| `split` (new default) | `read_file`, `write_file`, `append_file`, `edit_file`, `list_file`, `glob_file`, `grep_file`, `check_path_file`, `cwd_file`, `sandbox_file`, `search_web`, `fetch_web`, `knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` — 19 focused tools |
+| `split` (new default) | `read_file`, `write_file`, `append_file`, `edit_file`, `list_file`, `glob_file`, `grep_file`, `check_path_file`, `cwd_file`, `sandbox_path_file`, `search_web`, `fetch_web`, `knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` — 19 focused tools |
 | `both` | unified + split, same handlers under both names |
 
 Same handlers under the hood — behaviour is identical to the unified
