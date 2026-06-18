@@ -334,6 +334,7 @@ struct Client::Impl {
     int                      max_tokens        = -1;
     std::vector<std::string> stop_sequences;
     std::string              extra_body_raw;            // JSON object literal
+    std::string              reasoning_effort;          // empty = omit (model default)
 
     // Tools (registered locally; their handlers run in this process).
     std::vector<Tool> tools;
@@ -464,6 +465,7 @@ struct Client::Impl {
         if (presence_penalty  > -2.0f) body["presence_penalty"]  = presence_penalty;
         if (seed              >= 0)    body["seed"]              = seed;
         if (max_tokens        >= 0)    body["max_tokens"]        = max_tokens;
+        if (!reasoning_effort.empty()) body["reasoning_effort"]  = reasoning_effort;
         if (!stop_sequences.empty()) {
             ordered_json arr = ordered_json::array();
             for (const auto & s : stop_sequences) arr.push_back(s);
@@ -1323,6 +1325,19 @@ Client & Client::seed               (long long s)        { p_->seed             
 Client & Client::max_tokens         (int   n)            { p_->max_tokens        = n;                 return *this; }
 Client & Client::stop               (std::vector<std::string> s) { p_->stop_sequences = std::move(s); return *this; }
 Client & Client::extra_body_json    (std::string raw)    { p_->extra_body_raw    = std::move(raw);    return *this; }
+
+Client & Client::reasoning_effort   (std::string level) {
+    std::string s;
+    s.reserve(level.size());
+    for (char c : level) s += (char) std::tolower((unsigned char) c);
+    // "auto"/"none"/"default"/"model"/"" → omit the field (model default).
+    if (s == "auto" || s == "none" || s == "default" || s == "model" || s.empty()) {
+        p_->reasoning_effort.clear();
+    } else {
+        p_->reasoning_effort = std::move(s);
+    }
+    return *this;
+}
 
 Client & Client::add_tool   (Tool t) { p_->tools.push_back(std::move(t)); return *this; }
 Client & Client::clear_tools()       { p_->tools.clear();                  return *this; }

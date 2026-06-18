@@ -2127,9 +2127,11 @@ flags.
 **Sampling and penalty knobs** are all there as fluent setters:
 `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`,
 `frequency_penalty`, `presence_penalty`, `seed`, `max_tokens`,
-`stop(vector)`, `extra_body_json` (free-form JSON merged last so it can
-override anything the typed setters wrote, useful for non-standard
-server extensions like `{"reasoning_effort":"high"}`).
+`stop(vector)`, `reasoning_effort` (sends the `reasoning_effort` body
+field — `"low"` / `"medium"` / `"high"`; the sentinels `"auto"` /
+`"none"` / `""` omit it so the model uses its default), `extra_body_json`
+(free-form JSON merged last so it can override anything the typed setters
+wrote, useful for other non-standard server extensions).
 
 **Server management** without touching curl:
 
@@ -2227,11 +2229,12 @@ cli.temperature(0.2f)
    .stop({ "\n\nUSER:", "\n\nQ:" });
 ```
 
-For non-standard server fields (`reasoning_effort`, `tool_choice`,
-provider-specific extensions) there's an escape hatch:
+`reasoning_effort` is now a first-class setter (`cli.reasoning_effort("high")`);
+for other non-standard server fields (`tool_choice`, provider-specific
+extensions) there's an escape hatch:
 
 ```cpp
-cli.extra_body_json(R"({"reasoning_effort":"high","logit_bias":{"50256":-100}})");
+cli.extra_body_json(R"({"logit_bias":{"50256":-100}})");
 ```
 
 The string MUST parse as a JSON object; its keys merge into the
@@ -2391,9 +2394,9 @@ easyai-cli --url http://ai.local:8080 \
   --temperature 0.0 --top-p 0.9 --seed 42 --stop "USER:" --stop "Q:" \
   -p "Translate the next sentence to PT-BR: ..."
 
-# Non-standard reasoning_effort field via --extra-json:
+# reasoning_effort is first-class (default 'auto' = model default):
 easyai-cli --url https://api.openai.com --api-key $K --model o1-preview \
-  --extra-json '{"reasoning_effort":"high"}' \
+  --reasoning-effort high \
   -p "Plan the Mars-mission trajectory."
 
 # List local tools and exit (what the model will be told about):

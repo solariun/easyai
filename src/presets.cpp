@@ -14,6 +14,14 @@ namespace easyai {
 // wide variety of GGUFs people will throw at this engine.
 // ---------------------------------------------------------------------------
 static const std::vector<Preset> kPresets = {
+    // `auto` leads the table — it's the default. Its numbers mirror the
+    // Engine's built-in sampler defaults, and model_default=true marks it
+    // as "impose nothing, use the model default". Listed first so UIs and
+    // /v1/models surface it as the natural starting point.
+    { "auto",
+      "Use the model's own default sampling — easyai imposes no preset.",
+      0.7f, 0.95f, 40, 0.05f, true },
+
     { "deterministic",
       "No randomness — same prompt always produces the same answer (greedy decoding).",
       0.0f, 1.0f,    1, 0.0f },
@@ -53,6 +61,7 @@ const Preset * find_preset(std::string_view name) {
     static const Alias aliases[] = {
         { "exact",    "precise"       },
         { "default",  "balanced"      },
+        { "model",    "auto"          },
         { "fun",      "creative"      },
         { "chaos",    "wild"          },
         { "greedy",   "deterministic" },

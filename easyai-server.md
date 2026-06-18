@@ -140,7 +140,7 @@ Model loading and inference tunables.
 | `threads_batch` | int | `-tb`, `--threads-batch` | `0` (lib default) | CPU threads for batched inference. |
 | `batch` | int | `--batch` | `0` (follows ctx) | Logical batch size. |
 | `parallel` | int | `-np`, `--parallel` | `1` | Llama-server compat. |
-| `preset` | string | `--preset` | `precise` | `deterministic` / `precise` / `balanced` / `creative` / `wild`. See the [Sampling presets table](#sampling-presets--the-five-built-ins) below for what each implies. The installer drops `#preset = <name>` (commented) in the generated INI so the engine picks the name from `--preset` instead. |
+| `preset` | string | `--preset` | `auto` | `auto` (model default — impose no preset; runs at the engine's default sampler) / `deterministic` / `precise` / `balanced` / `creative` / `wild`. See the [Sampling presets table](#sampling-presets--the-five-built-ins) below for what each implies. The installer drops `#preset = <name>` (commented) in the generated INI so the engine picks the name from `--preset` instead. |
 | `flash_attn` | bool | `-fa`, `--flash-attn` | `off` | Free perf on every backend that supports it. |
 | `mlock` | bool | `--mlock` | `off` | Pin model weights in RAM. Needs `LimitMEMLOCK=infinity` on the unit. |
 | `no_mmap` | bool | `--no-mmap` | `off` | Required with `mlock` for portability. |
@@ -158,6 +158,7 @@ Model loading and inference tunables.
 | `spec_draft_model` | path | `--draft-model` | (empty) | GGUF path for the standalone draft model (`draft-simple` / `draft-eagle3`). Must share vocabulary with the target model. Ignored when `spec_type` is `none`, `draft-mtp`, or `ngram-*`. |
 | `chat_template_file` | path | `--chat-template-file` | (empty → embedded) | Override the chat template embedded in the GGUF with a Jinja file on disk. Mirrors `llama-server --chat-template-file`. The file is read once at load. Useful for shipping a tuned Qwen3 thinking template (e.g. `qwen3-think.jinja`) without rebuilding the GGUF. Read errors abort startup. |
 | `reasoning_format` | enum | `--reasoning-format` | `auto` | How to extract reasoning content: `none` (leave `<think>` inline), `auto` (default; currently behaves like `deepseek`), `deepseek` (extract `<think>…</think>` into `message.reasoning_content`, including during streaming — the Qwen3 / R1 default), `deepseek-legacy` (extract into `reasoning_content` for sync, leave inline for streaming — old behaviour). Unknown names fall back to `none`. |
+| `reasoning_effort` | enum | `--reasoning-effort` | `auto` | How hard the model thinks. Injected as the `reasoning_effort` chat-template kwarg (GPT-OSS et al.; the same channel llama-server uses), so a template that reads it adjusts its thinking depth. `auto` (model default — inject nothing) / `low` / `medium` / `high` / `minimal`. A per-request `reasoning_effort` field in the `/v1/chat/completions` body overrides this for that request (any string, incl. model-specific levels). Templates that don't consult the kwarg simply ignore it. Unknown startup values abort with a hint. |
 | `temperature` | float | `--temperature`, `--temp` | `0.2` | Sampling temperature. |
 | `top_p` | float | `--top-p` | `0.92` | Nucleus sampling threshold. |
 | `top_k` | int | `--top-k` | `50` | Top-K sampling. |
@@ -169,18 +170,19 @@ Model loading and inference tunables.
 | `seed` | uint32 | `--seed` | `0` (random) | RNG seed. |
 | `max_incomplete_retries` | int | `--max-incomplete-retries` | `10` | How many times the engine discards + nudges + retries when the model finishes a turn with no tool_call and only an "announce" snippet ("Let me…", "I'll…"). `0` disables retries (equivalent to `retry_on_incomplete = off`). Bump to 15-20 for weak / 1-bit-quant models that keep announcing-without-acting. Each retry surfaces in the webui Thinking panel as `↻ Retry N/max`. |
 
-### Sampling presets — the five built-ins
+### Sampling presets — the built-ins
 
 A **preset** is a named bundle of sampling parameters (`temperature`,
-`top_p`, `top_k`, `min_p`). Five ship with easyai; the one the server
+`top_p`, `top_k`, `min_p`). Six ship with easyai; the one the server
 runs on comes from `--preset` / `[ENGINE] preset` and is exposed in
 the webui as a `default` badge so operators don't have to remember
 the specific numbers.
 
 | Preset | temp | top_p | top_k | min_p | Behaviour |
 |---|---|---|---|---|---|
+| **`auto`** (default) | 0.7 | 0.95 | 40 | 0.05 | **Model default** — easyai imposes no opinion of its own; runs at the engine's built-in sampler. Pick this when you trust the model's own tuning. Numbers mirror `balanced`. |
 | **`deterministic`** | 0.0 | 1.00 | 1 | 0.00 | Greedy — same prompt → identical answer every time. Reproducibility, regression tests, anything piped into a parser. |
-| **`precise`** (default) | 0.2 | 0.95 | 40 | 0.10 | High-confidence tokens only. Best for code, math, factual Q&A, tool-calling agents, structured output. The installer's baseline. |
+| **`precise`** | 0.2 | 0.95 | 40 | 0.10 | High-confidence tokens only. Best for code, math, factual Q&A, tool-calling agents, structured output. |
 | **`balanced`** | 0.7 | 0.95 | 40 | 0.05 | Some phrasing variety, still focused. General-purpose chat, summarisation. |
 | **`creative`** | 1.0 | 0.95 | 40 | 0.05 | Wider phrasing, surprising word choices. Brainstorming, fiction, marketing copy. Code/math get worse. |
 | **`wild`** | 1.4 | 0.98 | 60 | 0.00 | Maximum entropy. Frequent off-topic, contradictions, hallucinations. Pure exploration only. |
@@ -188,8 +190,8 @@ the specific numbers.
 Aliases (case-insensitive, recognised by `easyai::find_preset()`):
 `exact` → `precise`, `default` → `balanced` (library alias only —
 NOT the same as the webui's "default" badge, which resolves
-dynamically), `fun` → `creative`, `chaos` → `wild`, `greedy` →
-`deterministic`.
+dynamically), `model` → `auto`, `fun` → `creative`, `chaos` →
+`wild`, `greedy` → `deterministic`.
 
 Where the preset name shows up across the server:
 
@@ -201,7 +203,7 @@ Where the preset name shows up across the server:
 | `GET /health` `.preset` field | Liveness probe reports the active preset name. |
 | `POST /v1/preset` body `{"preset":"NAME"}` | Live swap. Sets the server-wide ambient default for every subsequent request — no restart. |
 | Webui **`default` badge** | First button in the tone bar. Resolves to the server's currently-active preset (read at page-load from the values baked into the bundle's injected JS). New sessions start here when `localStorage` has no prior choice; existing sessions keep whatever the user last cycled to. |
-| Webui named badges | `deterministic` / `precise` / `balanced` / `creative` / `wild` — per-session client-side override. Affects only requests THIS browser tab sends; doesn't change the server's ambient default. Persists in `localStorage`. |
+| Webui named badges | `auto` / `deterministic` / `precise` / `balanced` / `creative` / `wild` — per-session client-side override. Affects only requests THIS browser tab sends; doesn't change the server's ambient default. Persists in `localStorage`. The inline webui also carries a **reasoning effort** row (`auto` / `low` / `medium` / `high`) that sets the per-request `reasoning_effort` body field. |
 | Inline preset command | First word in the user's message (`creative 0.9 …`, `precise …`). `parse_preset()` peels the prefix; the rest becomes the actual prompt. Per-turn override. |
 
 The explicit per-knob overrides (`temperature`, `top_p`, `top_k`,

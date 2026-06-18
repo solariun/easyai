@@ -620,6 +620,10 @@ struct Options {
     int                      max_tokens        = -1;
     std::vector<std::string> stop_sequences;
     std::string              extra_body;       // JSON object literal
+    // Reasoning-effort level sent as the `reasoning_effort` body field.
+    // "auto" (the default) omits it so the server/model decides; "low" /
+    // "medium" / "high" / model-specific levels are forwarded.
+    std::string              reasoning_effort  = "auto";
     int                      timeout           = 86400;  // 24 hours — multi-hour agentic sessions
     int                      http_retries      = 5;     // extra attempts on transient HTTP fails
     // Per-turn tool-hop ceiling.  Library default is 8 (safe for thin
@@ -740,6 +744,7 @@ struct Options {
     bool        external_tools_cli_set = false;
     bool        rag_dir_cli_set        = false;
     bool        max_reasoning_cli_set  = false;
+    bool        reasoning_effort_cli_set = false;
     bool        show_reasoning_cli_set = false;
     bool        retry_on_incomplete_cli_set = false;
     bool        no_plan_cli_set        = false;
@@ -915,6 +920,11 @@ void usage(const char * argv0) {
 "                                chars.  Useful for chatty thinking models\n"
 "                                that fall into long deliberation loops on\n"
 "                                niche questions.  0 = unlimited (default).\n"
+"    --reasoning-effort LVL     how hard the model thinks: auto|low|medium|\n"
+"                                high|minimal.  Sent as the reasoning_effort\n"
+"                                request field; the server feeds it to the\n"
+"                                chat template.  Default 'auto' = model\n"
+"                                default (field omitted).  [cli] reasoning_effort.\n"
 "    --no-retry-on-incomplete   disable the auto-retry-with-nudge for\n"
 "                                incomplete turns (default: ON).  When the\n"
 "                                server flags a turn as incomplete\n"
@@ -1178,6 +1188,7 @@ bool parse_args(int argc, char ** argv, Options & o) {
         else if (a == "--no-reasoning"
               || a == "--hide-reasoning") { o.show_reasoning = false; o.show_reasoning_cli_set = true; }
         else if (a == "--max-reasoning")  { o.max_reasoning = std::stoi(need(i, "--max-reasoning")); o.max_reasoning_cli_set = true; }
+        else if (a == "--reasoning-effort"){ o.reasoning_effort = need(i, "--reasoning-effort"); o.reasoning_effort_cli_set = true; }
         else if (a == "--retry-on-incomplete")    { o.retry_on_incomplete = true; o.retry_on_incomplete_cli_set = true; }
         else if (a == "--no-retry-on-incomplete") { o.retry_on_incomplete = false; o.retry_on_incomplete_cli_set = true; }
         else if (a == "--verbose" || a == "-v") { o.verbose = true; o.verbose_cli_set = true; }
@@ -1501,6 +1512,7 @@ bool parse_args(int argc, char ** argv, Options & o) {
         // ----- Reasoning / retry --------------------------------------
         load_bool_flag ("show_reasoning",      o.show_reasoning,      o.show_reasoning_cli_set);
         load_int_flag  ("max_reasoning",       o.max_reasoning,       o.max_reasoning_cli_set);
+        load_str_flag  ("reasoning_effort",    o.reasoning_effort,    o.reasoning_effort_cli_set);
         load_bool_flag ("retry_on_incomplete", o.retry_on_incomplete, o.retry_on_incomplete_cli_set);
 
         // ----- Display / logging --------------------------------------
@@ -2920,6 +2932,7 @@ int main(int argc, char ** argv) {
     if (o.seed              >= 0)      cli.seed(o.seed);
     if (o.max_tokens        >= 0)      cli.max_tokens(o.max_tokens);
     if (!o.stop_sequences.empty())     cli.stop(o.stop_sequences);
+    cli.reasoning_effort(o.reasoning_effort);   // "auto" omits the field
     if (!o.extra_body.empty())         cli.extra_body_json(o.extra_body);
     if (o.verbose)                     cli.verbose(true);
     if (!o.prompt_progress)            cli.send_prompt_progress(false);

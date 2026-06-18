@@ -276,6 +276,21 @@ class Engine {
     // common/chat.h.
     Engine & reasoning_format(const std::string & name);
 
+    // How hard the model should think before answering — the "reasoning
+    // effort" knob exposed by GPT-OSS and friends. Rendered into the chat
+    // template via the `reasoning_effort` template kwarg (the same channel
+    // llama-server uses), so a template that reads it (e.g. emits
+    // "Reasoning: high" into its system block) adjusts its thinking depth.
+    //
+    // Accepts (case-insensitive): "low", "medium", "high", "minimal", or
+    // any model-specific level. The sentinels "auto", "none", "default",
+    // "model", and "" all mean USE THE MODEL DEFAULT — nothing is injected
+    // and the template decides on its own. Default is "auto".
+    //
+    // No-op on templates that don't consult `reasoning_effort` (most
+    // non-reasoning models simply ignore the extra kwarg).
+    Engine & reasoning_effort(const std::string & level);
+
     // ---------------- tools -------------------------------------------------
     Engine & add_tool   (Tool t);
     Engine & clear_tools();

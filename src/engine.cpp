@@ -804,6 +804,11 @@ struct Engine::Impl {
     // Reasoning extraction format for render(). Default AUTO (≡ DEEPSEEK
     // for templates that support it). Overridden by Engine::reasoning_format.
     common_reasoning_format reasoning_format = COMMON_REASONING_FORMAT_AUTO;
+    // Reasoning-effort level injected as the `reasoning_effort` chat-template
+    // kwarg (GPT-OSS et al.). Empty = USE THE MODEL DEFAULT — inject nothing.
+    // Set via Engine::reasoning_effort, which maps "auto"/"none"/"default" to
+    // empty. Lowercased simple word ("low"/"medium"/"high"/…) otherwise.
+    std::string reasoning_effort;
     common_chat_tool_choice tool_choice = COMMON_CHAT_TOOL_CHOICE_AUTO;
     bool         parallel_tool_calls    = false;
     int          max_tool_hops          = 8;     // default agentic safety cap
@@ -907,6 +912,14 @@ struct Engine::Impl {
         // template that supports thinking; user can override via
         // Engine::reasoning_format (--reasoning-format on the CLI).
         in.reasoning_format      = reasoning_format;
+        // Reasoning effort rides in as a chat-template kwarg. llama.cpp
+        // json::parse()s each kwarg value into the template's extra_context,
+        // so the value must be a JSON literal — wrap the level in quotes
+        // (it's a validated simple word, no escaping needed). Empty means
+        // "model default": inject nothing and let the template decide.
+        if (!reasoning_effort.empty()) {
+            in.chat_template_kwargs["reasoning_effort"] = "\"" + reasoning_effort + "\"";
+        }
         return common_chat_templates_apply(templates.get(), in);
     }
 
@@ -1645,6 +1658,21 @@ Engine & Engine::reasoning_format(const std::string & name) {
         p_->last_error = std::string("reasoning_format: ") + e.what();
         easyai::log::error("[easyai] Engine::reasoning_format: %s",
                            p_->last_error.c_str());
+    }
+    return *this;
+}
+
+Engine & Engine::reasoning_effort(const std::string & level) {
+    std::string s;
+    s.reserve(level.size());
+    for (char c : level) s += (char) std::tolower((unsigned char) c);
+    // "auto" / "none" / "default" / "model" / "" → no injection: the
+    // template uses whatever effort it defaults to. Anything else is
+    // forwarded verbatim (lowercased) as the reasoning_effort kwarg.
+    if (s == "auto" || s == "none" || s == "default" || s == "model" || s.empty()) {
+        p_->reasoning_effort.clear();
+    } else {
+        p_->reasoning_effort = s;
     }
     return *this;
 }

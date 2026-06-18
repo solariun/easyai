@@ -479,11 +479,19 @@ header.topbar h1 { font-size: 1rem; margin: 0; font-weight: 600; letter-spacing:
       <div id="settingsPanel">
         <h3>preset</h3>
         <div class="preset-row" id="presetRow">
+          <button data-p="auto" class="active">auto</button>
           <button data-p="deterministic">deterministic</button>
-          <button data-p="precise" class="active">precise</button>
+          <button data-p="precise">precise</button>
           <button data-p="balanced">balanced</button>
           <button data-p="creative">creative</button>
           <button data-p="wild">wild</button>
+        </div>
+        <h3>reasoning effort</h3>
+        <div class="preset-row" id="effortRow">
+          <button data-e="auto" class="active">auto</button>
+          <button data-e="low">low</button>
+          <button data-e="medium">medium</button>
+          <button data-e="high">high</button>
         </div>
         <h3>sampling</h3>
         <div class="slider-row">
@@ -657,6 +665,9 @@ const state = {
 };
 
 const PRESETS = {
+  // `auto` mirrors the engine's default sampler — selecting it means
+  // "let the model run at its own default". Same numbers as balanced.
+  auto:          { temperature: 0.7, top_p: 0.95, top_k: 40, min_p: 0.05 },
   deterministic: { temperature: 0.0, top_p: 1.0, top_k: 1,  min_p: 0.0  },
   precise:       { temperature: 0.2, top_p: 0.95, top_k: 40, min_p: 0.10 },
   balanced:      { temperature: 0.7, top_p: 0.95, top_k: 40, min_p: 0.05 },
@@ -668,17 +679,18 @@ function loadSettings(){
   try {
     const j = JSON.parse(localStorage.getItem('easyai-settings') || '{}');
     return Object.assign({
-      preset:       'precise',
-      temperature:  PRESETS.precise.temperature,
-      top_p:        PRESETS.precise.top_p,
-      top_k:        PRESETS.precise.top_k,
-      min_p:        PRESETS.precise.min_p,
+      preset:       'auto',
+      reasoning_effort: 'auto',   // 'auto' = model default (field omitted)
+      temperature:  PRESETS.auto.temperature,
+      top_p:        PRESETS.auto.top_p,
+      top_k:        PRESETS.auto.top_k,
+      min_p:        PRESETS.auto.min_p,
       max_tokens:   0,            // 0 = no client cap
     }, j);
   } catch { return loadDefaultSettings(); }
 }
 function loadDefaultSettings(){
-  return Object.assign({ preset:'precise', max_tokens: 0 }, PRESETS.precise);
+  return Object.assign({ preset:'auto', reasoning_effort:'auto', max_tokens: 0 }, PRESETS.auto);
 }
 function saveSettings(){ localStorage.setItem('easyai-settings', JSON.stringify(state.settings)); }
 
@@ -1017,6 +1029,9 @@ async function streamChat(messages, settings, handlers, signal){
     min_p:       settings.min_p,
   };
   if (settings.max_tokens > 0) body.max_tokens = settings.max_tokens;
+  // 'auto' means model default — omit the field so the server/template decides.
+  if (settings.reasoning_effort && settings.reasoning_effort !== 'auto')
+    body.reasoning_effort = settings.reasoning_effort;
 
   const res = await fetch('/v1/chat/completions', {
     method: 'POST',
@@ -1139,6 +1154,7 @@ function syncSettingsUI(){
   $('#sMinP').value  = $('#sMinPN').value  = state.settings.min_p;
   $('#sMaxTok').value = $('#sMaxTokN').value = state.settings.max_tokens;
   $$('#presetRow button').forEach(b => b.classList.toggle('active', b.dataset.p === state.settings.preset));
+  $$('#effortRow button').forEach(b => b.classList.toggle('active', b.dataset.e === (state.settings.reasoning_effort || 'auto')));
 }
 
 function applyPreset(name){
@@ -1175,7 +1191,18 @@ $$('#presetRow button').forEach(b => {
   b.onclick = () => applyPreset(b.dataset.p);
 });
 
-$('#settingsReset').onclick = () => applyPreset('balanced');
+$$('#effortRow button').forEach(b => {
+  b.onclick = () => {
+    state.settings.reasoning_effort = b.dataset.e;
+    saveSettings();
+    syncSettingsUI();
+  };
+});
+
+$('#settingsReset').onclick = () => {
+  state.settings.reasoning_effort = 'auto';
+  applyPreset('auto');   // applyPreset saves + syncs the UI
+};
 
 $('#settingsToggle').onclick = e => {
   $('#settingsPanel').classList.toggle('open');
@@ -1428,6 +1455,9 @@ struct ServerCtx {
     std::string                model_id;        // basename of model file
     std::string                api_key;         // empty = auth disabled
     bool                       no_think = false;// strip <think> from responses
+    // Ambient reasoning-effort level applied to every request unless the
+    // request body overrides it. Empty = model default (inject nothing).
+    std::string                default_reasoning_effort;  // "" = model default
 
     // Webui customisation (built once at start-up so the / handler can just
     // hand back the prebuilt buffer).
@@ -1508,6 +1538,11 @@ struct ChatRequest {
     double                                            top_k_override = -1.0;
     bool                                              stream = false;
     easyai::PresetResult                              preset_inline; // applied=true if peeled
+    // Per-request reasoning-effort override (OpenAI-style `reasoning_effort`
+    // body field). `set` is false when the field is absent → fall back to
+    // the server's ambient default; when present (incl. "auto") it wins.
+    bool                                              reasoning_effort_set = false;
+    std::string                                       reasoning_effort;
     // Per-request override of the server-side --inject-datetime flag,
     // populated from the X-Easyai-Inject HTTP header.  Empty leaves
     // the server default in effect; "on" forces injection on; "off"
@@ -1726,6 +1761,15 @@ static bool parse_chat_request(const httplib::Request & req,
     out.top_k_override = get_num("top_k",       -1.0);
     out.stream         = body.value("stream", false);
 
+    // reasoning_effort (OpenAI-style). When present (any string, incl.
+    // "auto"), it overrides the server's ambient default for this request;
+    // the Engine normalises "auto"/"none" to "model default". Non-string
+    // values are ignored (treated as absent).
+    if (body.contains("reasoning_effort") && body["reasoning_effort"].is_string()) {
+        out.reasoning_effort_set = true;
+        out.reasoning_effort     = body["reasoning_effort"].get<std::string>();
+    }
+
     // stream_options.easyai_prompt_progress (easyai extension on top
     // of OpenAI's stream_options). When explicitly false, skip the
     // per-batch easyai.prompt_progress SSE events. Missing key /
@@ -1817,6 +1861,13 @@ static void prepare_engine_for_request(ServerCtx & ctx, const ChatRequest & req)
                                  req.preset_inline.top_k,
                                  req.preset_inline.min_p);
     }
+
+    // Reasoning effort: per-request body field wins; otherwise re-apply the
+    // server's ambient default (reset_engine_defaults doesn't touch it, and
+    // a prior request may have changed it). The Engine maps "auto"/"" to
+    // "model default" (no injection).
+    ctx.engine.reasoning_effort(req.reasoning_effort_set ? req.reasoning_effort
+                                                         : ctx.default_reasoning_effort);
 
     // Build the request's history (everything except the final user
     // message — that one is pushed by the chat loop).  We work on a
@@ -3303,6 +3354,8 @@ static void route_health(ServerCtx & ctx, const httplib::Request &,
     j["backend"] = ctx.engine.backend_summary();
     j["tools"]   = ctx.default_tools.size();
     j["preset"]  = ctx.default_preset.name;
+    j["reasoning_effort"] = ctx.default_reasoning_effort.empty()
+                                ? "auto" : ctx.default_reasoning_effort;
 
     // Compatibility shims this server speaks. Lets clients
     // auto-detect which API they can use without trial requests.
@@ -3490,10 +3543,11 @@ static bool require_auth(const ServerCtx & ctx, const httplib::Request & req,
         "                                invocations need it explicitly. See\n"
         "                                RAG.md.\n"
         "\nModel tuning (apply on top of --preset):\n"
-        "      --preset <name>          Ambient preset (default 'precise').\n"
-        "                                Choices: deterministic, precise,\n"
-        "                                balanced, creative, wild. See\n"
-        "                                README.md for what each implies.\n"
+        "      --preset <name>          Ambient preset (default 'auto').\n"
+        "                                Choices: auto (model default — no\n"
+        "                                preset imposed), deterministic,\n"
+        "                                precise, balanced, creative, wild.\n"
+        "                                See README.md for what each implies.\n"
         "      --temperature <f>        Override temperature (0.0-2.0)\n"
         "      --top-p <f>              Override nucleus sampling p\n"
         "      --top-k <n>              Override top-k\n"
@@ -3556,6 +3610,14 @@ static bool require_auth(const ServerCtx & ctx, const httplib::Request & req,
         "                                 Default auto (≡ deepseek for Qwen3 /\n"
         "                                 R1 templates). INI key: [ENGINE]\n"
         "                                 reasoning_format.\n"
+        "      --reasoning-effort <lvl> How hard the model thinks, injected as\n"
+        "                                 the reasoning_effort chat-template\n"
+        "                                 kwarg (GPT-OSS et al.): auto|low|\n"
+        "                                 medium|high|minimal. Default auto\n"
+        "                                 (model default — inject nothing).\n"
+        "                                 Per-request `reasoning_effort` in the\n"
+        "                                 body overrides it. INI key: [ENGINE]\n"
+        "                                 reasoning_effort.\n"
         "\nllama-server compatibility:\n"
         "  -a,  --alias <name>          Public model id reported by /v1/models\n"
         "       --api-key <key>         Require Bearer auth on every /v1 route\n"
@@ -3669,11 +3731,16 @@ struct ServerArgs {
                                     // GOOGLE_CSE_ID env vars)
     std::string external_tools_dir; // optional: dir of EASYAI-*.tools files
     std::string rag_dir;             // optional: RAG persistent-registry dir
-    // Default preset: "precise" (temp=0.2, top_p=0.95, top_k=40, min_p=0.10).
-    // Tuned for code, math, and factual Q&A — the dominant use case for
-    // a tool-calling agent. Override with --preset / `[ENGINE] preset` /
-    // POST /v1/preset (the webui's preset bar) at runtime.
-    std::string preset     = "precise";
+    // Default preset: "auto" — impose no sampling preset, run with the
+    // model's own default sampler (temp=0.7, top_p=0.95, top_k=40,
+    // min_p=0.05). Override with --preset / `[ENGINE] preset` / POST
+    // /v1/preset (the webui's preset bar) at runtime; "precise" (temp=0.2)
+    // is the tuned choice for code, math, and factual Q&A.
+    std::string preset     = "auto";
+    // Reasoning-effort level injected into the chat template ("low" /
+    // "medium" / "high" / model-specific). "auto" = use the model default
+    // (inject nothing). Per-request `reasoning_effort` in the body wins.
+    std::string reasoning_effort = "auto";
     size_t      max_body   = 8u * 1024u * 1024u;
 
     // Authoritative date/time injection — see build_authoritative_preamble
@@ -4001,6 +4068,7 @@ static const std::vector<FlagDef> & kFlags() {
         // snake_case forms under [ENGINE].
         { {"--chat-template-file"},"ENGINE", "chat_template_file","chat_template_file",true, SET_STR(&ServerArgs::chat_template_file) },
         { {"--reasoning-format"},  "ENGINE", "reasoning_format","reasoning_format",true,  SET_STR(&ServerArgs::reasoning_format) },
+        { {"--reasoning-effort"},  "ENGINE", "reasoning_effort","reasoning_effort",true,  SET_STR(&ServerArgs::reasoning_effort) },
         // sampling
         { {"--temperature","--temp"},"ENGINE","temperature",   "temperature",    true,  SET_FLOAT(&ServerArgs::temperature) },
         { {"--top-p"},             "ENGINE", "top_p",          "top_p",          true,  SET_FLOAT(&ServerArgs::top_p) },
@@ -4433,10 +4501,10 @@ int main(int argc, char ** argv) {
 
     // Start with ambient preset, then overlay any explicit numeric overrides.
     {
-        // Fallback baseline matches args.preset's default ("precise") so an
+        // Fallback baseline matches args.preset's default ("auto") so an
         // unknown preset name still lands somewhere sensible without
         // diverging from the documented default.
-        easyai::Preset base = *easyai::find_preset("precise");
+        easyai::Preset base = *easyai::find_preset("auto");
         if (const easyai::Preset * pp = easyai::find_preset(args.preset)) base = *pp;
         if (args.temperature >= 0) base.temperature = args.temperature;
         if (args.top_p       >= 0) base.top_p       = args.top_p;
@@ -6685,6 +6753,26 @@ int main(int argc, char ** argv) {
             return 1;
         }
     }
+    {
+        // Reasoning effort. Validate the startup flag for a friendly typo
+        // message (a model-specific level can still come per-request via the
+        // body). "auto"/"none"/"default"/"model"/"" all mean model default.
+        std::string re = args.reasoning_effort;
+        for (auto & c : re) c = (char) std::tolower((unsigned char) c);
+        const bool is_default = re.empty() || re == "auto" || re == "none" ||
+                                re == "default" || re == "model";
+        const bool is_level   = re == "low" || re == "medium" ||
+                                re == "high" || re == "minimal";
+        if (!is_default && !is_level) {
+            std::fprintf(stderr,
+                "[easyai-server] unknown reasoning effort: %s\n"
+                "                accepted values: auto, low, medium, high, minimal\n",
+                args.reasoning_effort.c_str());
+            return 1;
+        }
+        ctx->default_reasoning_effort = is_default ? std::string() : re;
+        ctx->engine.reasoning_effort(ctx->default_reasoning_effort);
+    }
     if (args.flash_attn)     ctx->engine.flash_attn(true);
     if (args.mlock)          ctx->engine.use_mlock(true);
     if (args.no_mmap)        ctx->engine.use_mmap(false);
@@ -7090,6 +7178,8 @@ int main(int argc, char ** argv) {
                     {"top_p",       ctx_ref.def_top_p},
                     {"top_k",       ctx_ref.def_top_k},
                     {"min_p",       ctx_ref.def_min_p},
+                    {"reasoning_effort", ctx_ref.default_reasoning_effort.empty()
+                                             ? "auto" : ctx_ref.default_reasoning_effort},
                 }},
                 {"n_ctx", ctx_ref.engine.n_ctx()},
             };

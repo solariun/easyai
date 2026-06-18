@@ -30,9 +30,15 @@ struct Preset {
     float       top_p;
     int         top_k;
     float       min_p;
+    // When true this preset imposes NO opinion of its own — its numbers
+    // mirror the engine's built-in defaults and selecting it means "use
+    // the model default sampling". The `auto` preset sets this; callers
+    // may use it to label the UI ("auto") or to skip writing the sliders.
+    bool        model_default = false;
 };
 
-// All built-in presets, ordered from most deterministic to most creative.
+// All built-in presets: "auto" (model default) first, then the rest
+// ordered from most deterministic to most creative.
 const std::vector<Preset> & all_presets();
 
 // Returns a pointer to the matching preset, or nullptr.  Case-insensitive,

@@ -210,6 +210,15 @@ public:
     // extensions (e.g. {"reasoning_effort":"high"}).
     Client & extra_body_json    (std::string raw_json);
 
+    // Reasoning-effort level sent as the OpenAI-style `reasoning_effort`
+    // request-body field ("low" / "medium" / "high" / model-specific).
+    // easyai-server (and llama-server) feed it to the chat template so a
+    // reasoning model adjusts how hard it thinks. The sentinels "auto",
+    // "none", "default", "model", and "" mean USE THE MODEL DEFAULT — the
+    // field is omitted from the body so the server/model decides. Default
+    // is unset (model default).
+    Client & reasoning_effort   (std::string level);
+
     // ----- tool registration (mirrors Engine) ------------------------------
     Client & add_tool        (Tool t);
     Client & clear_tools     ();
