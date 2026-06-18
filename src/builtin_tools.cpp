@@ -1670,6 +1670,37 @@ std::string html_to_markdown(const std::string & html) {
     return final;
 }
 
+// Sniff an HTTP body for non-text (binary) content. The fetch tool only
+// renders text / HTML; handing the model raw PDF / image / archive bytes
+// (or the HTML-stripper's output over them) is pure noise that also burns
+// the context window. Returns a human label for the format, or nullptr
+// when the body looks like text.
+static const char * fetch_binary_kind(const std::string & body) {
+    auto magic = [&](const char * sig, std::size_t n) {
+        return body.size() >= n && std::memcmp(body.data(), sig, n) == 0;
+    };
+    if (magic("%PDF-", 5))                        return "PDF document";
+    if (magic("\x89PNG\r\n\x1a\n", 8))            return "PNG image";
+    if (magic("\xFF\xD8\xFF", 3))                 return "JPEG image";
+    if (magic("GIF87a", 6) || magic("GIF89a", 6)) return "GIF image";
+    if (magic("PK\x03\x04", 4))                   return "ZIP / Office archive";
+    if (magic("\x1F\x8B", 2))                     return "gzip data";
+    if (magic("\x7F" "ELF", 4))                   return "ELF binary";
+    if (magic("Rar!\x1a\x07", 6))                 return "RAR archive";
+    if (magic("%!PS", 4))                         return "PostScript document";
+    // Generic fallback: a NUL byte, or > 30% C0 control bytes (excluding
+    // tab / LF / CR) within the first KiB, means this isn't text.
+    const std::size_t scan = std::min<std::size_t>(body.size(), 1024);
+    std::size_t ctrl = 0;
+    for (std::size_t i = 0; i < scan; ++i) {
+        unsigned char ch = (unsigned char) body[i];
+        if (ch == 0x00) return "binary data";
+        if (ch < 0x09 || (ch > 0x0D && ch < 0x20)) ++ctrl;
+    }
+    if (scan >= 64 && ctrl * 100 / scan > 30) return "binary data";
+    return nullptr;
+}
+
 // ---------- fetch: GET a URL, return text/markdown/HTML, with paging --------
 ToolResult web_handle_fetch(const ToolCall & c) {
 #if !defined(EASYAI_HAVE_CURL)
@@ -1701,6 +1732,29 @@ ToolResult web_handle_fetch(const ToolCall & c) {
         std::string body, err;
         if (!http_get(url, {}, body, err)) {
             return ToolResult::error("fetch failed: " + err);
+        }
+        // Binary formats (PDF, images, archives) can't be rendered as
+        // text — return a short, actionable note instead of paginating
+        // through hundreds of KB of mojibake.
+        if (const char * kind = fetch_binary_kind(body)) {
+            std::ostringstream oss;
+            oss << "[" << kind << ": web fetch renders TEXT / HTML only and "
+                   "cannot extract this format — " << (body.size() / 1024)
+                << " KB not shown]\nFetch an HTML version instead.";
+            std::size_t p = url.find("arxiv.org/pdf/");
+            if (p != std::string::npos) {
+                std::string id = url.substr(p + 14);  // past "arxiv.org/pdf/"
+                if (id.size() > 4
+                    && id.compare(id.size() - 4, 4, ".pdf") == 0)
+                    id.erase(id.size() - 4);
+                oss << " For this arXiv paper use the HTML page "
+                       "https://arxiv.org/abs/" << id
+                    << " (full text: https://arxiv.org/html/" << id << ").";
+            } else {
+                oss << " Look for the source / abstract page that links to "
+                       "this file, or an HTML mirror.";
+            }
+            return ToolResult::ok(oss.str());
         }
         processed = format == "html"     ? body
                   : format == "markdown" ? html_to_markdown(body)
