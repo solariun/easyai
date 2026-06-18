@@ -34,7 +34,7 @@ namespace easyai {
 // builds) emit tool calls with DOUBLED braces:
 //
 //     <tool_call>
-//     {{"name":"web_search","arguments":{"query":"hello"}}}
+//     {{"name":"search_web","arguments":{"query":"hello"}}}
 //     </tool_call>
 //
 // The Jinja chat-template's example uses `{{ ... }}` for variable
@@ -247,7 +247,7 @@ std::string strip_named_tag_blocks(std::string s,
 // the Qwen3 JSON one:
 //
 //     <tool_call>
-//     <function=web_search>
+//     <function=search_web>
 //     <parameter=query>
 //     top news today
 //     </parameter>
@@ -431,9 +431,9 @@ std::string extract_think_block(std::string & s) {
 // invocations.  Observed shape:
 //
 //     *🔧 datetime*
-//     *🔧 web_search(query="Hugging Face Daily Papers latest")*
+//     *🔧 search_web(query="Hugging Face Daily Papers latest")*
 //
-// or with bold instead of italics: `**🔧 web_fetch(url="...")**`.
+// or with bold instead of italics: `**🔧 fetch_web(url="...")**`.
 //
 // The engine sees these as plain content with tool_calls=0, treats it as
 // the final answer, and the user sees an empty-looking bubble.  We

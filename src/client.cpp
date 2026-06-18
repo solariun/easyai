@@ -129,7 +129,7 @@ public:
     // stream skips its terminators, buf_ would otherwise grow without
     // bound and OOM the client.  16 MiB is roughly 4–8x the largest
     // single tool result we ship today (32 KB bash output → 4 MB
-    // web_fetch → 16 MB ceiling has plenty of headroom).
+    // fetch_web → 16 MB ceiling has plenty of headroom).
     static constexpr size_t kMaxPending = 16 * 1024 * 1024;
 
     bool feed(const char * bytes, size_t n) {

@@ -1240,19 +1240,19 @@ void render_tool(std::vector<std::string> & rows, const Ui & ui, Message & m,
         block_rows(rows, ui, "# " + desc, body);
         return;
     }
-    if (name == "fs_read") {
+    if (name == "read_fs") {
         std::string extra = args_suffix(a, { "start_line", "offset", "limit" });
         inline_tool_rows(rows, ui, tc, "→",
             "Read " + tool_path_arg(a) + (extra.empty() ? "" : " " + extra));
         return;
     }
-    if (name == "fs_write" || name == "fs_append") {
+    if (name == "write_fs" || name == "append_fs") {
         inline_tool_rows(rows, ui, tc, "←",
-            std::string(name == "fs_write" ? "Write " : "Append ")
+            std::string(name == "write_fs" ? "Write " : "Append ")
             + tool_path_arg(a));
         return;
     }
-    if (name == "fs_edit") {
+    if (name == "edit_fs") {
         std::string olds = S(a, "oldString"), news = S(a, "newString");
         if (tc.state == ToolState::Done && (!olds.empty() || !news.empty())) {
             std::vector<std::string> styled =
@@ -1266,8 +1266,8 @@ void render_tool(std::vector<std::string> & rows, const Ui & ui, Message & m,
             "Edit " + tool_path_arg(a) + (extra.empty() ? "" : " " + extra));
         return;
     }
-    if (name == "fs_glob" || name == "fs_grep") {
-        const bool grep = name == "fs_grep";
+    if (name == "glob_fs" || name == "grep_fs") {
+        const bool grep = name == "grep_fs";
         std::string pat = S(a, "pattern");
         std::string where = S(a, "path");
         int n = 0;
@@ -1288,16 +1288,16 @@ void render_tool(std::vector<std::string> & rows, const Ui & ui, Message & m,
         inline_tool_rows(rows, ui, tc, "✱", body);
         return;
     }
-    if (name == "fs_list") {
+    if (name == "list_fs") {
         inline_tool_rows(rows, ui, tc, "→", "List " + tool_path_arg(a));
         return;
     }
-    if (name == "web_fetch"
+    if (name == "fetch_web"
         || (name == "web" && S(a, "action") == "fetch")) {
         inline_tool_rows(rows, ui, tc, "%", "WebFetch " + S(a, "url"));
         return;
     }
-    if (name == "web_search" || name == "web") {
+    if (name == "search_web" || name == "web") {
         std::string q = S(a, "query");
         std::string body = "Search \"" + q + "\"";
         if (tc.state == ToolState::Done) {
@@ -1348,12 +1348,14 @@ void render_tool(std::vector<std::string> & rows, const Ui & ui, Message & m,
         }
         return;
     }
-    if (name.rfind("knowledge", 0) == 0) {
+    if (name == "knowledge"
+        || (name.size() > 10
+            && name.compare(name.size() - 10, 10, "_knowledge") == 0)) {
         std::string act = S(a, "action");
         if (act.empty()) {
-            // split form: knowledge_save / knowledge_search / …
-            size_t us = name.find('_');
-            if (us != std::string::npos) act = name.substr(us + 1);
+            // split form: search_knowledge / recall_knowledge / …
+            size_t us = name.rfind('_');
+            if (us != std::string::npos) act = name.substr(0, us);
         }
         std::string q = S(a, "query");
         if (q.empty()) q = S(a, "title");
@@ -2664,13 +2666,13 @@ void wrap_tools(Ui & ui) {
                 std::string n = easyai::canonical_tool_name(tname);
                 ui.spin_label =
                     n == "bash"      ? "Writing command" :
-                    n == "fs_read"   ? "Reading file" :
-                    n == "fs_edit"   ? "Preparing edit" :
-                    n == "fs_write"  ? "Preparing write" :
-                    n == "fs_glob"   ? "Finding files" :
-                    n == "fs_grep"   ? "Searching content" :
-                    n == "web_fetch" ? "Fetching from the web" :
-                    n == "web_search"? "Searching web" :
+                    n == "read_fs"   ? "Reading file" :
+                    n == "edit_fs"   ? "Preparing edit" :
+                    n == "write_fs"  ? "Preparing write" :
+                    n == "glob_fs"   ? "Finding files" :
+                    n == "grep_fs"   ? "Searching content" :
+                    n == "fetch_web" ? "Fetching from the web" :
+                    n == "search_web"? "Searching web" :
                     n == "question"  ? "Asking questions" :
                     n == "plan"      ? "Updating todos" : ("Running " + n);
                 ui.bump();

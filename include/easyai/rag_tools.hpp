@@ -57,15 +57,15 @@
 namespace easyai::tools {
 
 // Seven knowledge tools, named as MEMORY rather than file ops (the
-// knowledge_ prefix groups them): knowledge_learning,
-// knowledge_learning_more, knowledge_search, knowledge_recall,
-// knowledge_browse, knowledge_forget, knowledge_keywords.
+// _knowledge suffix groups them): learning_knowledge,
+// learning_more_knowledge, search_knowledge, recall_knowledge,
+// browse_knowledge, forget_knowledge, keywords_knowledge.
 //
 // Entry identity: sorted keywords joined by `_` = filename stem.
 // No separate title — keywords ARE the identifier.
 //
 // Pinned entries: files starting with `fix-` on disk are immutable.
-// knowledge_learning with `fix=true` prepends the prefix automatically.
+// learning_knowledge with `fix=true` prepends the prefix automatically.
 //
 // The directory is created on demand at first save.
 // `root_dir` must not be empty.

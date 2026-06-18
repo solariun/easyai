@@ -3,7 +3,7 @@
 // Implementation notes:
 //
 //   * libcurl as the transport. easyai already depends on it
-//     conditionally for web_fetch / web_search; reusing means no
+//     conditionally for fetch_web / search_web; reusing means no
 //     new link dep and no new build flag.
 //
 //   * A single libcurl easy handle per Conn, guarded by a mutex.

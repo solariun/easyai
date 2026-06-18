@@ -4476,11 +4476,11 @@ int main(int argc, char ** argv) {
     }
 
     // RAG — the agent's persistent knowledge store.
-    // Seven single-responsibility memory tools (knowledge_learning,
-    // knowledge_learning_more, knowledge_search, knowledge_recall,
-    // knowledge_browse, knowledge_forget, knowledge_keywords) registered
+    // Seven single-responsibility memory tools (learning_knowledge,
+    // learning_more_knowledge, search_knowledge, recall_knowledge,
+    // browse_knowledge, forget_knowledge, keywords_knowledge) registered
     // when --RAG <dir> is given. The dir does NOT have to exist yet;
-    // knowledge_learning creates it on first call. The systemd-installed
+    // learning_knowledge creates it on first call. The systemd-installed
     // server passes --RAG by default (see
     // scripts/install_easyai_server.sh). See RAG.md.
     if (!args.rag_dir.empty()) {
@@ -4489,9 +4489,9 @@ int main(int argc, char ** argv) {
         }
         ctx->memory_root = args.rag_dir;
         std::fprintf(stderr,
-            "easyai-server: knowledge enabled (knowledge_learning, "
-            "knowledge_learning_more, knowledge_search, knowledge_recall, "
-            "knowledge_browse, knowledge_forget, knowledge_keywords), "
+            "easyai-server: knowledge enabled (learning_knowledge, "
+            "learning_more_knowledge, search_knowledge, recall_knowledge, "
+            "browse_knowledge, forget_knowledge, keywords_knowledge), "
             "root = %s\n",
             args.rag_dir.c_str());
     }

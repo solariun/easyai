@@ -23,7 +23,7 @@
 # What this script does NOT need to do (vs the old llama-server installer):
 #   - No transparent proxy: easyai's HTTP layer already does the OpenAI-
 #     compatible /v1/chat/completions itself.
-#   - No SearXNG: web_search is a built-in tool that scrapes DuckDuckGo
+#   - No SearXNG: search_web is a built-in tool that scrapes DuckDuckGo
 #     directly via libcurl.
 #   - No MCP bridge: tools live inside easyai-server and are auto-registered.
 #   - No webui rebrand: the webui is a self-contained file embedded in the
@@ -520,7 +520,7 @@ while [[ $# -gt 0 ]]; do
         # the corresponding feature is now built into easyai-server.
         --source-dir)       easyai_dir="$2"; shift 2 ;;   # alias for --easyai-dir
         --with-mcp|--no-mcp)
-            warn "$1: ignored — easyai bundles web_search/web_fetch as built-in tools"
+            warn "$1: ignored — easyai bundles search_web/fetch_web as built-in tools"
             shift ;;
         --webui-title)      webui_title="$2"; shift 2 ;;
         --webui-icon)       webui_icon="$2";  shift 2 ;;
@@ -1206,7 +1206,7 @@ and wastes the turn.
 
 Tool notes:
   - 'now' / 'today' / 'latest' → datetime first.
-  - web_search returns snippets only; after ONE search, web_fetch the
+  - search_web returns snippets only; after ONE search, fetch_web the
     top 1-3 URLs and answer from the fetched body. Two searches in a
     row is wrong.
   - Long-term memory: memory(action=…) save / append / search / load.
@@ -1940,7 +1940,7 @@ reasoning        = off
 # below. Keys are advisory and ignored by the current binary.
 #
 # [TOOLS]
-# mcp_allowed = rag_*, datetime, web_search, web_fetch
+# mcp_allowed = rag_*, datetime, search_web, fetch_web
 # mcp_denied  = bash, fs_write_file
 INI_FILE
         sudo chmod 640 "$ini_file"

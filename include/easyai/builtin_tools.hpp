@@ -57,7 +57,7 @@ Tool datetime();   // returns current UTC + local time in ISO-8601
 // (not a failure) so deployment without Google credentials still works.
 Tool web(bool google_enabled = false);
 
-// Focused per-action variants of `web` (web_search, web_fetch). Same
+// Focused per-action variants of `web` (search_web, fetch_web). Same
 // handlers as the unified surface; smaller / quantised tool-callers
 // work better with one verb per tool than with a `web(action="...")`
 // dispatcher. The Toolbelt exposes this via tool_mode(Split | Both).
@@ -91,9 +91,9 @@ std::vector<Tool> web_split(bool google_enabled = false);
 // the boundary obvious and matches what bash with the pinned cwd sees.
 Tool fs(std::string root = ".");
 
-// Focused per-action variants of `fs` (fs_read, fs_write, fs_append,
-// fs_edit, fs_list, fs_glob, fs_grep, fs_check_path, fs_cwd,
-// fs_sandbox). Same handlers as the unified surface — see fs_split's
+// Focused per-action variants of `fs` (read_fs, write_fs, append_fs,
+// edit_fs, list_fs, glob_fs, grep_fs, check_path_fs, cwd_fs,
+// sandbox_fs). Same handlers as the unified surface — see fs_split's
 // banner in builtin_tools.cpp for the rationale. Use the Toolbelt's
 // tool_mode(Split | Both) to register these alongside (or instead of)
 // the unified `fs`.

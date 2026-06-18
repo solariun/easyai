@@ -239,7 +239,7 @@ curl -fsS http://localhost:8089/mcp \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer YOUR-TOKEN' \
   -d '{"jsonrpc":"2.0","id":3,"method":"tools/call",
-       "params":{"name":"knowledge_search","arguments":{"keywords":["user-prefs"]}}}'
+       "params":{"name":"search_knowledge","arguments":{"keywords":["user-prefs"]}}}'
 ```
 
 ### `initialize.instructions` — closed-set + write/edit policy
@@ -256,7 +256,7 @@ populates it with:
      READ-ONLY on disk, FORBIDDEN to do subprocess/network/ctypes.
    - The filesystem tool(s) listed in `tools/list` are the
      authoritative writer (`fs(action=...)` in Unified mode, the
-     `fs_write`/`fs_edit`/... family in Split mode).
+     `write_fs`/`edit_fs`/... family in Split mode).
    - **Read-before-write** (2026-06-12): an EXISTING file must first
      be read with the filesystem read tool in this session before a
      write/edit on it is accepted; blind overwrites come back as an
@@ -348,7 +348,7 @@ parse + serialise. Only `tools/call` enters the limiter.
 Tools that share state synchronise themselves at the lib level:
 
 - **Knowledge tools** (`src/rag_tools.cpp`): `RagStore::mu` is a
-  `std::shared_mutex`. `knowledge_search` / `knowledge_load` / `knowledge_list` / `knowledge_keywords`
+  `std::shared_mutex`. `search_knowledge` / `knowledge_load` / `knowledge_list` / `keywords_knowledge`
   take `std::shared_lock` — many parallel readers; `knowledge_save` /
   `knowledge_delete` take `std::unique_lock`. The index is eager-loaded
   under a unique lock at startup so readers never need to upgrade.
@@ -413,7 +413,7 @@ Watch `easyai_mcp_in_flight` (gauge) and `easyai_mcp_rejected_total`
 (counter) on `/metrics`. If `rejected_total` is climbing, either
 raise `--max-concurrent-calls` or right-size the host (more cores,
 faster disk for the knowledge tools, larger libcurl connection pool for
-`web_fetch`).
+`fetch_web`).
 
 ---
 
@@ -432,7 +432,7 @@ just one consumer of those factories.
 | `fs` (action=`read` / `write` / `list` / `glob` / `grep` / `check_path` / `cwd` / `sandbox`) | `easyai::tools::fs(sandbox)` | `--allow-fs` |
 | `bash` | `easyai::tools::bash(sandbox)` | `--allow-bash` |
 | `evaluate` (legacy alias: `python3`) | `easyai::tools::python3(sandbox)` | default ON when sandbox set or `--allow-bash`; `--no-python` to skip |
-| `knowledge_save`, `knowledge_append`, `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords` | `easyai::tools::knowledge_split_tools(dir)` | `--memory <dir>` (alias `--RAG`) |
+| `knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` | `easyai::tools::knowledge_split_tools(dir)` | `--memory <dir>` (alias `--RAG`) |
 | (any `EASYAI-*.tools` manifest) | `easyai::load_external_tools_from_dir(dir, reserved)` | `--external-tools <dir>` |
 
 The `plan` tool is **deliberately omitted** in `easyai-mcp-server` —
@@ -698,7 +698,7 @@ the agent process can do.
 Tools registered in both servers come from the **same lib factories**
 and operate on the **same on-disk data** (knowledge dir, sandbox dir,
 external-tools manifests). A `knowledge_save` from the chat
-server is visible to a `knowledge_search` from the MCP server
+server is visible to a `search_knowledge` from the MCP server
 immediately — filesystem ACLs are the boundary, not process identity.
 
 ---

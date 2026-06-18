@@ -15,7 +15,7 @@
 //     requests across hundreds of worker threads. Tool implementations
 //     come unmodified from libeasyai (whose RagStore now uses
 //     std::shared_mutex for parallel reads, whose external-tools and
-//     bash spawn paths are process-isolated, whose web_fetch cache is
+//     bash spawn paths are process-isolated, whose fetch_web cache is
 //     guarded by its own mutex). The binary itself adds:
 //       - configurable cpp-httplib ThreadPool size (--threads N)
 //       - in-flight tools/call cap with 503 on saturation
@@ -600,7 +600,7 @@ bool require_auth(const ServerCtx &        ctx,
 //  3. easyai::mcp::handle_request runs the actual dispatch. It is a
 //     pure function over `ctx.default_tools` — no global state inside
 //     mcp.cpp itself. Tool handlers serialise themselves where they
-//     need to (RagStore's shared_mutex, web_fetch cache mutex, the
+//     need to (RagStore's shared_mutex, fetch_web cache mutex, the
 //     bash/external-tools fork+execve runners are process-isolated).
 void route_mcp(ServerCtx &              ctx,
                const httplib::Request & req,
@@ -869,18 +869,18 @@ int main(int argc, char ** argv) {
     }
 
     // -------- knowledge ----------------------------------------------------
-    // Seven single-responsibility memory tools (knowledge_learning,
-    // knowledge_learning_more, knowledge_search, knowledge_recall,
-    // knowledge_browse, knowledge_forget, knowledge_keywords) — each
+    // Seven single-responsibility memory tools (learning_knowledge,
+    // learning_more_knowledge, search_knowledge, recall_knowledge,
+    // browse_knowledge, forget_knowledge, keywords_knowledge) — each
     // surfaced as its own MCP tool.
     if (!args.rag_dir.empty()) {
         for (auto & t : easyai::tools::knowledge_split_tools(args.rag_dir)) {
             ctx->default_tools.push_back(std::move(t));
         }
         std::fprintf(stderr,
-            "easyai-mcp-server: knowledge enabled (knowledge_learning, "
-            "knowledge_learning_more, knowledge_search, knowledge_recall, "
-            "knowledge_browse, knowledge_forget, knowledge_keywords), "
+            "easyai-mcp-server: knowledge enabled (learning_knowledge, "
+            "learning_more_knowledge, search_knowledge, recall_knowledge, "
+            "browse_knowledge, forget_knowledge, keywords_knowledge), "
             "root = %s\n",
             args.rag_dir.c_str());
     }

@@ -71,9 +71,9 @@ bool LocalBackend::init(std::string & err) {
     }
 
     // RAG — the agent's persistent knowledge store (long-term memory).
-    // Seven single-responsibility memory tools (knowledge_learning,
-    // knowledge_learning_more, knowledge_search, knowledge_recall,
-    // knowledge_browse, knowledge_forget, knowledge_keywords). The
+    // Seven single-responsibility memory tools (learning_knowledge,
+    // learning_more_knowledge, search_knowledge, recall_knowledge,
+    // browse_knowledge, forget_knowledge, keywords_knowledge). The
     // directory does NOT have to exist yet; the tools create it on first save.
     if (!cfg.rag_dir.empty()) {
         for (auto & t : tools::knowledge_split_tools(cfg.rag_dir)) {

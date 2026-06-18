@@ -214,7 +214,7 @@ prepended (see [§7](#7-system-prompt--injected-blocks)).
 | `--allow-bash` | Register `bash`. **Implies `fs`** (bash subsumes it). cwd = `--sandbox` if given, else the binary's CWD. WARNING: not a hardened sandbox. |
 | `--no-python` | Drop the auto-registered compute tool (model-facing name **`evaluate`**, runtime `python3`; renamed 2026-05-26 with `python3` retained as a back-compat alias). By default ON whenever `--sandbox` or `--allow-bash` is set. Stdlib-only interpreter (no PYTHON* env, no site-packages, no cwd on `sys.path`). **READ-ONLY disk surface**: any path outside the sandbox AND any write-mode `open()` regardless of path is rejected. The model is told to send writes through the filesystem write tool registered this session (it discovers the exact callable name from its AVAILABLE TOOLS list). WARNING: defense-in-depth, not a hardened sandbox — `import os` / `import socket` / `import subprocess` / `import ctypes` still work at the Python layer (closure-cell introspection also bypasses — SECURITY_AUDIT §23.2). |
 | `--use-google` | Enable `engine="google"` inside the unified `web` tool (Google Custom Search JSON API), and let the default `engine="auto"` cascade try google as its first hop. Requires `GOOGLE_API_KEY` and `GOOGLE_CSE_ID` env vars. Without this flag (or env vars), the auto cascade silently falls through to brave → ddg-lite → bing → ddg. |
-| `--memory DIR` | Enable persistent knowledge rooted at DIR — a passive RAG technique. Registers seven split `knowledge_*` tools (`knowledge_save`, `knowledge_append`, `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords`), AND appends a compact `# MEMORY VOCABULARY` block to the system prompt prefix so the remote model sees the current keyword index without having to call `knowledge_keywords`. `--RAG` is still accepted as a back-compat alias. See `RAG.md` §5 "Automatic vocabulary injection". |
+| `--memory DIR` | Enable persistent knowledge rooted at DIR — a passive RAG technique. Registers seven split `knowledge_*` tools (`knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge`), AND appends a compact `# MEMORY VOCABULARY` block to the system prompt prefix so the remote model sees the current keyword index without having to call `keywords_knowledge`. `--RAG` is still accepted as a back-compat alias. See `RAG.md` §5 "Automatic vocabulary injection". |
 | `--external-tools DIR` | Load every `EASYAI-*.tools` manifest in DIR. See `EXTERNAL_TOOLS.md`. |
 | `--no-plan` | Don't auto-register the `plan` tool. |
 
@@ -236,7 +236,7 @@ prepended (see [§7](#7-system-prompt--injected-blocks)).
 | `-q`, `--quiet` | Disable the spinner glyph + context-fill gauge. Use for batch / scripted runs. **Also changes `Ctrl-C` / `SIGTERM` semantics**: first signal hard-cancels and exits (`rc=130`). See [Ctrl-C and SIGTERM](#ctrl-c-and-sigterm). |
 | `--no-prompt-progress` | Ask the server to skip per-batch `easyai.prompt_progress` SSE events for this session. The spinner loses its live `thinking N% · ctx M%` gauge during prompt eval (falls back to a static "thinking" word); in return the wire goes quiet during eval. The final `easyai.prompt_eval` summary still fires and is **always** logged to stderr + the `--log-file` file, regardless of `--verbose`. INI: `[cli] prompt_progress = on\|off`. |
 | `--log-file PATH` | Opt in to a raw transaction log at PATH (request body + every SSE chunk + every tool dispatch input/output, mode 0600). Default OFF — no log file is written without this flag. Implies `--verbose`. |
-| `--tools-mode MODE` | How `fs` / `web` are exposed to the model. **MODE** is one of `split` (**default** — one focused tool per action: `fs_read`, `fs_edit`, `web_search`, `web_fetch`, …; small models dispatch more reliably here), `unified` (single dispatcher per family with `action=`; this is where the `fs(action="ops")` batch lives — up to 50 ops / 20 files per call), or `both` (register both surfaces side-by-side). Same handlers under the hood; only the registration shape differs. INI: `[cli] tools_mode = unified\|split\|both`. |
+| `--tools-mode MODE` | How `fs` / `web` are exposed to the model. **MODE** is one of `split` (**default** — one focused tool per action: `read_fs`, `edit_fs`, `search_web`, `fetch_web`, …; small models dispatch more reliably here), `unified` (single dispatcher per family with `action=`; this is where the `fs(action="ops")` batch lives — up to 50 ops / 20 files per call), or `both` (register both surfaces side-by-side). Same handlers under the hood; only the registration shape differs. INI: `[cli] tools_mode = unified\|split\|both`. |
 | `--continue` | Load `.easyai_session` from cwd before the first prompt. **Default OFF** (since 2026-05-13) — any existing session file is ignored and overwritten on the first turn unless this flag is set. INI: `[cli] auto_continue = true\|false`. See [§11](#11-session-persistence). |
 | `--no-continue` | Explicit form of the default — ignore any existing `.easyai_session` and overwrite on the first turn. Useful to override `[cli] auto_continue = on` set in INI. |
 | `--compress` | After loading, ask the model for one lossless recap of the conversation and replace the history with that recap. Also reachable mid-REPL via `/compress`. No-op without `--continue` (nothing in memory to recap). INI: `[cli] auto_compress = true\|false`. |
@@ -470,7 +470,7 @@ When `--tools` is **not** given, the CLI auto-registers:
 
 ```
 datetime, plan, web,
-system_meminfo, system_loadavg, system_cpu_usage, system_swaps
+meminfo_system, loadavg_system, cpu_usage_system, swaps_system
 ```
 
 …plus, conditionally:
@@ -481,7 +481,7 @@ system_meminfo, system_loadavg, system_cpu_usage, system_swaps
 | `--allow-bash` | `bash` (and bumps the agentic loop's `max_tool_hops` to 99999) |
 | `--no-python` | drops the auto-on `python3` tool (otherwise on whenever fs is on) |
 | `--use-google` (+ env vars set) | Enables `engine="google"` inside the unified `web` tool, and lets the default `engine="auto"` cascade try google first (otherwise auto starts at bing) |
-| `--memory DIR` (alias `--RAG`) | `knowledge_save`, `knowledge_append`, `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords` |
+| `--memory DIR` (alias `--RAG`) | `knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` |
 | `--external-tools DIR` | every tool from each loaded `EASYAI-*.tools` manifest |
 
 ### Why `--sandbox` and `--allow-bash` both register `fs`
@@ -506,9 +506,9 @@ Pass `--tools LIST` to override the auto-catalog. Valid names:
 
 ```
 datetime, plan, web, fs, bash,
-system_meminfo, system_loadavg, system_cpu_usage, system_swaps,
-knowledge_save, knowledge_append, knowledge_search, knowledge_load,
-knowledge_list, knowledge_delete, knowledge_keywords
+meminfo_system, loadavg_system, cpu_usage_system, swaps_system,
+knowledge_save, knowledge_append, search_knowledge, knowledge_load,
+knowledge_list, knowledge_delete, keywords_knowledge
 ```
 
 (`rag` and `memory` are still accepted as back-compat aliases that register all seven knowledge tools.)
@@ -811,8 +811,8 @@ dirs have two independent sessions.
 
 `--memory <dir>` mounts a directory as the agent's long-term knowledge.
 It registers seven split tools — `knowledge_save`, `knowledge_append`,
-`knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`,
-`knowledge_keywords`; under the hood it's a passive RAG technique — each
+`search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`,
+`keywords_knowledge`; under the hood it's a passive RAG technique — each
 entry is a single keyword-indexed Markdown file in `<dir>` that the
 operator can hand-edit. Keywords are the identifier: sorted and joined
 by `_` they become the filename. The legacy flag `--RAG` is still
@@ -824,8 +824,8 @@ prefix that carries `[environment]`, `[guidance]`, the tools_block,
 and the cite-sources rule). The block lists every distinct keyword
 in the store + its count, sorted count desc / name asc, capped at
 top 40. The remote model now sees what it has tagged on every
-turn — `knowledge_search(keywords=[...])` becomes
-actionable without first calling `knowledge_keywords`.
+turn — `search_knowledge(keywords=[...])` becomes
+actionable without first calling `keywords_knowledge`.
 Empty store → block omitted, no wasted tokens.
 
 The builder is shared with `easyai-server` and `easyai-local`

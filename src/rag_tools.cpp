@@ -1033,7 +1033,7 @@ ToolHandler make_search_handler(std::shared_ptr<RagStore> store) {
 
         if (hits.empty()) {
             return ToolResult::ok(
-                "no matches. Use knowledge_browse to see everything you know.");
+                "no matches. Use browse_knowledge to see everything you know.");
         }
         if (off >= total) {
             return ToolResult::ok(
@@ -1071,8 +1071,8 @@ ToolHandler make_search_handler(std::shared_ptr<RagStore> store) {
             o << "\n   " << preview << "\n\n";
         }
         if (more)
-            o << "next: knowledge_search with page=" << (page + 1) << "\n";
-        o << "use knowledge_recall with the same keywords for the full content.\n";
+            o << "next: search_knowledge with page=" << (page + 1) << "\n";
+        o << "use recall_knowledge with the same keywords for the full content.\n";
         return ToolResult::ok(o.str());
     };
 }
@@ -1137,7 +1137,7 @@ ToolHandler make_list_handler(std::shared_ptr<RagStore> store) {
 
         if (rows.empty())
             return ToolResult::ok(prefix.empty()
-                ? "nothing learned yet. Use knowledge_learning to remember something."
+                ? "nothing learned yet. Use learning_knowledge to remember something."
                 : "nothing learned matches prefix \"" + prefix + "\".");
 
         std::ostringstream o;
@@ -1244,7 +1244,7 @@ ToolHandler make_keywords_handler(std::shared_ptr<RagStore> store) {
 
         if (rows.empty()) {
             if (total_entries == 0) {
-                o << "nothing learned yet. Use knowledge_learning to remember something.";
+                o << "nothing learned yet. Use learning_knowledge to remember something.";
             } else if (min_count > 1) {
                 o << "no keywords reach min_count=" << min_count
                   << ". You know " << total_entries
@@ -1254,7 +1254,7 @@ ToolHandler make_keywords_handler(std::shared_ptr<RagStore> store) {
             } else {
                 o << "no keywords found. Some knowledge may be untagged "
                   << "(no `keywords:` header) — those don't appear here. "
-                  << "Use knowledge_browse to see them.";
+                  << "Use browse_knowledge to see them.";
             }
             return ToolResult::ok(o.str());
         }
@@ -1297,13 +1297,13 @@ std::shared_ptr<RagStore> build_rag_store(std::string root_dir) {
 // Seven single-responsibility tools, named so the model treats the store
 // as MEMORY rather than a filesystem (no save/load/delete file verbs).
 // The knowledge_ prefix groups them in the flat tool list:
-//   knowledge_learning       — remember a piece of knowledge  (make_save_handler)
-//   knowledge_learning_more  — add to existing knowledge       (make_append_handler)
-//   knowledge_search         — find knowledge by keywords       (make_search_handler)
-//   knowledge_recall         — return a topic's full content     (make_load_handler)
-//   knowledge_browse         — list all remembered topics         (make_list_handler)
-//   knowledge_forget         — drop a piece of knowledge           (make_delete_handler)
-//   knowledge_keywords       — show the keyword vocabulary          (make_keywords_handler)
+//   learning_knowledge       — remember a piece of knowledge  (make_save_handler)
+//   learning_more_knowledge  — add to existing knowledge       (make_append_handler)
+//   search_knowledge         — find knowledge by keywords       (make_search_handler)
+//   recall_knowledge         — return a topic's full content     (make_load_handler)
+//   browse_knowledge         — list all remembered topics         (make_list_handler)
+//   forget_knowledge         — drop a piece of knowledge           (make_delete_handler)
+//   keywords_knowledge       — show the keyword vocabulary          (make_keywords_handler)
 // Each handler reads its parameters straight out of `arguments_json`.
 // ----------------------------------------------------------------------------
 std::vector<Tool> knowledge_split_tools(std::string root_dir) {
@@ -1312,7 +1312,7 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
     std::vector<Tool> out;
     out.reserve(7);
 
-    out.push_back(Tool::builder("knowledge_learning")
+    out.push_back(Tool::builder("learning_knowledge")
         .describe(
             "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
             "this tool or what it does; only you, the AI, can. Saving "
@@ -1334,7 +1334,7 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
         .handle(make_save_handler(store))
         .build());
 
-    out.push_back(Tool::builder("knowledge_learning_more")
+    out.push_back(Tool::builder("learning_more_knowledge")
         .describe(
             "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
             "this tool or what it does; only you, the AI, can. Adding "
@@ -1352,7 +1352,7 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
         .handle(make_append_handler(store))
         .build());
 
-    out.push_back(Tool::builder("knowledge_search")
+    out.push_back(Tool::builder("search_knowledge")
         .describe(
             "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
             "this tool or the matches it returns; only you, the AI, "
@@ -1369,7 +1369,7 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
         .handle(make_search_handler(store))
         .build());
 
-    out.push_back(Tool::builder("knowledge_recall")
+    out.push_back(Tool::builder("recall_knowledge")
         .describe(
             "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
             "this tool or the content it returns; only you, the AI, "
@@ -1384,7 +1384,7 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
         .handle(make_load_handler(store))
         .build());
 
-    out.push_back(Tool::builder("knowledge_browse")
+    out.push_back(Tool::builder("browse_knowledge")
         .describe(
             "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
             "this tool or the list it returns; only you, the AI, can. "
@@ -1399,7 +1399,7 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
         .handle(make_list_handler(store))
         .build());
 
-    out.push_back(Tool::builder("knowledge_forget")
+    out.push_back(Tool::builder("forget_knowledge")
         .describe(
             "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
             "this tool or what it does; only you, the AI, can. "
@@ -1413,7 +1413,7 @@ std::vector<Tool> knowledge_split_tools(std::string root_dir) {
         .handle(make_delete_handler(store))
         .build());
 
-    out.push_back(Tool::builder("knowledge_keywords")
+    out.push_back(Tool::builder("keywords_knowledge")
         .describe(
             "ONLY YOU CAN SEE THIS — NOT THE USER. The user cannot see "
             "this tool or the keywords it returns; only you, the AI, "

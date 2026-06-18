@@ -77,11 +77,11 @@ chained statement. None of them throw.
 | Tool | Gate | What it does |
 |------|------|-------------|
 | `datetime` | `!no_datetime()` | Wall-clock UTC + local time. |
-| `web` (or `web_search` + `web_fetch`) | `!no_web()` | Search the web and fetch URLs. Engine cascade: google → brave → ddg-lite → bing → ddg. `use_google()` opts into Google's billed API (needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`). |
-| `fs` (or split `fs_read`/`fs_write`/…) | `.sandbox(dir)` set OR `.allow_bash` / `.allow_python` | Read/write/edit/list/glob/grep, scoped to the sandbox root. |
+| `web` (or `search_web` + `fetch_web`) | `!no_web()` | Search the web and fetch URLs. Engine cascade: google → brave → ddg-lite → bing → ddg. `use_google()` opts into Google's billed API (needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`). |
+| `fs` (or split `read_fs`/`write_fs`/…) | `.sandbox(dir)` set OR `.allow_bash` / `.allow_python` | Read/write/edit/list/glob/grep, scoped to the sandbox root. |
 | `bash` | `.allow_bash()` | Shell command via `/bin/sh -c`. Not a hardened sandbox. |
 | `evaluate` (legacy name `python3`) | `.allow_python()` (default ON when fs is on) | Read-only Python 3 stdlib evaluator, sandboxed. |
-| `knowledge_save`/`knowledge_search`/`knowledge_load`/… (7 tools) | `.memory(dir)` | Persistent registry (markdown per entry). |
+| `knowledge_save`/`search_knowledge`/`knowledge_load`/… (7 tools) | `.memory(dir)` | Persistent registry (markdown per entry). |
 | External tools | `.external_tools(dir)` | Loads every `EASYAI-*.tools` manifest. |
 | `tool_lookup` | always on when `with_default_tools()` | Catalogue + per-tool manual access. |
 
@@ -90,7 +90,7 @@ Tool-mode controls how multi-action tools are exposed:
 | Mode | Schema shape |
 |------|-------------|
 | `Unified` | `fs(action="read")` — one dispatcher tool. |
-| `Split` (default) | `fs_read`, `fs_edit`, … — one verb per tool. |
+| `Split` (default) | `read_fs`, `edit_fs`, … — one verb per tool. |
 | `Both` | Registers both surfaces side-by-side. |
 
 Smaller / quantised models dispatch more reliably against `Split`; that

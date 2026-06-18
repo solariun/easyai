@@ -209,14 +209,14 @@ need a separate model file. The old installer compat lines for
 
 Every binary that loads `--memory <dir>` now auto-injects a compact
 keyword-vocabulary block into the system prompt so the model knows
-what it has tagged without having to call `knowledge_keywords`
+what it has tagged without having to call `keywords_knowledge`
 first. The block looks like:
 
 ```
 # MEMORY VOCABULARY (the keywords your private memory currently
 has tagged — the FIRST place to look for anything you might
 already know)
-12 entries (most-common first; call knowledge_search(
+12 entries (most-common first; call search_knowledge(
 keywords=["<name>", ...]) to recall):
 easyai(8) claude(5) bitnet(3) build(3) iteration(2) …
 ```
@@ -269,7 +269,7 @@ worth it for everyone, surprising for nobody.
 
 | Surface | Registered out of the box | Old behaviour | New default |
 | --- | --- | --- | --- |
-| Multi-action families | `fs`, `web` | 2 dispatchers + 7 knowledge tools | `fs_read`, `fs_write`, `fs_append`, `fs_edit`, `fs_list`, `fs_glob`, `fs_grep`, `fs_check_path`, `fs_cwd`, `fs_sandbox`, `web_search`, `web_fetch`, `knowledge_save`, `knowledge_append`, `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords` — 19 focused tools |
+| Multi-action families | `fs`, `web` | 2 dispatchers + 7 knowledge tools | `read_fs`, `write_fs`, `append_fs`, `edit_fs`, `list_fs`, `glob_fs`, `grep_fs`, `check_path_fs`, `cwd_fs`, `sandbox_fs`, `search_web`, `fetch_web`, `knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` — 19 focused tools |
 
 ```bash
 # new default (no flag)
@@ -294,7 +294,7 @@ INI: `[cli] tools_mode = unified|split|both` (default `split`).
 `action` parameter (e.g. `fs(action="read", ...)`).  That shape keeps
 the system prompt small and lets a large model batch many actions, but
 **smaller / quantised tool-callers** (Llama 3 8B, Qwen 2.5 7B, Phi-3.5,
-GPT-OSS-20B) gravitate toward one-purpose tools — `fs_read`, `fs_edit`,
+GPT-OSS-20B) gravitate toward one-purpose tools — `read_fs`, `edit_fs`,
 etc. — because the verb IS the tool name and the parameter schema is
 flat.
 
@@ -310,7 +310,7 @@ easyai-cli --tools-mode both        # register both surfaces side-by-side
 | Mode | Tools registered (with `--sandbox` + `--memory`) |
 | --- | --- |
 | `unified` | `fs`, `web` — 2 dispatchers + 7 `knowledge_*` tools |
-| `split` (new default) | `fs_read`, `fs_write`, `fs_append`, `fs_edit`, `fs_list`, `fs_glob`, `fs_grep`, `fs_check_path`, `fs_cwd`, `fs_sandbox`, `web_search`, `web_fetch`, `knowledge_save`, `knowledge_append`, `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords` — 19 focused tools |
+| `split` (new default) | `read_fs`, `write_fs`, `append_fs`, `edit_fs`, `list_fs`, `glob_fs`, `grep_fs`, `check_path_fs`, `cwd_fs`, `sandbox_fs`, `search_web`, `fetch_web`, `knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` — 19 focused tools |
 | `both` | unified + split, same handlers under both names |
 
 Same handlers under the hood — behaviour is identical to the unified
@@ -780,7 +780,7 @@ flat schema (every parameter optional except `action`). Pattern
 mirrors the rag dispatcher introduced 2026-05-04.
 
 * **`web` tool** — `web(action="search"|"fetch")`. Replaces the
-  separate `web_search`, `web_fetch`, and `web_google` tools. Search
+  separate `search_web`, `fetch_web`, and `web_google` tools. Search
   takes an `engine` parameter (`"auto"` default — cascades through
   google → brave → ddg-lite → bing → ddg, returning the first that
   succeeds; explicit picks: `"google"` opt-in via `--use-google` plus
@@ -799,9 +799,9 @@ mirrors the rag dispatcher introduced 2026-05-04.
   four binaries. The single `rag(action=...)` dispatcher (default
   since 2026-05-04) is the only RAG layout. On-disk format unchanged.
 * **Public-API breakage.** Anyone consuming `libeasyai` directly: the
-  individual `easyai::tools::web_search()` / `web_fetch()` /
+  individual `easyai::tools::search_web()` / `fetch_web()` /
   `web_google()` / `fs_read_file()` / `fs_write_file()` / `fs_list_dir()`
-  / `fs_glob()` / `fs_grep()` / `fs_check_path()` / `get_current_dir()`
+  / `glob_fs()` / `grep_fs()` / `check_path_fs()` / `get_current_dir()`
   / `get_sandbox_path()` factories are removed. Switch to
   `easyai::tools::web(google_enabled)`,
   `easyai::tools::fs(root)`, and
@@ -857,7 +857,7 @@ and the build.
   deploy target is Linux.
 * **Tool dispatch timing in every visible log.** Engine wraps
   `tool->handler()` with `steady_clock` and writes `duration_ms`
-  into `ToolResult`. CLI shows `🔧 web_search (412ms)({"query":...})`
+  into `ToolResult`. CLI shows `🔧 search_web (412ms)({"query":...})`
   and the webui's reasoning panel shows the same. The
   `easyai.tool_result` SSE event also gains a `duration_ms` field
   so future external SSE consumers can render their own timing UI.
@@ -1128,9 +1128,9 @@ default prompts, and the CLI flag wiring at once.
   conversation (tomorrow, three months from now) starts with the
   user already known, so they don't have to explain themselves
   twice. The lib ships the canonical seven knowledge tools
-  (`knowledge_save`, `knowledge_append`, `knowledge_search`,
+  (`knowledge_save`, `knowledge_append`, `search_knowledge`,
   `knowledge_load`, `knowledge_list`, `knowledge_delete`,
-  `knowledge_keywords`); all CLI help text, help comments, and docs
+  `keywords_knowledge`); all CLI help text, help comments, and docs
   updated to match.
 
 ### 2026-05-02 — Fourth-pass security audit + readability batch
@@ -1153,7 +1153,7 @@ default prompts, and the CLI flag wiring at once.
   read top-to-bottom: `file_mtime_unix()` (replaces three copies of
   the C++17 file_clock→system_clock idiom in `rag_tools.cpp`),
   `glob_to_regex()` + `kGlobRegexMetachars` (lifts the wildcard
-  state machine out of `fs_glob` in `builtin_tools.cpp`), and
+  state machine out of `glob_fs` in `builtin_tools.cpp`), and
   `looks_like_announce_phrase()` (lifts the 30-line retry predicate
   out of `Engine::chat_continue` in `engine.cpp`, where it was
   used twice). All seven binaries build clean.
@@ -1218,8 +1218,8 @@ default prompts, and the CLI flag wiring at once.
   that returns 503 + `Retry-After` on saturation instead of unbounded
   queueing. Full doc: [`easyai-mcp-server.md`](easyai-mcp-server.md).
 * **RAG concurrency upgrade.** `RagStore::mu` is now
-  `std::shared_mutex`; `knowledge_search` / `knowledge_load` /
-  `knowledge_list` / `knowledge_keywords` take `std::shared_lock` so
+  `std::shared_mutex`; `search_knowledge` / `knowledge_load` /
+  `knowledge_list` / `keywords_knowledge` take `std::shared_lock` so
   parallel readers don't serialise on the write path. Benefits every
   consumer of libeasyai — `easyai-server`, `easyai-cli` with
   `--RAG`, any third-party program calling
@@ -1283,9 +1283,9 @@ default prompts, and the CLI flag wiring at once.
   > hardcoded default. Edit the file, `systemctl restart`, done.
   Full reference in [`easyai-server.md`](easyai-server.md) §1.
 * **RAG: persistent memory.** Seven keyword-only knowledge tools
-  (`knowledge_save`, `knowledge_append`, `knowledge_search`,
+  (`knowledge_save`, `knowledge_append`, `search_knowledge`,
   `knowledge_load`, `knowledge_list`, `knowledge_delete`,
-  `knowledge_keywords`).
+  `keywords_knowledge`).
   Multi-keyword search (first keyword required, rest rank by overlap)
   + pagination. One Markdown file per entry — operator-readable,
   hand-editable. See [`RAG.md`](RAG.md).
@@ -1350,7 +1350,7 @@ has a matching INI key (see [`easyai-server.md`](easyai-server.md) §1).
 | `--no-python` | python3 on | Drop the `python3` tool. By default it's auto-registered alongside `fs` whenever `--sandbox` is set or `--allow-bash` is on. Stdlib-only interpreter; disk access auto-restricted to the sandbox root. |
 | `--use-google` | off | Enable engine=`"google"` inside the unified `web` tool (needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`). |
 | `--external-tools DIR` | — | Load every `EASYAI-*.tools` manifest in `DIR`. |
-| `--memory DIR` | — | Enable persistent memory: registers seven keyword-only knowledge tools (`knowledge_save`, `knowledge_append`, `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords`) — a passive RAG technique. `--RAG` is still accepted as a back-compat alias. |
+| `--memory DIR` | — | Enable persistent memory: registers seven keyword-only knowledge tools (`knowledge_save`, `knowledge_append`, `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge`) — a passive RAG technique. `--RAG` is still accepted as a back-compat alias. |
 | `--preset NAME` | `precise` | Ambient sampling preset. See [Sampling presets](#sampling-presets) for what each implies. |
 | `--temperature F` | per preset | Override temperature (0.0–2.0). |
 | `--top-p F` | per preset | Nucleus sampling p. |
@@ -1460,7 +1460,7 @@ one-shot / `--quiet` path falls back automatically.
 | `--use-google` | off | Enable engine=`"google"` inside the unified `web` tool. |
 | `--external-tools DIR` | — | Load `EASYAI-*.tools` manifests. |
 | `--memory DIR` | — | Enable persistent memory (seven `knowledge_*` tools; alias `--RAG`). |
-| `--tools-mode MODE` | `split` | How `fs` / `web` are exposed. Default `split` (since 2026-05-15): one focused tool per action — `fs_read`, `fs_edit`, …, `web_search`, `web_fetch`. Knowledge tools are always split (seven separate tools). `unified` registers the legacy single dispatcher per `fs`/`web` family with `action=`. `both` registers both surfaces. INI: `[cli] tools_mode`. |
+| `--tools-mode MODE` | `split` | How `fs` / `web` are exposed. Default `split` (since 2026-05-15): one focused tool per action — `read_fs`, `edit_fs`, …, `search_web`, `fetch_web`. Knowledge tools are always split (seven separate tools). `unified` registers the legacy single dispatcher per `fs`/`web` family with `action=`. `both` registers both surfaces. INI: `[cli] tools_mode`. |
 | `--no-plan` | off | Don't auto-register the planning tool. |
 | `-p, --prompt TEXT` | (REPL) | One-shot prompt; without it you get a REPL. |
 | `--no-reasoning` | shown | Hide `delta.reasoning_content`. |
@@ -1778,9 +1778,9 @@ no API bill, no data leaving the box.**
   **Write one tool — every AI app on your machine can call it.**
 
 * **Long-term memory built in.** Seven keyword-only knowledge tools
-  (`knowledge_save`, `knowledge_append`, `knowledge_search`,
+  (`knowledge_save`, `knowledge_append`, `search_knowledge`,
   `knowledge_load`, `knowledge_list`, `knowledge_delete`,
-  `knowledge_keywords`) the agent uses to save, append (grow what
+  `keywords_knowledge`) the agent uses to save, append (grow what
   you already know about the user without losing the previous body),
   search, load, list, delete, and inventory its own knowledge. It's
   a passive RAG technique — one human-readable Markdown file per
@@ -1997,7 +1997,7 @@ no shell.
 | `--allow-bash`        | `bash` (run `/bin/sh -c`). cwd = `--sandbox <dir>` if given, otherwise the binary's CWD. NOT a hardened sandbox — runs with your user privileges. Also bumps the agentic-loop `max_tool_hops` to 99999 (bash flows naturally span many turns). |
 | `--use-google`        | Enables `engine="google"` inside the unified `web` tool (Google Custom Search JSON API), and lets the default `engine="auto"` cascade try google as its first hop. Requires `GOOGLE_API_KEY` and `GOOGLE_CSE_ID` env vars. Counts against your Google quota — free tier is 100 queries/day per key. Without this flag (or without the env vars), the auto cascade silently skips google and falls through to brave → ddg-lite → bing → ddg. |
 | `--external-tools <dir>` | Load every `EASYAI-<name>.tools` file in `<dir>` as an operator-defined tool pack. Per-file fault isolation (a bad file is logged + skipped, the agent still starts). Spawns via `fork`+`execve` — never a shell. **This is the supported way to give the model focused powers without flipping `--allow-bash`.** See [`EXTERNAL_TOOLS.md`](EXTERNAL_TOOLS.md). |
-| `--memory <dir>`      | Enable the agent's persistent **memory** (search / store / append / recall / update / forget) — a passive RAG technique over keyword-indexed Markdown files. Registers seven keyword-only knowledge tools: `knowledge_save`, `knowledge_append` (grow an existing memory without losing its body), `knowledge_search`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `knowledge_keywords` — each memory one Markdown file in `<dir>`. Keywords are sorted and joined by `_` to form the filename. Entries whose keywords start with `fix-` are immutable: pass `fix=true` on `knowledge_save` to mint one. `--RAG` is still accepted as a back-compat alias. The systemd-installed server passes this by default (`/var/lib/easyai/rag`). See [`RAG.md`](RAG.md). |
+| `--memory <dir>`      | Enable the agent's persistent **memory** (search / store / append / recall / update / forget) — a passive RAG technique over keyword-indexed Markdown files. Registers seven keyword-only knowledge tools: `knowledge_save`, `knowledge_append` (grow an existing memory without losing its body), `search_knowledge`, `knowledge_load`, `knowledge_list`, `knowledge_delete`, `keywords_knowledge` — each memory one Markdown file in `<dir>`. Keywords are sorted and joined by `_` to form the filename. Entries whose keywords start with `fix-` are immutable: pass `fix=true` on `knowledge_save` to mint one. `--RAG` is still accepted as a back-compat alias. The systemd-installed server passes this by default (`/var/lib/easyai/rag`). See [`RAG.md`](RAG.md). |
 | `--mcp <url>`         | Connect to a remote MCP server as a CLIENT (e.g. another `easyai-server` or `easyai-mcp-server`). The upstream's tool catalogue is fetched via `tools/list` and merged into the local one; each remote tool's handler proxies `tools/call` back to it. Local tool names win on collision (remote dup skipped with a warning). Pair with `--mcp-token <token>` when the upstream requires bearer auth. |
 | `--no-local-tools`    | Skip the LOCAL built-in toolbelt entirely (datetime, web, fs, bash, ...). Useful when you want ONLY external tools, ONLY the knowledge tools, or ONLY tools fetched via `--mcp`. Does NOT disable the MCP client — that's controlled by `--mcp`. **Renamed from `--no-tools`.** |
 
@@ -2088,7 +2088,7 @@ where you left off.
 
 [next session]
 > "build easyai on the AI box"
-[model: knowledge_search(keywords=["easyai"]) → finds your saved build recipe]
+[model: search_knowledge(keywords=["easyai"]) → finds your saved build recipe]
 [model loads it and answers in your style]
 ```
 

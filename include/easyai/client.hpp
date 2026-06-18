@@ -14,8 +14,8 @@
 //      .api_key(getenv("EASYAI_KEY"))
 //      .model("EasyAi")
 //      .system("You are a planning agent.");
-//   cli.add_tool(easyai::tools::web_search());
-//   cli.add_tool(easyai::tools::web_fetch());
+//   cli.add_tool(easyai::tools::search_web());
+//   cli.add_tool(easyai::tools::fetch_web());
 //   cli.on_token([](const std::string & p){ std::fputs(p.c_str(), stdout); });
 //   std::string answer = cli.chat("summarise today's arxiv ml posts");
 //

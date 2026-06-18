@@ -563,7 +563,7 @@ CLI flag + INI key `[cli] prompt_progress = on|off`. When off, the cli sends `st
 
 `on_prompt_eval` (the final summary, fires once per agentic hop) always calls `easyai::log::write` with the structured line `[prompt_eval] N tok (M cached) · X ms · Y t/s · ctx Z% (used/total)`. `log::write` tees stderr + the `--log-file` file (if set), so the final metrics land in the log regardless of `--verbose`.
 
-## fs_read Tool Behavior (opencode-parity since 2026-06-12)
+## read_fs Tool Behavior (opencode-parity since 2026-06-12)
 
 Output prefixes every line with `<n>: ` (line numbers on by default in both modes); individual lines longer than 2000 chars are cut with a `... (line truncated to 2000 chars)` marker. Reports total line count for files ≤ 8 MiB. Reading a DIRECTORY path returns its entries one per line (subdirectories get a trailing `/`, sorted, capped at 1000). A missing path suggests up to 3 similarly-named entries from the parent directory (`Did you mean: …?`). Every successful read registers the path in the read-before-write registry (next section).
 
@@ -576,20 +576,20 @@ When line mode stops short of EOF the output ends with `(File has more lines. Pa
 
 ## Read-before-write registry (2026-06-12)
 
-`fs_write` (overwrite of an EXISTING non-empty file) and `fs_edit` (both modes) require the target to have been `fs_read` in this session first; otherwise they return a clear error telling the model to read first. The registry lives on the shared `Sandbox` (per tool-registration, process lifetime — on a long-running easyai-server it is process-wide), keyed by normalized path, capped at 16384 entries; on overflow it clears, which only forces a cheap re-read before the next overwrite. A successful write/edit also registers the path (the writer knows the content it just wrote). `fs_append` and brand-new files are exempt.
+`write_fs` (overwrite of an EXISTING non-empty file) and `edit_fs` (both modes) require the target to have been `read_fs` in this session first; otherwise they return a clear error telling the model to read first. The registry lives on the shared `Sandbox` (per tool-registration, process lifetime — on a long-running easyai-server it is process-wide), keyed by normalized path, capped at 16384 entries; on overflow it clears, which only forces a cheap re-read before the next overwrite. A successful write/edit also registers the path (the writer knows the content it just wrote). `append_fs` and brand-new files are exempt.
 
-## fs_edit string mode (2026-06-12)
+## edit_fs string mode (2026-06-12)
 
-`fs_edit` accepts two parameter shapes, both atomic (temp file + rename):
+`edit_fs` accepts two parameter shapes, both atomic (temp file + rename):
 
 | Mode | Params | Contract |
 |---|---|---|
 | String (preferred) | `oldString`, `newString`, optional `replaceAll` | `oldString` must match the file content EXACTLY and be unique (otherwise: `found N matches … pass replaceAll=true`); `newString=""` deletes; identical old/new is an error; CRLF files accept LF-normalized `oldString` and stay CRLF on disk; empty `oldString` + missing file creates it. |
 | Line (legacy) | `start_line`, `end_line`, `content` | Replaces lines [start..end] (1-based, inclusive); `content=""` deletes; `end_line=start_line-1` inserts; `start_line=line_count+1` appends. |
 
-## fs_grep / fs_glob output (opencode-parity, 2026-06-12)
+## grep_fs / glob_fs output (opencode-parity, 2026-06-12)
 
-`fs_grep`: header `Found N matches` (or `No files found`), then per file `path:` followed by `  Line <n>: <text>` rows, blank line between files; truncation note when `max_matches` (default 100) hits. Accepts `include` as the preferred alias of `file_glob`. `fs_glob`: plain newline-separated paths sorted newest-first by mtime, capped at `limit` (default 100, max 1000) with a `(Results are truncated: …)` note; empty → `No files found`.
+`grep_fs`: header `Found N matches` (or `No files found`), then per file `path:` followed by `  Line <n>: <text>` rows, blank line between files; truncation note when `max_matches` (default 100) hits. Accepts `include` as the preferred alias of `file_glob`. `glob_fs`: plain newline-separated paths sorted newest-first by mtime, capped at `limit` (default 100, max 1000) with a `(Results are truncated: …)` note; empty → `No files found`.
 
 ## bash caps (2026-06-12)
 
@@ -613,7 +613,7 @@ Exposed only on the **unified** `fs` surface. Default `ToolMode` is `Split` (one
 
 ## ToolMode default
 
-`easyai::cli::Toolbelt::tool_mode_` defaults to `ToolMode::Split` — one focused tool per action (`fs_read`, `fs_write`, `fs_edit`, …, `web_search`, `web_fetch`, `knowledge_search`, `knowledge_recall`, …). Small / weaker tool-callers dispatch more reliably against flat one-verb-per-tool schemas than against an `action`-discriminated union.
+`easyai::cli::Toolbelt::tool_mode_` defaults to `ToolMode::Split` — one focused tool per action (`read_fs`, `write_fs`, `edit_fs`, …, `search_web`, `fetch_web`, `search_knowledge`, `recall_knowledge`, …). Small / weaker tool-callers dispatch more reliably against flat one-verb-per-tool schemas than against an `action`-discriminated union.
 
 To pick up the unified `fs(action="ops")` batch (or the `web(action=…)` dispatcher), opt in with `.tool_mode(ToolMode::Unified)` or `--tools-mode unified`. `Both` registers both surfaces side-by-side.
 
@@ -625,13 +625,13 @@ prefix (groups them in the flat tool list) with memory-themed verbs:
 
 | Action | Tool name | Renamed from |
 |---|---|---|
-| remember a piece of knowledge | `knowledge_learning` | `knowledge_save` |
-| add to existing knowledge | `knowledge_learning_more` | `knowledge_append` |
-| find by keywords (ranked) | `knowledge_search` | (unchanged) |
-| return a topic's full content | `knowledge_recall` | `knowledge_load` |
-| list all remembered topics | `knowledge_browse` | `knowledge_list` |
-| drop a piece of knowledge | `knowledge_forget` | `knowledge_delete` |
-| show the keyword vocabulary | `knowledge_keywords` | (unchanged) |
+| remember a piece of knowledge | `learning_knowledge` | `knowledge_save` |
+| add to existing knowledge | `learning_more_knowledge` | `knowledge_append` |
+| find by keywords (ranked) | `search_knowledge` | (unchanged) |
+| return a topic's full content | `recall_knowledge` | `knowledge_load` |
+| list all remembered topics | `browse_knowledge` | `knowledge_list` |
+| drop a piece of knowledge | `forget_knowledge` | `knowledge_delete` |
+| show the keyword vocabulary | `keywords_knowledge` | (unchanged) |
 
 Result messages are reframed to match: no `.md` filenames, no byte
 counts, no file verbs — e.g. `learned "python async" (2 keywords)`,
@@ -645,10 +645,10 @@ the `fs` tool. The C++ factory keeps its internal name
 
 Mandatory workflow when both memory and web tools are available:
 
-1. **Memory first** — `knowledge_search` relevant keywords, then `knowledge_recall` the hits
+1. **Memory first** — `search_knowledge` relevant keywords, then `recall_knowledge` the hits
 2. **Web second** — also search the web, even if memory had results
 3. **Merge & answer** — combine both, prefer more recent/authoritative on conflict
-4. **Update memory** — remember durable new facts (`knowledge_learning` / `knowledge_learning_more`) the web provided
+4. **Update memory** — remember durable new facts (`learning_knowledge` / `learning_more_knowledge`) the web provided
 
 Enforced in three places: system preamble (preamble.cpp), memory tool description (rag_tools.cpp), web tool descriptions (builtin_tools.cpp).
 
@@ -656,9 +656,9 @@ Enforced in three places: system preamble (preamble.cpp), memory tool descriptio
 
 | Operation | Default | Max |
 |-----------|---------|-----|
-| `knowledge_search` (results per page) | 10 | 20 |
-| `knowledge_browse` (topics) | 50 | 200 |
-| `knowledge_keywords` (vocabulary) | 200 | 500 |
+| `search_knowledge` (results per page) | 10 | 20 |
+| `browse_knowledge` (topics) | 50 | 200 |
+| `keywords_knowledge` (vocabulary) | 200 | 500 |
 
 ## Entry Identity
 
@@ -668,7 +668,7 @@ Files starting with `fix-` are pinned/immutable (cannot overwrite or
 forget). The `.md` stem and byte sizes are an on-disk detail and are NOT
 surfaced to the model — result messages show the keyword phrase only.
 
-## knowledge_learning_more Behavior
+## learning_more_knowledge Behavior
 
 | Knowledge exists? | Behavior | Return message |
 |--------------|----------|----------------|
@@ -680,9 +680,9 @@ surfaced to the model — result messages show the keyword phrase only.
 
 The knowledge store holds **only knowledge and information** — facts,
 concepts, decisions, how-tos. It is **never** a file store: files and
-file content must NOT be written through `knowledge_learning` /
-`knowledge_learning_more`, EVER. File reads/writes go through the `fs`
-tool. Enforced in the `knowledge_learning` and `knowledge_learning_more`
+file content must NOT be written through `learning_knowledge` /
+`learning_more_knowledge`, EVER. File reads/writes go through the `fs`
+tool. Enforced in the `learning_knowledge` and `learning_more_knowledge`
 tool descriptions (`rag_tools.cpp`), which state the store is memory and
 redirect file work to `fs`.
 
@@ -745,6 +745,6 @@ The `kPythonSandboxPreamble` injected before every `evaluate` snippet enforces T
 1. **Sandbox containment** — open() / io.open() / os.open() reject paths resolving outside the cwd (sandbox root).
 2. **Read-only** — write-mode `open(...)` rejected regardless of path. Mode chars `w/a/x/+` (any case) on `builtins.open` / `io.open`; flags `O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND` on `os.open`.
 
-PermissionError messages point the model at the filesystem write tool registered this session (the exact callable name is read from the model's AVAILABLE TOOLS list — that way the error message stays correct whether the operator chose Split mode `fs_write` or Unified mode `fs(action="write")`). Read-only opens inside the sandbox continue to work (legitimate "load CSV, compute, print result" flows are unaffected).
+PermissionError messages point the model at the filesystem write tool registered this session (the exact callable name is read from the model's AVAILABLE TOOLS list — that way the error message stays correct whether the operator chose Split mode `write_fs` or Unified mode `fs(action="write")`). Read-only opens inside the sandbox continue to work (legitimate "load CSV, compute, print result" flows are unaffected).
 
 **Documented residual:** Python's `__closure__` introspection on `builtins.open` recovers the unwrapped open from the closure cell, bypassing both checks. Same class as the existing `ctypes` / `_io.FileIO` / `subprocess` bypasses — adversarial intent is out of scope; defense is against accident. See SECURITY_AUDIT §23.2.

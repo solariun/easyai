@@ -108,7 +108,7 @@ struct Options {
     bool cite_sources = false;
 
     // When true, the cite_sources block emits its knowledge-tool bullets
-    // (the knowledge_search / knowledge_recall tools). When false, those
+    // (the search_knowledge / recall_knowledge tools). When false, those
     // bullets are omitted so the model
     // is not told to cite tools that aren't registered. Drive this from
     // whether the knowledge/RAG tool is actually wired up this session.
@@ -148,7 +148,7 @@ std::string cite_sources_block(bool has_memory = true);
 //
 // env_block: machine-context header for coding sessions — working
 // directory, platform, git-repo flag, date. Models without this waste
-// the first hop on `pwd` / `fs_cwd`; with it they path correctly from
+// the first hop on `pwd` / `cwd_fs`; with it they path correctly from
 // turn 1. All fields optional: empty strings are skipped.
 struct EnvInfo {
     std::string cwd;        // absolute working dir / sandbox root

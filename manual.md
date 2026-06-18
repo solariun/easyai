@@ -1512,11 +1512,11 @@ for (auto & t : easyai::tools::knowledge_split_tools("/var/lib/easyai/rag"))
     engine.add_tool(std::move(t));
 // knowledge_save      keywords[], content, fix?
 // knowledge_append    keywords[], content
-// knowledge_search    keywords[], max_results=10
+// search_knowledge    keywords[], max_results=10
 // knowledge_load      keywords[][1..4]
 // knowledge_list      prefix?, max=50
 // knowledge_delete    keywords[]
-// knowledge_keywords  min_count=1, max=200
+// keywords_knowledge  min_count=1, max=200
 ```
 
 Or via the `--memory <dir>` flag in `easyai-server`, `easyai-cli`, and
@@ -2083,8 +2083,8 @@ int main() {
        .seed(42);
 
     cli.add_tool(easyai::tools::datetime());
-    cli.add_tool(easyai::tools::web_search());
-    cli.add_tool(easyai::tools::web_fetch());
+    cli.add_tool(easyai::tools::search_web());
+    cli.add_tool(easyai::tools::fetch_web());
 
     easyai::Plan plan;
     plan.on_change([](const easyai::Plan & p){
@@ -2246,8 +2246,8 @@ process when the model picks the tool.
 ```cpp
 // Built-in tools (compiled into libeasyai):
 cli.add_tool(easyai::tools::datetime());
-cli.add_tool(easyai::tools::web_search());
-cli.add_tool(easyai::tools::web_fetch());
+cli.add_tool(easyai::tools::search_web());
+cli.add_tool(easyai::tools::fetch_web());
 cli.add_tool(easyai::tools::fs_read_file("/data"));   // sandbox to /data
 cli.add_tool(easyai::tools::fs_list_dir ("/data"));
 
@@ -2376,14 +2376,14 @@ Read its source to see one possible "wire it all up" pattern; lift
 chunks into your own app verbatim.
 
 ```bash
-# REPL with the default tool set (datetime, plan, web_search,
-# web_fetch, system_*); EASYAI_URL / EASYAI_API_KEY env vars work too.
+# REPL with the default tool set (datetime, plan, search_web,
+# fetch_web, system_*); EASYAI_URL / EASYAI_API_KEY env vars work too.
 easyai-cli --url http://ai.local:8080
 
 # One-shot scripted call with a custom tool whitelist:
 easyai-cli --url https://api.openai.com \
   --api-key $OPENAI_API_KEY --model gpt-4o-mini \
-  --tools datetime,plan,web_search,web_fetch \
+  --tools datetime,plan,search_web,fetch_web \
   -p "Investigate today's most-cited mamba arxiv papers; produce a 5-bullet summary."
 
 # Pin sampling + add stop sequences:
@@ -2974,7 +2974,7 @@ thinking models that otherwise rephrase the same intent before
 acting.  It works for short turns.  On *long agentic flows* (10+
 tool hops) it starts misfiring — by the fifth `fs_read_file` call
 the literal tokens of the tool name fall inside the window, the
-model paraphrases ("read_file", "fs_read"), the dispatcher fails
+model paraphrases ("read_file", "read_fs"), the dispatcher fails
 with "unknown tool".
 
 `frequency_penalty` (default `0.05`) applies an additive cost
@@ -3107,13 +3107,13 @@ two model-emitted token chunks.
 
 ### 9.1 Web search
 
-`web_search` works out of the box — it talks to DuckDuckGo's HTML endpoint
+`search_web` works out of the box — it talks to DuckDuckGo's HTML endpoint
 directly via libcurl. There is nothing to configure and no API key.
 
 If DDG starts rate-limiting your IP (rare), the tool returns an explicit
 error message instead of silently failing. If you need a different backend
 (Bing, Brave, your own SearXNG), the implementation lives in
-`src/builtin_tools.cpp::web_search()` — copy that handler, swap the URL and
+`src/builtin_tools.cpp::search_web()` — copy that handler, swap the URL and
 the regex pair, and register your variant via `engine.add_tool(my_search())`.
 
 ### 9.2 Forcing CPU-only
@@ -3278,8 +3278,8 @@ message. The preamble has up to three blocks:
 * `# KNOWLEDGE CUTOFF` — training-cutoff hint + rule to verify
   post-cutoff facts.
 * `# MEMORY VOCABULARY` — top-40 keyword index when `--memory`
-  is set (so the model can dispatch `knowledge_search`
-  without first calling `knowledge_keywords`).
+  is set (so the model can dispatch `search_knowledge`
+  without first calling `keywords_knowledge`).
 
 For regression testing the preamble can be disabled per-request
 without restarting the server:
@@ -3410,7 +3410,7 @@ add `--enable-verbose` and check `journalctl` for `[easyai] hop N
 raw tail:` lines — those show what the model actually emitted, which
 helps tune the system prompt.
 
-### `web_search` — "no results parsed (DuckDuckGo may have rate-limited…)"
+### `search_web` — "no results parsed (DuckDuckGo may have rate-limited…)"
 
 DuckDuckGo's HTML endpoint serves a CAPTCHA / "anomaly" page when it
 suspects a bot.  Wait a minute, lower request rate, or use a
@@ -3445,7 +3445,7 @@ If you want to go deeper:
 * `include/easyai/plan.hpp` — `Plan` checklist + `Plan::tool()`
   factory.
 * `include/easyai/builtin_tools.hpp` — factories for `datetime`,
-  `web_search`, `web_fetch`, `fs_*`.
+  `search_web`, `fetch_web`, `fs_*`.
 * `include/easyai/presets.hpp` — sampling presets and the runtime
   override parser (`/temp`, `creative 0.9`, …).
 * `src/engine.cpp` — the `chat()` loop is annotated step by step;

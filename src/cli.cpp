@@ -78,7 +78,7 @@ std::vector<Tool> Toolbelt::tools() const {
     const std::string fs_root = sandbox_.empty() ? "." : sandbox_;
     if (fs_on) {
         // The fs surface — Unified (single dispatcher with `action`),
-        // Split (one tool per action: fs_read, fs_edit, …), or Both
+        // Split (one tool per action: read_fs, edit_fs, …), or Both
         // (registers both surfaces so the model can pick).
         if (tool_mode_ == ToolMode::Unified || tool_mode_ == ToolMode::Both) {
             out.push_back(easyai::tools::fs(fs_root));

@@ -32,8 +32,8 @@
 //
 // Build dependency
 // ----------------
-// Gated on EASYAI_HAVE_CURL (the same flag that gates web_fetch /
-// web_search). When easyai is built without libcurl, the function
+// Gated on EASYAI_HAVE_CURL (the same flag that gates fetch_web /
+// search_web). When easyai is built without libcurl, the function
 // is still present but always returns an empty vector + an error
 // explaining why.
 #pragma once

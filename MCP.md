@@ -50,8 +50,8 @@ connect to easyai-server and use its tools as if they were native.
 
 `easyai-server` registers a tool catalogue at startup — built-in
 tools, the seven keyword-only knowledge tools (`knowledge_save`,
-`knowledge_append`, `knowledge_search`, `knowledge_load`,
-`knowledge_list`, `knowledge_delete`, `knowledge_keywords` — a
+`knowledge_append`, `search_knowledge`, `knowledge_load`,
+`knowledge_list`, `knowledge_delete`, `keywords_knowledge` — a
 passive RAG technique over keyword-indexed Markdown files), and any
 operator-defined tools loaded from `--external-tools`. The MCP layer
 exposes that **same** catalogue via the Model Context Protocol so
@@ -176,7 +176,7 @@ it with:
      regardless of path.
    - The filesystem tool(s) named in `tools/list` are the
      authoritative writer — names differ by mode (`fs(action=...)`
-     in Unified mode, the `fs_write` / `fs_edit` / ... family in
+     in Unified mode, the `write_fs` / `edit_fs` / ... family in
      Split mode).
    - **Read-before-write** (2026-06-12): an EXISTING file must first
      be read with the filesystem read tool in this session before a
@@ -218,7 +218,7 @@ curl -fsS http://localhost/mcp \
     "jsonrpc":"2.0","id":3,
     "method":"tools/call",
     "params": {
-      "name": "knowledge_keywords",
+      "name": "keywords_knowledge",
       "arguments": {}
     }
   }' | jq -r '.result.content[0].text'
@@ -293,7 +293,7 @@ Anthropic ships natively.
 
 In Claude Desktop, ask: *"Use the knowledge tools to show me your
 registry vocabulary."* Claude will dispatch `tools/call` with
-name `knowledge_keywords` and `arguments: {}` — easyai handles it
+name `keywords_knowledge` and `arguments: {}` — easyai handles it
 locally, returns the keyword counts, and Claude reads them.
 
 ---
@@ -387,7 +387,7 @@ print(call("initialize", {"protocolVersion":"2024-11-05",
                           "clientInfo":{"name":"smoke","version":"0"}}))
 print([t["name"] for t in call("tools/list")["result"]["tools"]])
 print(call("tools/call",
-           {"name":"knowledge_keywords","arguments":{}})["result"]["content"][0]["text"])
+           {"name":"keywords_knowledge","arguments":{}})["result"]["content"][0]["text"])
 ```
 
 Node / TypeScript clients can use any JSON-RPC library

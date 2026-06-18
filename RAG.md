@@ -46,11 +46,11 @@ tools:
 ```
 knowledge_save(keywords, content, fix?)        store / overwrite; fix=true → immutable
 knowledge_append(keywords, content)            grow an existing entry or create a new one
-knowledge_search(keywords, page?, max_results?) find by keywords; matches ANY keyword, paginated
+search_knowledge(keywords, page?, max_results?) find by keywords; matches ANY keyword, paginated
 knowledge_load(keywords)                       recall a full entry by keywords
 knowledge_list(prefix?, max?)                  browse entries
 knowledge_delete(keywords)                     forget a stale entry (fixed entries refused)
-knowledge_keywords(min_count?, max?)           vocabulary overview
+keywords_knowledge(min_count?, max?)           vocabulary overview
 ```
 
 That is the whole API. **Keywords ARE the identifier** — there is no
@@ -71,7 +71,7 @@ Any entry whose filename starts with `fix-` is **immutable**:
 
 * `knowledge_save` refuses to overwrite it.
 * `knowledge_delete` refuses to remove it.
-* `knowledge_search` and `knowledge_load` work normally — and
+* `search_knowledge` and `knowledge_load` work normally — and
   tag the entry `[FIXED]` / `fixed: yes` so the model knows it's
   looking at ground-truth knowledge, not a working note.
 
@@ -109,7 +109,7 @@ to which action.
                │                   │                     │
         READ PATH (parallel — shared_lock)
         ┌────────────────┐  ┌────────────────┐  ┌────────────────┐  ┌────────────────────┐
-        │knowledge_search│  │knowledge_load  │  │knowledge_list  │  │knowledge_keywords  │
+        │search_knowledge│  │knowledge_load  │  │knowledge_list  │  │keywords_knowledge  │
         │                │  │                │  │                │  │                    │
         │ find by        │  │ read full      │  │ browse         │  │ vocab overview     │
         │ keyword        │  │ entry          │  │ entries        │  │ (counts)           │
@@ -151,7 +151,7 @@ The lifecycle of a piece of knowledge:
   SESSION 1 (Mon)
   ───────────────
   user:  "I prefer terse PT-BR responses."
-  model: knowledge_keywords()                ← sees "user-prefs" already
+  model: keywords_knowledge()                ← sees "user-prefs" already
                                                 exists in vocabulary
          knowledge_save(                     ← reuses existing keyword
                 keywords="user-prefs locale",
@@ -163,9 +163,9 @@ The lifecycle of a piece of knowledge:
   SESSION 2 (Wed, fresh process)
   ──────────────────────────────
   user:  "build the project"
-  model: knowledge_search(keywords="easyai build")  ← matches → build_easyai_recipe.md
+  model: search_knowledge(keywords="easyai build")  ← matches → build_easyai_recipe.md
          knowledge_load(keywords="build easyai recipe")  ← reads body
-         knowledge_search(keywords="user-prefs")    ← finds locale_user-prefs.md
+         search_knowledge(keywords="user-prefs")    ← finds locale_user-prefs.md
          knowledge_load(keywords="locale user-prefs")  ← reads body
                                               ← model now answers
                                                 in PT-BR, terse, with
@@ -174,7 +174,7 @@ The lifecycle of a piece of knowledge:
   ────────────────────────────────────  later that week ─────────
 
   user:  "we dropped the X feature"
-  model: knowledge_search(keywords="x-feature")  ← finds 3 stale entries
+  model: search_knowledge(keywords="x-feature")  ← finds 3 stale entries
          knowledge_delete(keywords="rationale x-feature")
          knowledge_delete(keywords="roadmap x-feature")    ← curation keeps the
          knowledge_delete(keywords="userflow x-feature")     vocabulary clean for
@@ -188,7 +188,7 @@ Three things make this loop work:
    the identifier — no separate title needed.
 2. **Keywords are the index.** No embeddings, no GPU, no opaque
    ranking — exact-match lookup over a small in-memory map.
-3. **The model curates.** `knowledge_keywords` lets it see what
+3. **The model curates.** `keywords_knowledge` lets it see what
    vocabulary it has built; `knowledge_delete` lets it prune.
    Without curation, the index drifts and old entries become
    unreachable.
@@ -297,7 +297,7 @@ The grammar:
 
 A file with NO header (no `keywords:` line) is treated as
 **untagged**. It shows up in `knowledge_list` but never in
-`knowledge_search`. This is by design — operators can drop
+`search_knowledge`. This is by design — operators can drop
 hand-written notes into the dir and the model will list them as
 available context, but won't consider them "tagged knowledge" until
 the operator (or the model) adds keywords.
@@ -316,7 +316,7 @@ EOF
 ```
 
 Restart the server (or wait for the next session) and the model has
-it on its first `knowledge_search(keywords="user-prefs")`.
+it on its first `search_knowledge(keywords="user-prefs")`.
 
 ### Constraints
 
@@ -419,15 +419,15 @@ runs under one `unique_lock` on the store's `shared_mutex`, so
 concurrent `knowledge_append` / `knowledge_save` / `knowledge_delete`
 calls on the same store serialise. Two threads appending to the SAME
 entry queue up; both appendices land. Concurrent reads
-(`knowledge_search` / `knowledge_load` / `knowledge_list` /
-`knowledge_keywords`) hold a shared_lock and parallelise except while
+(`search_knowledge` / `knowledge_load` / `knowledge_list` /
+`keywords_knowledge`) hold a shared_lock and parallelise except while
 a writer holds the unique_lock — same discipline as the rest of the
 RagStore.
 
-### knowledge_search
+### search_knowledge
 
 ```
-knowledge_search(keywords: string, max_results?: integer = 10, page?: integer)
+search_knowledge(keywords: string, max_results?: integer = 10, page?: integer)
   -> list of {stem, keywords, preview, matched/total}
 ```
 
@@ -499,10 +499,10 @@ regular entries: forgetting a non-existent entry is not an error.
 rejected with a clear message; the operator must remove the file by
 hand if it really needs to go.
 
-### knowledge_keywords
+### keywords_knowledge
 
 ```
-knowledge_keywords(min_count?: integer = 1, max?: integer = 200)
+keywords_knowledge(min_count?: integer = 1, max?: integer = 200)
   -> { total_keywords, total_entries, showing, [keyword, count]* }
 ```
 
@@ -510,13 +510,13 @@ Vocabulary overview. Lists every distinct keyword used across the
 knowledge store with the number of entries that reference it. Sorted
 by frequency (most-used first), tie-broken alphabetically.
 
-**Why it matters.** Without `knowledge_keywords`, an agent that
+**Why it matters.** Without `keywords_knowledge`, an agent that
 doesn't check its own vocabulary creates near-duplicates over time —
 `user-prefs` vs `user_pref` vs `preferences`, `cmd-recipe` vs
 `command-recipe`, etc. — and the index slowly fragments. Old
 entries become unreachable to new searches because the queries
-target slightly-different keywords. Calling `knowledge_keywords`
-before `knowledge_save` (or before `knowledge_search` when you don't
+target slightly-different keywords. Calling `keywords_knowledge`
+before `knowledge_save` (or before `search_knowledge` when you don't
 know what's in the store) keeps the vocabulary stable and the index
 coherent.
 
@@ -550,9 +550,9 @@ or deletion.
 ### Tool registration
 
 `--memory <dir>` registers seven tools via `knowledge_split_tools()`:
-`knowledge_save`, `knowledge_append`, `knowledge_search`,
+`knowledge_save`, `knowledge_append`, `search_knowledge`,
 `knowledge_load`, `knowledge_list`, `knowledge_delete`,
-`knowledge_keywords`. Each tool has its own flat schema with only the
+`keywords_knowledge`. Each tool has its own flat schema with only the
 parameters it needs.
 
 **On-disk layout, locking discipline, fix-entry rules, error
@@ -601,7 +601,7 @@ auto-injects a compact vocabulary snapshot into the system prompt:
 # MEMORY VOCABULARY (the keywords your private memory currently
 has tagged — the FIRST place to look for anything you might
 already know)
-12 entries (most-common first; call knowledge_search(keywords="<name> ...")
+12 entries (most-common first; call search_knowledge(keywords="<name> ...")
 to recall):
 easyai(8) claude(5) bitnet(3) build(3) iteration(2) …
 ```
@@ -617,9 +617,9 @@ easyai(8) claude(5) bitnet(3) build(3) iteration(2) …
 * **cli** computes it once when building the system prefix to
   send to the remote server.
 
-The model no longer has to call `knowledge_keywords` to discover its
+The model no longer has to call `keywords_knowledge` to discover its
 own vocabulary — it sees the list every turn and can dispatch the
-right `knowledge_search` directly. The `knowledge_keywords` tool is
+right `search_knowledge` directly. The `keywords_knowledge` tool is
 still available when the model wants fresh counts mid-task or needs
 the full list past the top-40 cap.
 
@@ -646,7 +646,7 @@ automatically with no explicit signalling.
 
 | Edge case | Behaviour |
 |---|---|
-| Two `knowledge_save` calls within one second on a second-resolution filesystem (HFS+, some NFS) | Up to one second of stale vocab can be served if the file-count delta is also zero. Acceptable — the vocab is advisory; the actual `knowledge_search` always hits the live, write-locked index. |
+| Two `knowledge_save` calls within one second on a second-resolution filesystem (HFS+, some NFS) | Up to one second of stale vocab can be served if the file-count delta is also zero. Acceptable — the vocab is advisory; the actual `search_knowledge` always hits the live, write-locked index. |
 | Directory disappears | `stat(2)` fails, cache returns the last good string; next successful scan refreshes. |
 | First-ever call | Cache miss → full directory walk + cache populate; one `stat(2)` thereafter. |
 
@@ -661,7 +661,7 @@ See SECURITY_AUDIT §23.3 for the formal residual.
 ```
 [user opens chat]
   ↓
-model: knowledge_search(keywords="user-prefs") → finds "locale_user-prefs"
+model: search_knowledge(keywords="user-prefs") → finds "locale_user-prefs"
 model: knowledge_load(keywords="locale user-prefs")  → reads the body
 model: now knows the user prefers PT-BR, terse style, ...
 
@@ -675,7 +675,7 @@ model: knowledge_save(keywords="project foo", content="...")
 
 [user corrects something]
   ↓
-model: knowledge_search(keywords="foo") → finds the old note
+model: search_knowledge(keywords="foo") → finds the old note
 model: knowledge_save(keywords=SAME keywords, ...)   ← overwrites with corrected version
                                      OR
 model: knowledge_delete(keywords="foo old")
@@ -700,16 +700,16 @@ Model:  [reads the PDF via fs(action="read") or web(action="fetch")]
         knowledge_save(keywords="mqtt qos protocol",     content="...")
         ...
         "Saved 6 entries under keywords 'mqtt' + 'protocol'. Future you
-         can knowledge_search(keywords='mqtt') to find any of them, or
-         narrow with knowledge_search(keywords='mqtt qos') to focus on
+         can search_knowledge(keywords='mqtt') to find any of them, or
+         narrow with search_knowledge(keywords='mqtt qos') to focus on
          QoS-related ones."
 ```
 
 Now the next session, when you ask about MQTT, the model searches with
-`knowledge_search(keywords="mqtt")`, finds the 6 entries, loads the
+`search_knowledge(keywords="mqtt")`, finds the 6 entries, loads the
 best matches, and answers from the saved knowledge — no re-reading.
 If the question is more specific ("MQTT QoS levels"), the model uses
-`knowledge_search(keywords="mqtt qos")` — still every `mqtt` entry,
+`search_knowledge(keywords="mqtt qos")` — still every `mqtt` entry,
 but the ones also tagged `qos` rank first.
 
 This is the **positive cycle**: feed knowledge, saved knowledge,
@@ -733,7 +733,7 @@ Next session:
 
 ```
 You:    "build easyai on ai box"
-Model:  knowledge_search(keywords="easyai build")  →  finds ai-box_build_easyai (matched 2/2)
+Model:  search_knowledge(keywords="easyai build")  →  finds ai-box_build_easyai (matched 2/2)
         knowledge_load(keywords="ai-box build easyai")
         "Use: cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j"
 ```
@@ -744,7 +744,7 @@ Model:  knowledge_search(keywords="easyai build")  →  finds ai-box_build_easya
 You:    "We dropped the X feature. Remove anything about it from your
          memory."
 
-Model:  knowledge_search(keywords="x-feature")
+Model:  search_knowledge(keywords="x-feature")
         [3 entries match]
         knowledge_delete(keywords="rationale x-feature")
         knowledge_delete(keywords="roadmap x-feature")
@@ -784,7 +784,7 @@ Model:  knowledge_search(keywords="x-feature")
   entry, the FULL body lands in the model's prompt — a 200-line
   note costs 1000+ tokens whether the model needed all of it or not.
   The search-then-load flow is built around this:
-  `knowledge_search` ranks N candidates by overlap, the model picks
+  `search_knowledge` ranks N candidates by overlap, the model picks
   the best, and each loaded body is small enough to fit comfortably.
   **It is always better to do two more loads than to swallow one
   giant one.** Rule of thumb: bodies over ~500 words are usually two
@@ -825,9 +825,9 @@ Model:  knowledge_search(keywords="x-feature")
 | `--memory` points to a file (not a dir) | First `knowledge_save` returns "RAG root is not a directory". Other tools also error. |
 | Two processes share the same memory dir | Reads work; the in-memory index of one process won't see writes from the other until that process restarts. Single-process is the supported model. |
 | Keywords match an existing entry | `knowledge_save` overwrites (atomic). Useful for refining notes. |
-| Keyword used by no entry | `knowledge_search` returns "no entries match" (not an error). |
+| Keyword used by no entry | `search_knowledge` returns "no entries match" (not an error). |
 | `knowledge_load` asks for a non-existent entry | Returns an error message naming the derived filename. |
-| Hand-authored file with no `keywords:` header | Loaded as untagged. Shows in `knowledge_list`, never in `knowledge_search`. The body is fully accessible via `knowledge_load`. |
+| Hand-authored file with no `keywords:` header | Loaded as untagged. Shows in `knowledge_list`, never in `search_knowledge`. The body is fully accessible via `knowledge_load`. |
 | Hand-authored file with garbage in the body | Loaded fine. The body is opaque to the `knowledge` tools. |
 | File > 256 KB | Skipped at index time; `knowledge_load` returns "entry exceeds 262144 bytes". Operator should split. |
 | Filename with spaces / dots / slashes | Skipped at index time (doesn't match the stem regex). |
@@ -887,7 +887,7 @@ body
 ```
 
 Restart the server. The model picks them up on next
-`knowledge_search` / `knowledge_list`.
+`search_knowledge` / `knowledge_list`.
 
 ---
 
@@ -904,7 +904,7 @@ Future: on session start, automatically load the K most-relevant
 entries (by some heuristic — recency, keyword overlap with the current
 prompt, semantic similarity if we add embeddings). This makes the
 agent immediately aware of its own memory without needing a
-conscious `knowledge_search`.
+conscious `search_knowledge`.
 
 ### Document ingestion helper
 
@@ -1004,7 +1004,7 @@ sudo chmod 750 /var/lib/easyai/rag
 Likely the agent ran with the wrong `--memory` path (e.g. CLI vs
 server disagree). Confirm both invocations point at the same dir.
 
-### Entry was saved but `knowledge_search` doesn't find it
+### Entry was saved but `search_knowledge` doesn't find it
 
 Check the on-disk file:
 
@@ -1014,7 +1014,7 @@ cat /var/lib/easyai/rag/<stem>.md
 
 The first line must be `keywords: <comma-separated>`. If the model
 forgot keywords, the entry is untagged — visible in
-`knowledge_list`, not `knowledge_search`.
+`knowledge_list`, not `search_knowledge`.
 
 ### `cat`-ing an entry shows weird characters
 

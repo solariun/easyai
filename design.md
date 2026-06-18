@@ -361,7 +361,7 @@ wrong thing.  Examples we hit in production:
 * The model has called `fs(action="read")` four times. On the fifth
   call, the literal tokens for the tool name are inside the
   recent-token window.  `repeat_penalty` discounts them.  The model
-  substitutes a paraphrase — `read_file`, `fs_read`, `read` — which
+  substitutes a paraphrase — `read_file`, `read_fs`, `read` — which
   doesn't match any registered tool and causes an "unknown tool"
   failure.
 * During a long planning section, the model has used the word
@@ -964,7 +964,7 @@ training cutoff.  Without a fresh wall-clock signal each turn, the
 model will happily insist that "this year" is the year it was
 trained, and confidently misreport leaders, prices, scores, and
 weather.  And without a hint of what's in its persistent memory,
-the model either burns a `knowledge_keywords` hop on every
+the model either burns a `keywords_knowledge` hop on every
 question or skips memory entirely and goes to the web.  The fix
 is well known but worth describing as it lives in this codebase,
 because it interacts subtly with client-supplied system prompts.
@@ -1022,7 +1022,7 @@ Never present a post-cutoff fact as known.
 # MEMORY VOCABULARY (the keywords your private memory currently
 has tagged — the FIRST place to look for anything you might
 already know)
-12 entries (most-common first; call knowledge_search(
+12 entries (most-common first; call search_knowledge(
 keywords=["<name>", ...]) to recall):
 easyai(8) claude(5) bitnet(3) build(3) iteration(2) …
 ```
@@ -1047,7 +1047,7 @@ prefix stays warm across writes.
 filesystems with second-resolution mtime can serve up to one
 second of stale vocab on rapid same-second writes that net to
 zero file-count change — accepted because vocab is advisory; the
-actual `knowledge_search` always hits the live index. See
+actual `search_knowledge` always hits the live index. See
 SECURITY_AUDIT §23.3.
 
 Cutoff date comes from `--knowledge-cutoff YYYY-MM` (default
@@ -1324,9 +1324,9 @@ saves and searches itself, no embedding model or vector store.
 │                            MODEL                                 │
 │          (sees SEVEN keyword-only knowledge tools)               │
 │                                                                  │
-│   knowledge_save, knowledge_append, knowledge_search,            │
+│   knowledge_save, knowledge_append, search_knowledge,            │
 │   knowledge_load, knowledge_list, knowledge_delete,              │
-│   knowledge_keywords                                             │
+│   keywords_knowledge                                             │
 └─────────────────────────────────────────────────────────────────┘
                                 │
                                 │  tool_call(name, arguments_json)
@@ -1374,8 +1374,8 @@ The flow has four invariants worth calling out:
    auto-writes from the server side. This makes "what's in memory"
    a function of "what the agent decided to remember", which is the
    part vector stores get wrong.
-2. **The index is small.** Every `knowledge_search` /
-   `knowledge_list` / `knowledge_keywords` call stays in memory —
+2. **The index is small.** Every `search_knowledge` /
+   `knowledge_list` / `keywords_knowledge` call stays in memory —
    no disk read. The body is only read when the model commits to
    one specific entry via `knowledge_load`. A 1000-entry store with
    avg 200-byte body uses ~200 KiB on disk and a few hundred bytes
@@ -1422,8 +1422,8 @@ process — fast).
 ### Seven keyword-only tools
 
 The surface is **seven separate tools**: `knowledge_save`,
-`knowledge_append`, `knowledge_search`, `knowledge_load`,
-`knowledge_list`, `knowledge_delete`, `knowledge_keywords`. There
+`knowledge_append`, `search_knowledge`, `knowledge_load`,
+`knowledge_list`, `knowledge_delete`, `keywords_knowledge`. There
 is no unified `memory(action=...)` dispatcher — each tool has its
 own flat schema and handler.
 
@@ -1795,7 +1795,7 @@ with the same `inputSchema` declared in the manifest. An operator
 who declares `git_log` in `EASYAI-internal.tools` exposes it
 simultaneously to:
 
-- The local model (which calls `knowledge_search` and dispatches).
+- The local model (which calls `search_knowledge` and dispatches).
 - Cursor's chat (via MCP `tools/call`).
 - Claude Desktop (via the stdio bridge).
 
@@ -1839,7 +1839,7 @@ describes the architectural shape.
 
 cpp-httplib (the static lib we use elsewhere) requires us to thread
 OpenSSL into anything that wants HTTPS. libcurl is already the
-transport for `web_fetch` / `web_search`, and it brings TLS in for
+transport for `fetch_web` / `search_web`, and it brings TLS in for
 free at the system level. The MCP client gets HTTPS for free without
 adding a second crypto stack to libeasyai.
 
@@ -2045,7 +2045,7 @@ git submodules in your application repo so an upgrade is a single commit.
 > queries.  `coredumpctl gdb` showed **94 766 stack frames** — an
 > infinite recursion in libstdc++'s regex engine triggered by
 > `easyai::tools::strip_html` running over an HTML page returned by
-> `web_fetch`.  After fixing that one site we walked the rest of the
+> `fetch_web`.  After fixing that one site we walked the rest of the
 > tree the same way: every place where adversarial input could meet
 > a recursive helper.  This chapter is the report.
 
@@ -2103,13 +2103,13 @@ The following code paths are **stack-safe** under any input:
 
 | Site                                              | Risk                                         | Fix                                                                                  |
 |---------------------------------------------------|----------------------------------------------|--------------------------------------------------------------------------------------|
-| `src/builtin_tools.cpp::strip_html` (old)         | `std::regex_replace` with `[\s\S]*?` and a back-reference; libstdc++ recursive engine blew the stack on real-world HTML pages fetched by `web_fetch` (94 766 frames in the production coredump) | Rewrote as forward-only scanner.  Inline `<script>`/`<style>` block skip via `starts_with_ci` probes; no regex, no recursion. |
+| `src/builtin_tools.cpp::strip_html` (old)         | `std::regex_replace` with `[\s\S]*?` and a back-reference; libstdc++ recursive engine blew the stack on real-world HTML pages fetched by `fetch_web` (94 766 frames in the production coredump) | Rewrote as forward-only scanner.  Inline `<script>`/`<style>` block skip via `starts_with_ci` probes; no regex, no recursion. |
 | `examples/server.cpp::on_token` lambda            | `common_chat_msg_diff::compute_diffs` throws `"Invalid diff: now finding less tool calls!"` when partial-parse temporarily extracts then unextracts a tool_call — the exception unwound through the engine and tore down the request | Wrapped `compute_diffs` in `try/catch`, hold `prev_msg` on the last good state and wait for the next token to settle |
 | `examples/server.cpp::handle_chat_stream` final pass | When every partial parse threw (malformed Qwen tool_call markup) the loop emitted zero content deltas and the user saw an empty bubble | Capture `engine_final_content = chat_continue()`; emit a synthesised content delta if `any_content_emitted == false` |
 
 ### 10.4  Open risks — HIGH
 
-#### 10.4.1  `fs_grep` accepts an LLM-supplied regex
+#### 10.4.1  `grep_fs` accepts an LLM-supplied regex
 
 **Site:** `src/builtin_tools.cpp:685–688`.
 
@@ -2129,7 +2129,7 @@ Patterns like `(a+)+$` against `"aaaaaa…b"` cause classical
 catastrophic backtracking → stack overflow → SIGSEGV — the same
 class of bug as the `strip_html` incident.
 
-**Why we haven't fixed yet:** ripping `std::regex` out of `fs_grep`
+**Why we haven't fixed yet:** ripping `std::regex` out of `grep_fs`
 means re-implementing meaningful subset of regex (alternation,
 quantifiers, character classes) by hand, or pulling in a non-
 backtracking engine (RE2, Hyperscan).  Tracked as work.
@@ -2139,12 +2139,12 @@ backtracking engine (RE2, Hyperscan).  Tracked as work.
   bombs but not all).
 * Run `regex_search` in a worker thread with a hard timeout.
 * Switch the tool's grammar to **glob-only** (no regex), like
-  `fs_glob`.  The agent loses substring-regex power but gains
+  `glob_fs`.  The agent loses substring-regex power but gains
   bounded execution time.
 * Pull in Google's RE2 (no backtracking, linear time, separate
   compile-time dep).  This is the right long-term answer.
 
-Until one of those lands, **`fs_grep` is unsafe in adversarial
+Until one of those lands, **`grep_fs` is unsafe in adversarial
 multi-tenant deployments**.  In single-user mode it's still
 practical because the operator chose to run it.
 
@@ -2178,7 +2178,7 @@ The second is the right answer.  Open as work.
 
 ### 10.5  Open risks — MEDIUM
 
-#### 10.5.1  `web_search` HTML regex still uses `[\s\S]*?`
+#### 10.5.1  `search_web` HTML regex still uses `[\s\S]*?`
 
 **Site:** `src/builtin_tools.cpp:435–462`.
 
@@ -2328,8 +2328,8 @@ following rules apply to all easyai source from this point on:
 
 | Priority | Item                                                                                  |
 |----------|---------------------------------------------------------------------------------------|
-| HIGH     | Replace `std::regex` in `fs_grep` with RE2 or restrict to glob-only matching         |
+| HIGH     | Replace `std::regex` in `grep_fs` with RE2 or restrict to glob-only matching         |
 | HIGH     | Add SAX-based depth-bounded parser for HTTP `req.body` JSON                          |
-| MEDIUM   | Rewrite `web_search`'s DDG result extraction as a forward-only scanner               |
+| MEDIUM   | Rewrite `search_web`'s DDG result extraction as a forward-only scanner               |
 | LOW      | Add a fuzz harness against `strip_html` and `recover_qwen_tool_calls` (libfuzzer)    |
 | LOW      | Investigate switching to RE2 or a non-backtracking engine repo-wide                  |

@@ -458,7 +458,7 @@ std::vector<CpuTicks> parse_proc_stat(const std::string & text) {
 
 // ---- Tool factories -------------------------------------------------------
 easyai::Tool make_system_meminfo() {
-    return easyai::Tool::builder("system_meminfo")
+    return easyai::Tool::builder("meminfo_system")
         .describe("Return total / available / free / buffers / cached memory and "
                   "swap totals from /proc/meminfo, in MiB.  Linux only.  No args.")
         .handle([](const easyai::ToolCall &) -> easyai::ToolResult {
@@ -487,7 +487,7 @@ easyai::Tool make_system_meminfo() {
 }
 
 easyai::Tool make_system_loadavg() {
-    return easyai::Tool::builder("system_loadavg")
+    return easyai::Tool::builder("loadavg_system")
         .describe("Return the 1, 5 and 15 minute load averages plus the "
                   "running/total process counter from /proc/loadavg.  Linux only.")
         .handle([](const easyai::ToolCall &) -> easyai::ToolResult {
@@ -511,7 +511,7 @@ easyai::Tool make_system_loadavg() {
 }
 
 easyai::Tool make_system_cpu_usage() {
-    return easyai::Tool::builder("system_cpu_usage")
+    return easyai::Tool::builder("cpu_usage_system")
         .describe("Sample /proc/stat twice with a configurable gap and report "
                   "per-CPU busy% (1.0 = 100% saturated).  Useful when the "
                   "user asks 'how loaded is the box right now'.  Linux only.")
@@ -555,7 +555,7 @@ easyai::Tool make_system_cpu_usage() {
 }
 
 easyai::Tool make_system_swaps() {
-    return easyai::Tool::builder("system_swaps")
+    return easyai::Tool::builder("swaps_system")
         .describe("List configured swap devices/files with size and used "
                   "amount, from /proc/swaps.  Linux only.")
         .handle([](const easyai::ToolCall &) -> easyai::ToolResult {
@@ -597,8 +597,8 @@ struct Options {
     std::set<std::string> tools_enabled;       // empty = all defaults
     std::string external_tools_dir;            // dir of EASYAI-*.tools files
     std::string rag_dir;                        // optional RAG persistent-registry dir
-    // Default "split": focused one-verb-per-tool surfaces (fs_read,
-    // fs_edit, knowledge_learning, …) instead of the legacy single dispatcher
+    // Default "split": focused one-verb-per-tool surfaces (read_fs,
+    // edit_fs, learning_knowledge, …) instead of the legacy single dispatcher
     // (fs(action="read"), …). Smaller / quantised tool-callers
     // dispatch much more reliably against the split shape; large
     // models handle either. Pass --tools-mode unified to opt back into
@@ -817,12 +817,12 @@ void usage(const char * argv0) {
 "                                 python3 (auto-on with --sandbox /\n"
 "                                     --allow-bash; --no-python opts out),\n"
 "                                 bash (only with --allow-bash),\n"
-"                                 system_meminfo, system_loadavg,\n"
-"                                 system_cpu_usage, system_swaps,\n"
+"                                 meminfo_system, loadavg_system,\n"
+"                                 cpu_usage_system, swaps_system,\n"
 "                                 memory (only with --memory DIR)\n"
 "                               default: datetime,plan,web,\n"
-"                                 system_meminfo,system_loadavg,\n"
-"                                 system_cpu_usage,system_swaps,\n"
+"                                 meminfo_system,loadavg_system,\n"
+"                                 cpu_usage_system,swaps_system,\n"
 "                                 (memory is auto-registered when --memory is set;\n"
 "                                  fs and python3 are auto-registered when\n"
 "                                  --sandbox or --allow-bash is set)\n"
@@ -871,8 +871,8 @@ void usage(const char * argv0) {
 "    --tools-mode MODE          how the multi-action tool families (fs, web,\n"
 "                                 knowledge) are exposed to the model:\n"
 "                                   \"split\"  — one focused tool per action\n"
-"                                     (fs_read, fs_edit, fs_glob, …, web_search,\n"
-"                                     web_fetch, knowledge_learning, …); flat schemas,\n"
+"                                     (read_fs, edit_fs, glob_fs, …, search_web,\n"
+"                                     fetch_web, learning_knowledge, …); flat schemas,\n"
 "                                     no \"unknown action\" failure mode. DEFAULT\n"
 "                                     since 2026-05-15 — works reliably across\n"
 "                                     small / quantised callers and large ones.\n"
@@ -1568,7 +1568,7 @@ bool any_management(const Options & o) {
 const std::vector<std::string> kDefaultTools = {
     "datetime", "plan", "web",
     "tool_lookup",
-    "system_meminfo", "system_loadavg", "system_cpu_usage", "system_swaps",
+    "meminfo_system", "loadavg_system", "cpu_usage_system", "swaps_system",
 };
 
 void register_tools(easyai::Client & cli,
@@ -1632,7 +1632,7 @@ void register_tools(easyai::Client & cli,
 
     // fs — scoped to --sandbox if given, otherwise CWD. Unified
     // dispatcher (`fs(action="...")`) and/or focused per-action tools
-    // (`fs_read`, `fs_edit`, …) per --tools-mode.
+    // (`read_fs`, `edit_fs`, …) per --tools-mode.
     const std::string root = o.sandbox.empty() ? "." : o.sandbox;
     if (wants("fs")) {
         if (tm_unified) cli.add_tool(easyai::tools::fs(root));
@@ -1672,10 +1672,10 @@ void register_tools(easyai::Client & cli,
     // Inline system-info tools — defined above in `namespace systools`.
     // They demonstrate how to add your own custom Tool with a couple of
     // lines using Tool::builder().
-    if (wants("system_meminfo"))   cli.add_tool(systools::make_system_meminfo());
-    if (wants("system_loadavg"))   cli.add_tool(systools::make_system_loadavg());
-    if (wants("system_cpu_usage")) cli.add_tool(systools::make_system_cpu_usage());
-    if (wants("system_swaps"))     cli.add_tool(systools::make_system_swaps());
+    if (wants("meminfo_system"))   cli.add_tool(systools::make_system_meminfo());
+    if (wants("loadavg_system"))   cli.add_tool(systools::make_system_loadavg());
+    if (wants("cpu_usage_system")) cli.add_tool(systools::make_system_cpu_usage());
+    if (wants("swaps_system"))     cli.add_tool(systools::make_system_swaps());
 
     // Persistent memory — the agent's long-term store.
     // Seven knowledge_* tools registered when --memory <dir> is given.

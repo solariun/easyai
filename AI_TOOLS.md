@@ -183,7 +183,7 @@ Tool-calling runtimes always set it to `True` for inference. Get this wrong and 
 
 A tool, at its irreducible core, is **four things**:
 
-1. A **name** the model can refer to (`web_search`, `read_file`, `send_email`).
+1. A **name** the model can refer to (`search_web`, `read_file`, `send_email`).
 2. A **description** in plain English — what does it do, when should it be called?
 3. A **parameter schema** — what arguments does it take, and what types?
 4. A **handler** — the actual function that runs when the tool is invoked.
@@ -203,7 +203,7 @@ struct Tool {
 
 ## Chapter 9 — JSON Schema: The Lingua Franca of Parameters
 
-The parameter schema is written in **JSON Schema** — a standard way of describing the structure of a JSON document. For a `web_search` tool, the schema might be:
+The parameter schema is written in **JSON Schema** — a standard way of describing the structure of a JSON document. For a `search_web` tool, the schema might be:
 
 ```json
 {
@@ -263,7 +263,7 @@ The next part walks through each of those components on the wire.
 
 ## Chapter 11 — Advertising Tools In The Prompt
 
-When you tell a model "you have a `web_search` tool", you are not setting a hidden flag. You are *literally including the tool list in the prompt*, formatted by the chat template, before the model generates anything.
+When you tell a model "you have a `search_web` tool", you are not setting a hidden flag. You are *literally including the tool list in the prompt*, formatted by the chat template, before the model generates anything.
 
 In Jinja, a tool-aware template looks like this (simplified):
 
@@ -289,7 +289,7 @@ Read what that produces, given two registered tools:
 <|im_start|>system
 You have access to the following tools:
 
-- web_search: Search the web for a query.
+- search_web: Search the web for a query.
   Parameters: {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
 - datetime: Return the current date and time.
   Parameters: {"type":"object","properties":{}}
@@ -340,13 +340,13 @@ The struct `common_chat_tool` carries the name, *short* description, and JSON sc
 
 ## Chapter 12 — Encoding A Tool Call
 
-Now the model has been advertised tools. It is generating a response. At some point it decides: "I should call `web_search`."
+Now the model has been advertised tools. It is generating a response. At some point it decides: "I should call `search_web`."
 
 The model emits something like this *as part of its normal token stream*:
 
 ```
 <tool_call>
-{"name": "web_search", "arguments": {"query": "current weather in Lisbon"}}
+{"name": "search_web", "arguments": {"query": "current weather in Lisbon"}}
 </tool_call>
 ```
 
@@ -363,7 +363,7 @@ When you talk to an OpenAI-compatible **server**, you do not see this raw format
         "id": "call_abc123",
         "type": "function",
         "function": {
-          "name": "web_search",
+          "name": "search_web",
           "arguments": "{\"query\": \"current weather in Lisbon\"}"
         }
       }]
@@ -384,7 +384,7 @@ The model does not emit a complete tool call as one indivisible token. It stream
 ```
 delta {"content": "Let me check that for you."}
 delta {"content": " "}
-delta {"tool_calls": [{"index": 0, "id": "call_abc", "function": {"name": "web_search", "arguments": ""}}]}
+delta {"tool_calls": [{"index": 0, "id": "call_abc", "function": {"name": "search_web", "arguments": ""}}]}
 delta {"tool_calls": [{"index": 0, "function": {"arguments": "{\"que"}}]}
 delta {"tool_calls": [{"index": 0, "function": {"arguments": "ry\":\"weather"}}]}
 delta {"tool_calls": [{"index": 0, "function": {"arguments": " in Lisbon\"}"}}]}
@@ -510,7 +510,7 @@ Tool-call arguments are JSON, but they arrive across multiple SSE deltas. This m
 2. **You must concatenate arguments before parsing.** As shown in Chapter 13, append-then-parse-on-finish is the only safe pattern.
 3. **You must be tolerant of out-of-order deltas.** Some servers send tool-call fragments interleaved with content fragments. The accumulator's `index`-keyed map handles this naturally: each fragment is routed to its own slot regardless of arrival order.
 
-There is a separate, fancier pattern called **partial parsing**, where you incrementally parse JSON as it streams to surface progress to the user (for example, showing the user "the model is calling `web_search` with query=...weather..." as it types). This requires a streaming JSON parser and a chat-format-aware partial parser like `common_chat_parse(text, is_partial=true, ...)`. It is optional; not all runtimes do it. It exists, and you should know about it, but you can build a perfectly good agent without it.
+There is a separate, fancier pattern called **partial parsing**, where you incrementally parse JSON as it streams to surface progress to the user (for example, showing the user "the model is calling `search_web` with query=...weather..." as it types). This requires a streaming JSON parser and a chat-format-aware partial parser like `common_chat_parse(text, is_partial=true, ...)`. It is optional; not all runtimes do it. It exists, and you should know about it, but you can build a perfectly good agent without it.
 
 ## Chapter 17 — The Reasoning Channel
 
@@ -519,7 +519,7 @@ Some modern models emit a third stream of output, separate from regular content 
 In the wire format, this appears as `delta.reasoning_content`, not `delta.content`:
 
 ```
-data: {"choices":[{"delta":{"reasoning_content":"The user is asking about weather. I should call web_search..."}}]}
+data: {"choices":[{"delta":{"reasoning_content":"The user is asking about weather. I should call search_web..."}}]}
 data: {"choices":[{"delta":{"content":"Let me check the weather for you."}}]}
 data: {"choices":[{"delta":{"tool_calls":[...]}}]}
 ```
@@ -625,7 +625,7 @@ Notice the tools never leave the client. The server is an *inference oracle* —
 
 > *"Some tools are written by the agent's author. Some tools are written by the agent's operator. The interesting question is who gets to declare which is which."*
 
-So far in this book, every tool has been a function in your codebase: you wrote it, you reviewed it, you compiled it, you shipped it. That is the right model for tools that ship with the agent — `web_fetch`, `datetime`, `read_file`. The author owns them; the author maintains them.
+So far in this book, every tool has been a function in your codebase: you wrote it, you reviewed it, you compiled it, you shipped it. That is the right model for tools that ship with the agent — `fetch_web`, `datetime`, `read_file`. The author owns them; the author maintains them.
 
 But there is a different role in production: **the operator**. The operator is the person running your agent in *their* environment. They have CLIs, internal scripts, deploy tools, monitoring queries — programs that exist on their box, that *your* code has never seen, that they want the model to be able to invoke.
 

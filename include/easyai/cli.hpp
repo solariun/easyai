@@ -64,7 +64,7 @@ namespace easyai::cli {
 //              Best for large models that can hold the discriminated
 //              union schema in their head.
 //
-//   Split    — one focused tool per action (`fs_read`, `fs_edit`, …).
+//   Split    — one focused tool per action (`read_fs`, `edit_fs`, …).
 //              Flat schemas, name == semantic anchor, no "unknown
 //              action" failure mode.  Best for smaller / quantised
 //              tool-callers (7-8B and below) — they consistently work

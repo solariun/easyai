@@ -154,8 +154,8 @@ std::string build(const Options & opt) {
                "\n"
                "  4. UPDATE KNOWLEDGE — if the web produced durable "
                "facts that your knowledge didn't have (or had "
-               "outdated), remember them (knowledge_learning / "
-               "knowledge_learning_more) so future sessions benefit. "
+               "outdated), remember them (learning_knowledge / "
+               "learning_more_knowledge) so future sessions benefit. "
                "Remember the distilled fact, not the raw page.\n"
                "\n"
                "BOTH sources matter: knowledge for accumulated context "
@@ -221,7 +221,7 @@ std::string cite_sources_block(bool has_memory) {
         "are in AVAILABLE TOOLS above — never copy the descriptions "
         "below as tool names, they are categories, not callables:\n"
         "  - WEB TOOLS — anything that fetched a URL or searched the "
-        "internet (e.g. web_search, web_fetch, browse, fetch_url, or "
+        "internet (e.g. search_web, fetch_web, browse, fetch_url, or "
         "a unified web dispatcher)\n";
     if (has_memory) {
         // Gated on memory being registered: when memory is off, telling
@@ -229,7 +229,7 @@ std::string cite_sources_block(bool has_memory) {
         // it to invent calls to a non-existent memory tool.
         out <<
             "  - KNOWLEDGE / RAG TOOLS — anything that searched or recalled "
-            "persistent knowledge (e.g. knowledge_search, knowledge_recall, "
+            "persistent knowledge (e.g. search_knowledge, recall_knowledge, "
             "or a unified knowledge dispatcher)\n";
     }
     out <<
@@ -497,8 +497,8 @@ std::string build_session_info(const std::vector<easyai::Tool> & tools) {
            "arguments go in the arguments field. Never include "
            "parentheses, never include `action=\"…\"`, never include "
            "argument values in the name. Example:\n"
-           "  WRONG: name=\"knowledge_search(keywords=[\\\"x\\\"])\"\n"
-           "  RIGHT: name=\"knowledge_search\", "
+           "  WRONG: name=\"search_knowledge(keywords=[\\\"x\\\"])\"\n"
+           "  RIGHT: name=\"search_knowledge\", "
            "arguments={\"keywords\":[\"x\"]}\n"
            "\n"
            "If you are about to invoke a tool name you have NOT seen "
@@ -622,9 +622,9 @@ std::string tools_block(const ToolsetView & view) {
                  "`Sources:` block listing URLs used.\n";
         if (view.memory_on)
             s << "  - knowledge — your persistent memory "
-                 "(knowledge_learning, knowledge_learning_more, "
-                 "knowledge_search, knowledge_recall, knowledge_browse, "
-                 "knowledge_forget, knowledge_keywords). Search BEFORE "
+                 "(learning_knowledge, learning_more_knowledge, "
+                 "search_knowledge, recall_knowledge, browse_knowledge, "
+                 "forget_knowledge, keywords_knowledge). Search BEFORE "
                  "answering.\n";
         if (view.fs_on)
             s << "  - fs — filesystem: read/write/edit/list/glob/grep/"
@@ -725,20 +725,20 @@ std::string build_tool_guidance(const ToolsetView & view) {
          "this order — strictly:\n"
          "\n";
     if (view.memory_on) {
-        s << "  1. KNOWLEDGE FIRST. Use your `knowledge_search` tool with "
+        s << "  1. KNOWLEDGE FIRST. Use your `search_knowledge` tool with "
              "keywords from the vocabulary appended below (exact "
              "callable name in your AVAILABLE TOOLS list). If knowledge "
              "returns enough to answer, SKIP the web and go straight "
              "to step 3.\n"
              "  2. WEB only if knowledge had nothing or was "
-             "insufficient. ONE web search, then web_fetch the top "
+             "insufficient. ONE web search, then fetch_web the top "
              "1-3 URLs.\n"
              "  3. ANSWER. As soon as steps 1-2 give you enough, "
              "answer the user. Don't re-search knowledge, don't "
              "re-search the web, don't store more knowledge first.\n";
     } else if (view.web_on) {
         s << "  1. WEB if you don't already know. ONE web search, "
-             "then web_fetch the top 1-3 URLs.\n"
+             "then fetch_web the top 1-3 URLs.\n"
              "  2. ANSWER. As soon as the fetched text gives you "
              "enough, answer. Don't re-search the same query.\n";
     } else {
@@ -796,15 +796,15 @@ ToolsetView ToolsetView::from_tools(const std::vector<easyai::Tool> & tools) {
         const std::string & n = t.name;
         if (n == "datetime")
             v.datetime_on = true;
-        else if (n == "web" || n == "web_search" || n == "web_fetch")
+        else if (n == "web" || n == "search_web" || n == "fetch_web")
             v.web_on = true;
-        else if (n == "fs" || (n.size() > 3 && n.compare(0, 3, "fs_") == 0))
+        else if (n == "fs" || (n.size() > 3 && n.compare(n.size() - 3, 3, "_fs") == 0))
             v.fs_on = true;
         else if (n == "bash")
             v.bash_on = true;
         else if (n == "evaluate" || n == "python3")
             v.python_on = true;
-        else if (n.compare(0, 10, "knowledge_") == 0)
+        else if (n.size() > 10 && n.compare(n.size() - 10, 10, "_knowledge") == 0)
             v.memory_on = true;
         else if (n == "tool_lookup")
             v.tool_lookup_on = true;

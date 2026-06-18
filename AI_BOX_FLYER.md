@@ -42,7 +42,7 @@ loader:
 | **HTTP server** | `easyai-server` — drop-in `llama-server` replacement | OpenAI-compatible `/v1/chat/completions` (full SSE streaming) |
 | **Web UI** | llama.cpp's SvelteKit chat, embedded in the binary | `http://ai-box/` — phone, tablet, laptop, any browser |
 | **MCP server** | Model Context Protocol provider | `POST /mcp` — Claude Desktop, Cursor, Continue, Zed |
-| **Tool catalogue** | Auto-registered built-ins | `web_search` · `web_fetch` · `fs` · `bash` · `python3` · `memory` · `plan` · datetime |
+| **Tool catalogue** | Auto-registered built-ins | `search_web` · `fetch_web` · `fs` · `bash` · `python3` · `memory` · `plan` · datetime |
 | **Persistent memory** | `memory` tool over `/var/lib/easyai/rag/` | A passive RAG technique — per-topic markdown the model can save, append, and search across conversations |
 | **Sandbox** | `/var/lib/easyai/workspace/` | Everything `fs` / `bash` / `python3` touches is pinned inside |
 | **Telemetry** | `/metrics` (Prometheus) + journald METRICS line | CPU / GPU / mem / TCP / TIME_WAIT pressure |
@@ -63,8 +63,8 @@ double-checked after every parent-dir creation. Seven audit passes
 ### 1. A private ChatGPT for the family
 
 Open `http://ai-box/` in any browser. Conversations are streamed
-in real time. The model can search the web (`web_search`), pull
-articles (`web_fetch`), run calculations (`python3`), keep
+in real time. The model can search the web (`search_web`), pull
+articles (`fetch_web`), run calculations (`python3`), keep
 running notes per topic (the `memory` tool), and execute shell
 commands in the sandbox (`bash`, opt-in). No history is ever uploaded.
 
