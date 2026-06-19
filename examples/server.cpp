@@ -494,6 +494,7 @@ header.topbar h1 { font-size: 1rem; margin: 0; font-weight: 600; letter-spacing:
           <button data-e="low">low</button>
           <button data-e="medium">medium</button>
           <button data-e="high">high</button>
+          <button data-e="max">max</button>
         </div>
         <h3>sampling</h3>
         <div class="slider-row">
@@ -3649,7 +3650,7 @@ static bool require_auth(const ServerCtx & ctx, const httplib::Request & req,
         "      --reasoning-effort <lvl> How hard the model thinks, injected as\n"
         "                                 the reasoning_effort chat-template\n"
         "                                 kwarg (GPT-OSS et al.): auto|low|\n"
-        "                                 medium|high|minimal. Default auto\n"
+        "                                 medium|high|max|minimal. Default auto\n"
         "                                 (model default — inject nothing).\n"
         "                                 Per-request `reasoning_effort` in the\n"
         "                                 body overrides it. INI key: [ENGINE]\n"
@@ -6798,11 +6799,11 @@ int main(int argc, char ** argv) {
         const bool is_default = re.empty() || re == "auto" || re == "none" ||
                                 re == "default" || re == "model";
         const bool is_level   = re == "low" || re == "medium" ||
-                                re == "high" || re == "minimal";
+                                re == "high" || re == "max" || re == "minimal";
         if (!is_default && !is_level) {
             std::fprintf(stderr,
                 "[easyai-server] unknown reasoning effort: %s\n"
-                "                accepted values: auto, low, medium, high, minimal\n",
+                "                accepted values: auto, low, medium, high, max, minimal\n",
                 args.reasoning_effort.c_str());
             return 1;
         }

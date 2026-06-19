@@ -2128,7 +2128,7 @@ flags.
 `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`,
 `frequency_penalty`, `presence_penalty`, `seed`, `max_tokens`,
 `stop(vector)`, `reasoning_effort` (sends the `reasoning_effort` body
-field — `"low"` / `"medium"` / `"high"`; the sentinels `"auto"` /
+field — `"low"` / `"medium"` / `"high"` / `"max"`; the sentinels `"auto"` /
 `"none"` / `""` omit it so the model uses its default), `extra_body_json`
 (free-form JSON merged last so it can override anything the typed setters
 wrote, useful for other non-standard server extensions).

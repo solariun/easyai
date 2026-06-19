@@ -921,7 +921,7 @@ void usage(const char * argv0) {
 "                                that fall into long deliberation loops on\n"
 "                                niche questions.  0 = unlimited (default).\n"
 "    --reasoning-effort LVL     how hard the model thinks: auto|low|medium|\n"
-"                                high|minimal.  Sent as the reasoning_effort\n"
+"                                high|max|minimal.  Sent as the reasoning_effort\n"
 "                                request field; the server feeds it to the\n"
 "                                chat template.  Default 'auto' = model\n"
 "                                default (field omitted).  [cli] reasoning_effort.\n"

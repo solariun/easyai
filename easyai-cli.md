@@ -230,7 +230,7 @@ prepended (see [§7](#7-system-prompt--injected-blocks)).
 | `-p TEXT`, `--prompt TEXT` | One-shot prompt. (You can also pass it as a positional arg or pipe via stdin.) |
 | `--no-reasoning`, `--hide-reasoning` | Hide `delta.reasoning_content` (default: shown inline in dim grey). |
 | `--max-reasoning N` | Abort the SSE stream when this turn's reasoning exceeds N chars. 0 = unlimited (default). Useful for thinking models that fall into long deliberation loops. |
-| `--reasoning-effort LVL` | How hard the model should think: `auto` / `low` / `medium` / `high` / `minimal` (or any model-specific level). Sent as the `reasoning_effort` request-body field; easyai-server (and llama-server) feed it to the chat template. Default `auto` = model default (the field is omitted so the server/model decides). Equivalent to `--extra-json '{"reasoning_effort":"high"}'` but first-class. |
+| `--reasoning-effort LVL` | How hard the model should think: `auto` / `low` / `medium` / `high` / `max` / `minimal` (or any model-specific level). Sent as the `reasoning_effort` request-body field; easyai-server (and llama-server) feed it to the chat template. Default `auto` = model default (the field is omitted so the server/model decides). Equivalent to `--extra-json '{"reasoning_effort":"high"}'` but first-class. |
 | `--no-retry-on-incomplete` | Disable the auto-retry-with-nudge for incomplete turns (default: ON). |
 | `--retry-on-incomplete` | Legacy alias for the now-default behaviour. No-op. |
 | `--verbose`, `-v` | Log HTTP+SSE diagnostics to stderr (timestamps + per-piece traces). Also logs every per-batch `easyai.prompt_progress` event with full metrics. Stderr-only — does NOT create a /tmp log file (use `--log-file` for that). |
@@ -393,7 +393,7 @@ the server's preset drives sampling. Set explicitly to override.
 | --- | --- | --- | --- | --- |
 | `show_reasoning`      | bool | `--no-reasoning` (off) | `true` | Print streaming reasoning_content to stderr. |
 | `max_reasoning`       | int  | `--max-reasoning`      | `0`    | 0 = unlimited. Hard cap on reasoning tokens before nudging. |
-| `reasoning_effort`    | str  | `--reasoning-effort`   | `auto` | `auto` (model default — field omitted) / `low` / `medium` / `high` / `minimal`. Sent as the `reasoning_effort` request-body field. |
+| `reasoning_effort`    | str  | `--reasoning-effort`   | `auto` | `auto` (model default — field omitted) / `low` / `medium` / `high` / `max` / `minimal`. Sent as the `reasoning_effort` request-body field. |
 | `retry_on_incomplete` | bool | `--no-retry-on-incomplete` (off) | `true` | Retry when the turn finishes with no tool_call and only an "announce" snippet. |
 
 #### Display / logging
