@@ -136,14 +136,17 @@ the server's `api_key` Bearer auth on `/v1/*`.
 - **Hardware simulation** — enter RAM / VRAM / CPU-core values to re-score every
   model *as if* the box had that hardware (handy before you buy or upgrade).
   **Reset sim** clears it.
-- **Filters** — search, minimum fit, use case, sort, limit. **Refresh list**
-  rebuilds the snapshot from HuggingFace.
-- **Table** — params, **fit** (colour-coded), run mode, score, est. tok/s, memory
-  utilisation, HF downloads. Click a row for the detail drawer: a **Precise fit**
-  card (loaded by reading the model's remote GGUF header), a score breakdown, a
-  **hardware plan** (context/quant → minimum & recommended hardware + KV-cache
-  alternatives), and the model's **GGUF sources** (each jumps to the Downloads
-  tab pre-filled).
+- **Filters** — search, minimum fit, use case, **quantization** (Auto = best
+  fitting, or force a specific quant), sort, limit. **Refresh list** rebuilds the
+  snapshot from HuggingFace.
+- **Table** — params, **quant**, **fit** (colour-coded), run mode, score, est.
+  tok/s, memory utilisation, HF downloads. **Fit is judged at 128K context** (or
+  the model's native context if smaller). Click a row → the detail drawer, which
+  reads the model's **remote GGUF header** for a precise fit and shows, right
+  below the chips, a **hardware plan** that runs automatically: a **context**
+  selector (default 128K), a **quant** selector listing **all quants available**
+  for that model, and minimum/recommended hardware + KV-cache alternatives. Also
+  shows the model's date and parameters, and a **Download** link.
 
 ### Local models tab
 
@@ -213,7 +216,7 @@ is set.
 | GET | `/models/api/system` | Detected/simulated hardware. Query: `ram_gb`, `vram_gb`, `cpu_cores`. |
 | GET | `/models/api/models` | The scored model snapshot. Query: `search`, `min_fit`, `use_case`, `sort` (`score`/`tps`/`params`/`mem`/`downloads`/`likes`), `limit`, + sim params. Envelope also carries `refreshing`, `last_refresh`, `stale`. |
 | POST | `/models/api/refresh` | Rebuild the static model list from HuggingFace (runs in the background). |
-| GET | `/models/api/hf/detail?repo=<repo>` | Precise fit for a HF model — reads its remote GGUF header (HTTP range). |
+| GET | `/models/api/hf/detail?repo=<repo>&context=&quant=` | Precise fit for a HF model — reads its remote GGUF header (HTTP range). Returns real params, the **available quants**, the fit, and a **hardware plan** at the chosen context (default 128K) + quant. |
 | POST | `/models/api/plan` | `{model, context, quant?, kv_quant?, ram_gb?, vram_gb?, cpu_cores?}` → min/recommended hardware + KV alternatives. |
 | GET | `/models/api/local` | `{dir, models:[{name, size_bytes, mtime, is_current}]}`. |
 | GET | `/models/api/local/detail?file=<name>` | GGUF params + fit + `[MODEL_*]` profile for one local model. |

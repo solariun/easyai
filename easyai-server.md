@@ -783,7 +783,7 @@ requires the session cookie when `webui_password` is set):
 | GET | `/models/api/system` | Detected/simulated hardware (`ram_gb`, `vram_gb`, `cpu_cores` to simulate). |
 | GET | `/models/api/models` | The scored model snapshot (`search`, `min_fit`, `use_case`, `sort`, `limit`, + sim params); envelope carries `refreshing`/`last_refresh`/`stale`. |
 | POST | `/models/api/refresh` | Rebuild the static model list from HuggingFace (background). |
-| GET | `/models/api/hf/detail?repo=<repo>` | Precise fit for a HF model — reads its remote GGUF header (HTTP range). |
+| GET | `/models/api/hf/detail?repo=&context=&quant=` | Precise fit for a HF model — reads its remote GGUF header (HTTP range); returns params, available quants, and a hardware plan at the chosen context (default 128K) + quant. |
 | POST | `/models/api/plan` | `{model, context, quant?, kv_quant?, …}` → hardware plan + KV alternatives. |
 | GET | `/models/api/local` | List `.gguf` in `download_dir` (`name, size, mtime, is_current`). |
 | GET | `/models/api/local/detail?file=<name>` | GGUF params + fit + `[MODEL_*]` profile for one local model. |

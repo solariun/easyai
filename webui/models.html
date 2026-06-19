@@ -135,6 +135,9 @@
         <option value="all">All</option><option value="general">General</option><option value="coding">Coding</option>
         <option value="reasoning">Reasoning</option><option value="chat">Chat</option>
         <option value="multimodal">Multimodal</option><option value="embedding">Embedding</option></select></label>
+      <label>Quant<select id="f-quant">
+        <option value="auto">Auto (best fit)</option><option>Q8_0</option><option>Q6_K</option>
+        <option>Q5_K_M</option><option>Q4_K_M</option><option>Q3_K_M</option><option>Q2_K</option></select></label>
       <label>Sort<select id="f-sort">
         <option value="score">Score</option><option value="tps">tok/s</option><option value="params">Params</option>
         <option value="mem">Memory</option><option value="downloads">Downloads</option><option value="likes">Likes</option></select></label>
@@ -242,6 +245,7 @@ async function loadModels(){
   let p=simQS();
   p.set('search',$('#f-search').value);p.set('min_fit',$('#f-minfit').value);
   p.set('use_case',$('#f-usecase').value);p.set('sort',$('#f-sort').value);p.set('limit',$('#f-limit').value);
+  p.set('quant',$('#f-quant').value);
   if(!$('#modelsWrap').querySelector('table'))$('#modelsWrap').innerHTML='<div class="empty"><span class="spin"></span> Loading…</div>';
   try{
     let d=await api('/models/api/models?'+p);
@@ -256,13 +260,14 @@ async function loadModels(){
     let rows=d.models.map(m=>`<tr data-name="${enc(m.name)}" onclick='selModel(${esc(JSON.stringify(m))},this)'>
       <td><div>${esch(m.name)}</div><div class="muted small">${esch(m.provider||'')}</div></td>
       <td class="num">${m.params_b}B</td>
+      <td class="small mono">${esch(m.best_quant||'–')}</td>
       <td><span class="pill ${m.fit_level}">${m.fit_label}</span></td>
       <td class="small">${m.run_mode_label}</td>
       <td class="num">${m.score}</td>
       <td class="num">${m.estimated_tps}</td>
       <td class="num">${Math.round(m.utilization_pct)}%</td>
       <td class="num small">${fmtNum(m.hf_downloads)}</td></tr>`).join('');
-    $('#modelsWrap').innerHTML=`<table><thead><tr><th>Model</th><th class="num">Params</th><th>Fit</th>
+    $('#modelsWrap').innerHTML=`<table><thead><tr><th>Model</th><th class="num">Params</th><th>Quant</th><th>Fit</th>
       <th>Mode</th><th class="num">Score</th><th class="num">tok/s</th><th class="num">Mem</th><th class="num">↓&nbsp;HF</th>
       </tr></thead><tbody>${rows}</tbody></table>
       <div class="muted small" style="padding:8px 12px">${d.returned_models} of ${d.total_models} models · list updated ${fmtAgo(d.last_refresh)}</div>`;
@@ -277,78 +282,69 @@ function esch(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','
 function esc(s){return s.replace(/'/g,"\\'").replace(/&/g,'&amp;').replace(/</g,'&lt;');}
 
 function scoreBar(label,v){return `<div class="s"><span class="muted">${label}</span><div class="bar"><i style="width:${v}%"></i></div><span class="mono">${v}</span></div>`;}
+let SEL_CTX=131072, SEL_QUANT='';
+function fmtDate(iso){if(!iso)return '';let d=new Date(iso);return isNaN(d)?'':d.toLocaleDateString();}
+function ctxOptions(sel){return [4096,8192,16384,32768,65536,131072].map(v=>`<option value="${v}" ${v==sel?'selected':''}>${v>=1024?(v/1024)+'K':v}</option>`).join('');}
 function selModel(m,tr){
   $$('#modelsWrap tr.sel').forEach(x=>x.classList.remove('sel'));if(tr)tr.classList.add('sel');
-  SEL=m;let sc=m.score_components;
+  SEL=m;SEL_CTX=131072;SEL_QUANT='';
+  $('#detail').innerHTML=`<h2>${esch(m.name)}</h2><div class="empty"><span class="spin"></span> Reading GGUF header & estimating…</div>`;
+  loadDetail();
+}
+async function loadDetail(){
+  let m=SEL;if(!m)return;
+  if($('#estOut'))$('#estOut').innerHTML='<span class="spin"></span>';
+  let qp=simQS();qp.set('repo',m.name);qp.set('context',SEL_CTX);if(SEL_QUANT)qp.set('quant',SEL_QUANT);
+  let d;
+  try{d=await api('/models/api/hf/detail?'+qp);}catch(e){$('#detail').innerHTML='<div class="empty">'+esch(e.message)+'</div>';return;}
+  if(d.error){$('#detail').innerHTML=`<h2>${esch(m.name)}</h2><div class="empty">${esch(d.error)}</div>`;return;}
+  let p=d.params,f=d.fit,pl=d.plan,sc=f.score_components;
+  SEL_QUANT=d.chosen_quant;
+  let kc=(d.fit_context/1024)|0;
+  let quantOpts=(d.available_quants||[]).map(q=>`<option value="${q.quant}" ${q.quant===d.chosen_quant?'selected':''}>${q.quant} · ${fmtBytes(q.size_bytes)}</option>`).join('')
+    ||`<option value="${d.chosen_quant}" selected>${d.chosen_quant}</option>`;
+  let kv=(pl.kv_alternatives||[]).map(k=>`<tr><td>${k.kv_quant}</td><td class="num">${k.memory_required_gb} GB</td><td class="num">${Math.round(k.savings_fraction*100)}%</td></tr>`).join('');
+  let date=fmtDate(m.release_date);
   let srcs=(m.gguf_sources||[]).map(g=>`<div class="src"><span class="mono small">${esch(g.repo)}</span>
     <button class="btn small acc" onclick="goDownload('${esch(g.repo)}')">Download…</button></div>`).join('')
-    ||'<div class="muted small">No GGUF sources listed — paste a repo in the Downloads tab.</div>';
+    ||'<div class="muted small">Paste this repo in the Downloads tab to fetch the chosen quant.</div>';
   $('#detail').innerHTML=`
-    <h2>${esch(m.name)}</h2><div class="muted small">${esch(m.provider||'')} · ${esch(m.category)}</div>
-    <div style="margin-top:8px"><span class="pill ${m.fit_level}">${m.fit_label}</span>
-      <span class="pill ghost">${m.run_mode_label}</span>
-      <span class="pill ghost">${m.runtime_label}</span></div>
-    <div class="sect" id="hfPrecise"><h3>Precise fit <span class="muted small">(reading GGUF header…)</span></h3><div class="muted small"><span class="spin"></span></div></div>
-    <div class="kv">
-      <span class="k">Est. quant</span><span class="v">${m.best_quant||'–'}</span>
-      <span class="k">Memory required</span><span class="v">${m.memory_required_gb} GB</span>
-      <span class="k">Memory available</span><span class="v">${m.memory_available_gb} GB</span>
-      <span class="k">Est. speed</span><span class="v">${m.estimated_tps} tok/s</span>
-      <span class="k">Context</span><span class="v">${fmtNum(m.context_length)}</span>
-      <span class="k">License</span><span class="v">${esch(m.license||'–')}</span>
+    <h2>${esch(m.name)}</h2>
+    <div class="muted small">${esch(m.provider||'')} · ${esch(m.category||'')}${date?' · updated '+date:''}</div>
+    <div style="margin:8px 0"><span class="pill ${f.fit_level}">${f.fit_label}</span>
+      <span class="pill ghost">${f.run_mode_label}</span><span class="pill ghost">llama.cpp</span>
+      <span class="muted small">score ${f.score} · ${f.estimated_tps} tok/s</span></div>
+    <div class="sect" style="border-top:none;padding-top:0">
+      <div class="toolbar" style="margin:0 0 10px">
+        <label>Context<select id="d-ctx" onchange="SEL_CTX=+this.value;loadDetail()">${ctxOptions(d.fit_context)}</select></label>
+        <label>Quant<select id="d-quant" onchange="SEL_QUANT=this.value;loadDetail()">${quantOpts}</select></label>
+        <label>&nbsp;<button class="btn" onclick="loadDetail()">Estimate</button></label>
+      </div>
+      <div id="estOut" class="kv">
+        <span class="k">Fit @ ${kc}K</span><span class="v"><span class="pill ${f.fit_level}">${f.fit_label}</span></span>
+        <span class="k">Memory required</span><span class="v">${f.memory_required_gb} GB</span>
+        <span class="k">Memory available</span><span class="v">${f.memory_available_gb} GB</span>
+        <span class="k">Est. speed</span><span class="v">${f.estimated_tps} tok/s</span>
+        <span class="k">Minimum</span><span class="v">${pl.minimum.ram_gb} GB RAM${pl.minimum.vram_gb!=null?(' / '+pl.minimum.vram_gb+' VRAM'):''}</span>
+        <span class="k">Recommended</span><span class="v">${pl.recommended.ram_gb} GB RAM / ${pl.recommended.vram_gb} VRAM</span>
+      </div>
+      <div class="muted small" style="margin-top:8px">KV cache options @ ${kc}K</div>
+      <table class="small"><thead><tr><th>KV</th><th class="num">Mem</th><th class="num">Saves</th></tr></thead><tbody>${kv}</tbody></table>
     </div>
-    <div class="sect scores"><h3>Score breakdown · ${m.score}</h3>
-      ${scoreBar('Quality',sc.quality)}${scoreBar('Speed',sc.speed)}${scoreBar('Fit',sc.fit)}${scoreBar('Context',sc.context)}</div>
-    ${m.notes&&m.notes.length?`<div class="sect"><h3>Notes</h3><ul class="muted small" style="margin:0;padding-left:18px">${m.notes.map(n=>'<li>'+esch(n)+'</li>').join('')}</ul></div>`:''}
-    <div class="sect"><h3>Hardware plan</h3>
-      <div class="toolbar" style="margin:0 0 8px">
-        <label>Context<input id="pl-ctx" type="number" value="${Math.min(m.context_length||8192,8192)}" style="width:90px"></label>
-        <label>Quant<input id="pl-quant" value="${m.best_quant||''}" style="width:90px"></label>
-        <label>&nbsp;<button class="btn" onclick="runPlan()">Estimate</button></label>
-      </div><div id="planOut"></div></div>
-    <div class="sect"><h3>GGUF sources</h3>${srcs}</div>`;
-  loadHfPrecise(m.name);
-}
-async function loadHfPrecise(repo){
-  let el=$('#hfPrecise');if(!el)return;
-  let qp=simQS();qp.set('repo',repo);
-  try{
-    let d=await api('/models/api/hf/detail?'+qp);
-    if(d.error){el.innerHTML='<h3>Precise fit</h3><div class="muted small">'+esch(d.error)+'</div>';return;}
-    let p=d.params,f=d.fit,sc=f.score_components;
-    el.innerHTML=`<h3>Precise fit ${d.gguf_readable?'<span class="muted small">(from GGUF header)</span>':'<span class="muted small">(header unreadable — estimated)</span>'}</h3>
-      <div style="margin:2px 0 8px"><span class="pill ${f.fit_level}">${f.fit_label}</span>
-        <span class="pill ghost">${f.run_mode_label}</span> <span class="muted small">score ${f.score}</span></div>
+    <div class="sect"><h3>Model parameters ${d.gguf_readable?'<span class="muted small">(from GGUF header)</span>':'<span class="muted small">(estimated)</span>'}</h3>
       <div class="kv">
         <span class="k">Architecture</span><span class="v">${esch(p.architecture||'–')}</span>
         <span class="k">Parameters</span><span class="v">${p.parameter_count} (${p.params_b}B)</span>
         <span class="k">Quantization</span><span class="v">${esch(p.quantization||'–')}</span>
-        <span class="k">Context length</span><span class="v">${p.context_length?fmtNum(p.context_length):'–'}</span>
+        <span class="k">Native context</span><span class="v">${p.context_length?fmtNum(p.context_length):'–'}</span>
         <span class="k">Layers</span><span class="v">${fmtNum(p.num_hidden_layers)}</span>
         <span class="k">Heads (q/kv)</span><span class="v">${p.num_attention_heads}/${p.num_key_value_heads}</span>
         ${p.is_moe?`<span class="k">Experts</span><span class="v">${p.expert_used_count}/${p.expert_count}</span>`:''}
         <span class="k">File size</span><span class="v">${fmtBytes(p.file_size_bytes)}</span>
-        <span class="k">Memory required</span><span class="v">${f.memory_required_gb} GB</span>
-        <span class="k">Est. speed</span><span class="v">${f.estimated_tps} tok/s</span>
-      </div>
-      <div class="scores" style="margin-top:6px">${scoreBar('Quality',sc.quality)}${scoreBar('Speed',sc.speed)}${scoreBar('Fit',sc.fit)}${scoreBar('Context',sc.context)}</div>`;
-  }catch(e){el.innerHTML='<h3>Precise fit</h3><div class="muted small">'+esch(e.message)+'</div>';}
-}
-async function runPlan(){
-  let body={model:SEL.name,context:+$('#pl-ctx').value||8192,quant:$('#pl-quant').value||undefined};
-  if(SIM.ram)body.ram_gb=+SIM.ram;if(SIM.vram!=null&&SIM.vram!=='')body.vram_gb=+SIM.vram;if(SIM.cores)body.cpu_cores=+SIM.cores;
-  $('#planOut').innerHTML='<span class="spin"></span>';
-  try{let p=await api('/models/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    if(p.error){$('#planOut').innerHTML='<div class="muted small">'+esch(p.error)+'</div>';return;}
-    let kv=(p.kv_alternatives||[]).map(k=>`<tr><td>${k.kv_quant}</td><td class="num">${k.memory_required_gb} GB</td>
-      <td class="num">${Math.round(k.savings_fraction*100)}%</td></tr>`).join('');
-    $('#planOut').innerHTML=`<div class="kv">
-      <span class="k">Current fit</span><span class="v"><span class="pill ${p.current.fit_level}">${p.current.fit_level}</span></span>
-      <span class="k">Minimum</span><span class="v">${p.minimum.ram_gb} GB RAM${p.minimum.vram_gb?(' / '+p.minimum.vram_gb+' VRAM'):''}</span>
-      <span class="k">Recommended</span><span class="v">${p.recommended.ram_gb} GB RAM / ${p.recommended.vram_gb} VRAM</span>
-      </div><div class="muted small" style="margin-top:6px">KV cache options</div>
-      <table class="small"><thead><tr><th>KV</th><th class="num">Mem</th><th class="num">Saves</th></tr></thead><tbody>${kv}</tbody></table>`;
-  }catch(e){$('#planOut').innerHTML='<div class="muted small">'+esch(e.message)+'</div>';}
+      </div></div>
+    <div class="sect scores"><h3>Score breakdown · ${f.score}</h3>
+      ${scoreBar('Quality',sc.quality)}${scoreBar('Speed',sc.speed)}${scoreBar('Fit',sc.fit)}${scoreBar('Context',sc.context)}</div>
+    <div class="sect"><h3>Download</h3>${srcs}</div>`;
 }
 function goDownload(repo){switchTab('downloads');$('#dl-repo').value=repo;listQuants();}
 
@@ -462,7 +458,7 @@ function switchTab(t){$$('nav.tabs button').forEach(b=>b.classList.toggle('activ
   if(t==='local'||t==='downloads')loadLocal();
   if(t==='downloads')pollDl();}
 $$('nav.tabs button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
-['#f-search','#f-minfit','#f-usecase','#f-sort','#f-limit'].forEach(s=>{
+['#f-search','#f-minfit','#f-usecase','#f-quant','#f-sort','#f-limit'].forEach(s=>{
   $(s).addEventListener('input',s==='#f-search'?debounceModels:loadModels);});
 ['#s-ram','#s-vram','#s-cores'].forEach(s=>$(s).addEventListener('change',()=>{
   SIM={ram:$('#s-ram').value,vram:$('#s-vram').value,cores:$('#s-cores').value};loadSystem();loadModels();}));

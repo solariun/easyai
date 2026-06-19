@@ -85,6 +85,7 @@ std::int64_t now_sec() {
 }
 constexpr std::int64_t kSnapshotTtlSec = 3600;   // auto-refresh after 1 hour
 constexpr int          kSnapshotSize   = 100;    // top-N GGUF repos in the list
+constexpr std::uint32_t kFitContext    = 131072; // 128K — the context fit is judged at
 
 // Pull a params figure (billions) out of a repo name ("…-7B…", "…-0.5B",
 // "…-500M"): the largest token wins. nullopt if none.
@@ -99,6 +100,16 @@ std::optional<double> params_from_name(const std::string & name) {
     }
     if (best > 0) return best;
     return std::nullopt;
+}
+// The quant token in a GGUF filename ("…-Q4_K_M.gguf" -> "Q4_K_M"), best-first
+// so the most specific match wins. "" if none.
+std::string quant_from_filename(const std::string & name) {
+    static const char * order[] = { "Q8_0","Q6_K_L","Q6_K","Q5_K_M","Q5_K_S","Q5_1","Q5_0",
+        "Q4_K_M","Q4_K_S","Q4_1","Q4_0","Q3_K_L","Q3_K_M","Q3_K_S","Q3_K","Q2_K_L","Q2_K",
+        "IQ4_XS","IQ4_NL","IQ3_M","IQ3_S","IQ2_M","IQ2_S","IQ1_M","IQ1_S","BF16","F16","F32" };
+    std::string uc = to_upper(name);
+    for (auto * o : order) if (uc.find(o) != std::string::npos) return o;
+    return "";
 }
 
 // Parse "key=value&key2=value2" (already URL-decoded by httplib) into a map.
@@ -276,7 +287,7 @@ struct ModelEntry {
 };
 
 // A HuggingFace search hit (pre-enrichment) and an enriched, cached entry.
-struct HfHit  { std::string repo, owner, pipeline; std::uint64_t downloads = 0, likes = 0; };
+struct HfHit  { std::string repo, owner, pipeline, last_modified; std::uint64_t downloads = 0, likes = 0; };
 struct CachedHf { std::string repo; ModelEntry entry; std::uint64_t best_size = 0, downloads = 0, likes = 0; bool ok = false; };
 // The static model snapshot: enriched HF entries + when it was last rebuilt.
 struct ModelsEngine::HfCache {
@@ -663,22 +674,29 @@ double moe_offloaded_ram(const ModelEntry & m, const std::string & quant) {
 
 // The core: produce a FitRow for one model on `s`.
 FitRow score_model(const ModelEntry & m, const SystemSpecs & s,
-                   std::uint32_t ctx_cap, const std::string & force_runtime) {
+                   std::uint32_t ctx_cap, const std::string & force_runtime,
+                   const std::string & force_quant = "") {
     FitRow r; r.m = &m;
-    std::uint32_t est_ctx = m.context_length ? m.context_length : 8192;
-    std::uint32_t cap = ctx_cap > 0 ? ctx_cap : 8192;
+    // Judge "what fits" at the model's full long context (128K) — its real
+    // context if known and smaller, else 128K. A per-request max_context lowers it.
+    std::uint32_t est_ctx = m.context_length ? std::min<std::uint32_t>(m.context_length, kFitContext)
+                                             : kFitContext;
+    std::uint32_t cap = ctx_cap > 0 ? ctx_cap : kFitContext;
     est_ctx = std::min(est_ctx, cap);
     if (est_ctx == 0) est_ctx = 4096;
     r.est_ctx = est_ctx;
     r.runtime = select_runtime(s, force_runtime);
 
     double min_vram = m.min_vram_gb >= 0 ? m.min_vram_gb : m.min_ram_gb;
-    std::string default_quant = m.quantization;
+    std::string default_quant = force_quant.empty() ? m.quantization : force_quant;
     double default_mem = estimate_memory_gb(m, default_quant, est_ctx);
     r.best_quant = default_quant;
     r.memory_required_gb = default_mem;
 
+    // With a forced quant, score AT that quant (so the fit level honestly shows
+    // whether it fits); otherwise pick the best quant that fits the budget.
     auto try_budget = [&](double budget, std::string & bq, double & bm) {
+        if (!force_quant.empty()) { bq = force_quant; bm = estimate_memory_gb(m, force_quant, est_ctx); return true; }
         return best_quant_for_budget(m, budget, est_ctx, bq, bm);
     };
 
@@ -1247,32 +1265,38 @@ std::string ModelsEngine::hf_detail_json(const std::string & repo, const std::st
     apply_sim(s, qnum(q, "ram_gb", qnum(q, "ram", -1)), qnum(q, "vram_gb", qnum(q, "memory", -1)),
               (int) qnum(q, "cpu_cores", -1));
     if (repo.empty() || repo.find("..") != std::string::npos) return "{\"error\":\"invalid repo\"}";
+    std::uint32_t want_ctx = (std::uint32_t) qnum(q, "context", (double) kFitContext);
+    if (want_ctx == 0) want_ctx = kFitContext;
+    std::string want_quant = qget(q, "quant");
+    if (want_quant == "auto" || want_quant == "any") want_quant.clear();
 
-    // 1. find the best GGUF file in the repo.
+    // 1. list the repo's GGUF files: pick the best + collect available quants.
     std::string treeurl = "https://huggingface.co/api/models/" + repo + "/tree/main?recursive=true";
     std::string body, err;
     if (!curl_get_string(treeurl, body, err)) return "{\"error\":\"HuggingFace: " + err + "\"}";
     std::string best_path; std::uint64_t bsize = 0; int best_rank = 1 << 30;
+    std::map<std::string, std::uint64_t> avail;   // quant -> representative size
     try {
         auto j = nlohmann::json::parse(body);
         if (j.is_array()) for (auto & e : j) {
             if (e.value("type", std::string()) != "file") continue;
             std::string path = e.value("path", std::string());
             if (!ends_with_ci(path, ".gguf")) continue;
-            int rk = quant_rank(base_name(path));
             std::uint64_t sz = e.value("size", (std::uint64_t) 0);
+            std::string fq = quant_from_filename(base_name(path));
+            if (!fq.empty()) { auto it = avail.find(fq); if (it == avail.end() || sz > it->second) avail[fq] = sz; }
+            int rk = quant_rank(base_name(path));
             if (rk < best_rank || (rk == best_rank && sz > bsize)) { best_rank = rk; best_path = path; bsize = sz; }
         }
     } catch (...) {}
     if (best_path.empty()) return "{\"error\":\"no .gguf files in " + repo + "\"}";
 
-    std::string fquant;
-    { static const char * order[] = { "Q8_0","Q6_K_L","Q6_K","Q5_K_M","Q5_K_S","Q5_0","Q4_K_M","Q4_K_S","Q4_0",
-        "Q3_K_L","Q3_K_M","Q3_K_S","Q2_K","IQ4_XS","IQ3_M","IQ2_M","IQ1_M","F16","BF16","F32" };
-      std::string uc = to_upper(base_name(best_path));
-      for (auto * o : order) if (uc.find(o) != std::string::npos) { fquant = o; break; } }
+    std::string best_quant = quant_from_filename(base_name(best_path));
+    if (best_quant.empty()) best_quant = "Q4_K_M";
+    std::string chosen = !want_quant.empty() ? want_quant : best_quant;
 
-    // 2. read the remote GGUF header (range request) and parse it.
+    // 2. read the remote GGUF header (range request). arch/params/layers are
+    //    quant-independent, so always read the best file once.
     GgufMeta g; g.file_size = bsize;
     std::string fileurl = "https://huggingface.co/" + repo + "/resolve/main/" + best_path;
     std::string buf;
@@ -1286,32 +1310,58 @@ std::string ModelsEngine::hf_detail_json(const std::string & repo, const std::st
     ModelEntry m;
     m.name = g.name.empty() ? repo : g.name;
     auto sl = repo.find('/'); m.provider = sl == std::string::npos ? repo : repo.substr(0, sl);
-    m.architecture = g.arch;
-    m.quantization = !fquant.empty() ? fquant : (g.quant.empty() ? "Q4_K_M" : g.quant);
-    m.context_length = g.context_length;
+    m.architecture = g.arch; m.quantization = chosen; m.context_length = g.context_length;
     m.num_hidden_layers = g.n_layers; m.num_attention_heads = g.n_heads;
     m.num_key_value_heads = g.n_kv_heads; m.head_dim = g.head_dim; m.hidden_size = g.embd; m.vocab_size = g.vocab;
     m.is_moe = g.expert_count > 1; m.num_experts = g.expert_count; m.active_experts = g.expert_used;
     m.has_active_experts = g.expert_used > 0;
     if (g.has_params) { m.parameters_raw = g.parameters; m.has_params_raw = true; }
     else { auto pn = params_from_name(repo);
-           double pb0 = pn ? *pn : (bsize > 0 ? (double) bsize / quant_bpp(m.quantization) / 1e9 : 7.0);
+           double pb0 = pn ? *pn : (bsize > 0 ? (double) bsize / quant_bpp(chosen) / 1e9 : 7.0);
            m.parameters_raw = (std::uint64_t) (pb0 * 1e9); m.has_params_raw = true; }
     double pb = m.params_b();
     char pc[32];
     if (pb >= 1) std::snprintf(pc, sizeof(pc), "%.1fB", pb);
     else         std::snprintf(pc, sizeof(pc), "%dM", (int) std::round(pb * 1000));
     m.parameter_count = pc;
-    m.min_ram_gb = estimate_memory_gb(m, m.quantization,
-        m.context_length ? std::min<std::uint32_t>(m.context_length, 8192) : 4096);
+    std::uint32_t fit_ctx = m.context_length ? std::min<std::uint32_t>(m.context_length, want_ctx) : want_ctx;
+    m.min_ram_gb = estimate_memory_gb(m, chosen, fit_ctx);
     m.recommended_ram_gb = m.min_ram_gb * 1.25;
     m.gguf_sources = { { repo, m.provider } };
 
-    FitRow r = score_model(m, s, 0, "");
+    // fit at the chosen quant + context.
+    FitRow r = score_model(m, s, want_ctx, "", chosen);
     r.file_size = bsize;
 
+    // hardware plan at the chosen quant + context.
+    double model_mem = estimate_memory_gb(m, chosen, fit_ctx);
+    double rec_vram = std::max(m.recommended_ram_gb, model_mem * 1.2);
+    double min_ram = std::max(model_mem * 0.2, 8.0);
+    ordered_json kv_alts = ordered_json::array();
+    double baseline_kv = kv_cache_gb(m, fit_ctx, "fp16");
+    for (const std::string & kvq : { std::string("fp16"), std::string("fp8"), std::string("q8_0"), std::string("q4_0") }) {
+        double kvgb = kv_cache_gb(m, fit_ctx, kvq);
+        double mem = estimate_memory_gb(m, chosen, fit_ctx, kvq);
+        double sav = baseline_kv > 0 ? std::max(1.0 - kvgb / baseline_kv, 0.0) : 0.0;
+        kv_alts.push_back({ {"kv_quant", kvq}, {"memory_required_gb", round2(mem)},
+                            {"kv_cache_gb", round2(kvgb)}, {"savings_fraction", round2(sav)} });
+    }
+    ordered_json plan = {
+        {"context", fit_ctx}, {"quantization", chosen},
+        {"minimum",     { {"vram_gb", round2(model_mem)}, {"ram_gb", round2(min_ram)}, {"cpu_cores", 4} }},
+        {"recommended", { {"vram_gb", round2(rec_vram)}, {"ram_gb", round2(std::max(min_ram * 1.25, 12.0))},
+                          {"cpu_cores", std::max(s.cpu_cores, 8)} }},
+        {"kv_alternatives", kv_alts},
+    };
+
+    // available quants for the picker (best-quality first).
+    std::vector<std::pair<std::string, std::uint64_t>> aq(avail.begin(), avail.end());
+    std::sort(aq.begin(), aq.end(), [](const auto & a, const auto & b) { return quant_rank(a.first) < quant_rank(b.first); });
+    ordered_json quants = ordered_json::array();
+    for (auto & qp : aq) quants.push_back({ {"quant", qp.first}, {"size_bytes", qp.second} });
+
     ordered_json params = {
-        {"architecture", g.arch}, {"quantization", m.quantization},
+        {"architecture", g.arch}, {"quantization", chosen},
         {"params_b", round2(pb)}, {"parameter_count", m.parameter_count},
         {"context_length", g.context_length}, {"num_hidden_layers", g.n_layers},
         {"num_attention_heads", g.n_heads}, {"num_key_value_heads", g.n_kv_heads},
@@ -1321,7 +1371,10 @@ std::string ModelsEngine::hf_detail_json(const std::string & repo, const std::st
     };
     ordered_json out = {
         {"repo", repo}, {"display_name", m.name}, {"gguf_readable", g.ok},
-        {"params", params}, {"fit", fit_to_json(r)}, {"system", system_to_json(s)["system"]},
+        {"chosen_quant", chosen}, {"fit_context", fit_ctx},
+        {"available_quants", quants}, {"params", params},
+        {"fit", fit_to_json(r)}, {"plan", plan},
+        {"system", system_to_json(s)["system"]},
     };
     return out.dump();
 #endif
@@ -1487,7 +1540,10 @@ bool hf_search(const std::string & query, int limit, const std::string & sort,
             h.owner     = sl == std::string::npos ? h.repo : h.repo.substr(0, sl);
             h.downloads = m.value("downloads", (std::uint64_t) 0);
             h.likes     = m.value("likes", (std::uint64_t) 0);
-            h.pipeline  = m.value("pipeline_tag", std::string());
+            h.pipeline      = m.value("pipeline_tag", std::string());
+            // The default listing returns createdAt (lastModified needs expand[],
+            // which drops downloads/likes) — use whichever is present.
+            h.last_modified = m.value("lastModified", m.value("createdAt", std::string()));
             out.push_back(std::move(h));
         }
     } catch (const std::exception & e) { err = std::string("parse: ") + e.what(); return false; }
@@ -1561,6 +1617,7 @@ void build_light_entry(const HfHit & h, ModelEntry & out) {
     else         std::snprintf(pc, sizeof(pc), "%dM", (int) std::round(pb * 1000));
     out.parameter_count = pc;
     out.context_length = 0; out.is_moe = false;
+    out.release_date = h.last_modified;
     out.min_ram_gb = pb * quant_bpp("Q4_K_M") + 0.5;
     out.recommended_ram_gb = out.min_ram_gb * 1.25;
     out.gguf_sources = { { h.repo, h.owner } };
@@ -1623,6 +1680,8 @@ std::string ModelsEngine::models_json(const std::string & query) {
     int limit = (int) qnum(q, "limit", qnum(q, "n", 50));
     if (limit <= 0) limit = 50;
     int min_fit_rank = min_fit == "perfect" ? 4 : min_fit == "good" ? 3 : min_fit == "too_tight" ? 1 : 2;
+    std::string fquant = qget(q, "quant");                       // force a quant for scoring
+    if (fquant == "auto" || fquant == "any") fquant.clear();
 
     // Snapshot copy (cheap: ~100 entries) so scoring doesn't hold the lock and
     // FitRow's pointers into it stay valid for this whole call.
@@ -1640,7 +1699,7 @@ std::string ModelsEngine::models_json(const std::string & query) {
             if (hay.find(search) == std::string::npos) continue;
         }
         if (usecase != "all" && infer_use_case(c.entry) != usecase) continue;
-        FitRow r = score_model(c.entry, s, 0, "");
+        FitRow r = score_model(c.entry, s, 0, "", fquant);
         r.hf_downloads = c.downloads; r.hf_likes = c.likes; r.file_size = c.best_size;
         if (r.fit_level == "too_tight" && !include_tt) continue;
         if (fit_rank(r.fit_level) < min_fit_rank) continue;
