@@ -48,6 +48,7 @@
 #   ./install_easyai_server.sh --ngl 99            # GPU layers (-1=auto, 0=CPU)
 #   ./install_easyai_server.sh --no-mlock --use-mmap
 #   ./install_easyai_server.sh --temperature 0.2 --top-k 50 --min-p 0.03
+#   ./install_easyai_server.sh --preset auto --reasoning-effort max  # [ENGINE] defaults
 #   ./install_easyai_server.sh --repeat-penalty 1.04 --frequency-penalty 0.05
 #   ./install_easyai_server.sh --rope-scaling yarn --rope-scale 2 --yarn-orig-ctx 131072
 #   ./install_easyai_server.sh --split-mode none       # none|layer|row|tensor
@@ -356,8 +357,17 @@ webui_icon_dest="$config_dir/favicon"         # final installed path under /etc/
 # --threads-batch.
 n_threads_default=8
 n_threads_batch_default=8
-preset="precise"                              # written commented in the INI; engine
-                                              # picks "precise" when no preset is set
+preset="auto"                                 # written ACTIVE into [ENGINE]. "auto" =
+                                              # impose no preset (model default); clients
+                                              # drive sampling. A CONCRETE preset
+                                              # (precise/balanced/creative/wild/
+                                              # deterministic) is authoritative — it
+                                              # overrides per-request temperature/top_p/
+                                              # top_k and inline presets.
+reasoning_effort="max"                        # written ACTIVE into [ENGINE]. auto|low|
+                                              # medium|high|max|minimal. "auto" omits the
+                                              # field (model default). A per-request
+                                              # reasoning_effort body field always wins.
 thinking="on"
 enable_metrics=1
 enable_flash_attn=1
@@ -479,6 +489,7 @@ while [[ $# -gt 0 ]]; do
         --threads)          n_threads_default="$2"; shift 2 ;;
         --threads-batch)    n_threads_batch_default="$2"; shift 2 ;;
         --preset)           preset="$2"; shift 2 ;;
+        --reasoning-effort) reasoning_effort="$2"; shift 2 ;;
         --thinking)         thinking="$2"; shift 2 ;;
         --no-metrics)       enable_metrics=0; shift ;;
         --no-flash-attn)    enable_flash_attn=0; shift ;;
@@ -632,6 +643,17 @@ require_no_injection "--cache-type-v" "$cache_type_v"
 require_no_injection "--rope-scaling" "$rope_scaling"
 require_no_injection "--split-mode"   "$split_mode"
 
+# Preset + reasoning-effort are baked verbatim into [ENGINE]; pin them to the
+# known sets (rejects typos AND any INI-injection attempt via these knobs).
+case "$preset" in
+    auto|deterministic|precise|balanced|creative|wild) ;;
+    *) die "--preset: must be one of auto|deterministic|precise|balanced|creative|wild, got: $(printf '%q' "$preset")" ;;
+esac
+case "$reasoning_effort" in
+    auto|low|medium|high|max|minimal) ;;
+    *) die "--reasoning-effort: must be one of auto|low|medium|high|max|minimal, got: $(printf '%q' "$reasoning_effort")" ;;
+esac
+
 # Hostname must be a valid RFC 1123 label: letters / digits / hyphens,
 # no leading or trailing hyphen, max 63 chars. hostnamectl would reject
 # malformed names anyway; catching it here gives a friendlier error.
@@ -695,7 +717,7 @@ printf '    mdns_hostname    = %s   (advertises as %s.local; skipped under --no-
 printf '    ctx_size         = %s\n' "$ctx_size"
 printf '    ngl              = %s   (-1=auto, 0=CPU only, 99=all GPU layers)\n' "$ngl"
 printf '    threads / batch  = %s / %s\n' "$n_threads_default" "$n_threads_batch_default"
-printf '    preset           = %s  thinking=%s\n' "$preset" "$thinking"
+printf '    preset           = %s  reasoning_effort=%s  thinking=%s\n' "$preset" "$reasoning_effort" "$thinking"
 printf '    KV cache         = K=%s  V=%s  flash_attn=%s\n' "$cache_type_k" "$cache_type_v" "$enable_flash_attn"
 printf '    split_mode       = %s\n' "$split_mode"
 printf '    rope             = scaling=%s  scale=%s  yarn_orig_ctx=%s\n' \
@@ -1521,14 +1543,23 @@ threads          = $n_threads_default
 threads_batch    = $n_threads_batch_default
 
 # ------------------------------------------------------------
-# Sampling preset — five built-ins. LEFT COMMENTED so the engine
-# picks the preset name from --preset / its own default; uncomment
-# to PIN it in the INI. The webui exposes a "default" badge that
-# always reflects whichever preset name is active on the server,
-# so operators don't have to remember the specific numbers.
+# Sampling preset — six built-ins. Written ACTIVE below (default
+# "auto"). The webui exposes a "default" badge that always reflects
+# whichever preset name is active on the server, so operators don't
+# have to remember the specific numbers.
+#
+# A CONCRETE preset (anything but "auto") is AUTHORITATIVE: it
+# overrides a request's temperature/top_p/top_k and any inline
+# preset. "auto" is the only non-authoritative value — it imposes
+# nothing and lets clients drive sampling per request. The
+# reasoning_effort key below is NEVER affected by the preset.
 #
 # Each preset sets temperature / top_p / top_k / min_p as a unit;
-# the explicit overrides further below WIN when both are set.
+# the explicit overrides further below WIN at startup when both are
+# set (they shift the baseline — per-request precedence is separate).
+#
+#   auto           model default — impose no preset; the engine's
+#                  own sampler defaults apply, clients drive per req.
 #
 #   deterministic  temp=0.0  top_p=1.00  top_k=1   min_p=0.00
 #     Greedy. Same prompt → identical answer every time. For
@@ -1557,7 +1588,14 @@ threads_batch    = $n_threads_batch_default
 #                                        clicking it applies the same
 #                                        values, no need to remember
 #                                        the specific numbers)
-#preset          = $preset
+preset           = $preset
+
+# Reasoning effort fed to the chat template as the reasoning_effort
+# kwarg (GPT-OSS et al.): auto|low|medium|high|max|minimal. "auto"
+# injects nothing (model default). A per-request reasoning_effort
+# body field overrides this; templates that ignore the kwarg are
+# unaffected.
+reasoning_effort = $reasoning_effort
 flash_attn       = $([[ "$enable_flash_attn" -eq 1 ]] && echo on || echo off)
 cache_type_k     = $cache_type_k
 cache_type_v     = $cache_type_v
