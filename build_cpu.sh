@@ -126,4 +126,5 @@ echo
 echo "Run one without installing, e.g.:"
 echo "    $BUILD_DIR/easyai-server -m /path/to/model.gguf \\"
 echo "        --ngl 0 -c 4096 --threads $(nproc 2>/dev/null || echo 4) \\"
-echo "        --host 0.0.0.0 --port 8080"
+echo "        --host 0.0.0.0 --port 8080 \\"
+echo "        --download-dir /var/lib/easyai/models --data-dir /var/lib/easyai/data"

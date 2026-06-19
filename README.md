@@ -45,9 +45,11 @@ easyai is more than a library — it's a **complete, self-hostable AI stack** wi
   polished chat web UI and the **[MODELS dashboard](MODELS.md)** (`/models`): browse &
   fit-score HuggingFace models against *your* hardware, read a model's GGUF
   parameters, **hot-swap the running model in one click**, and download weights — all
-  password-gated. Full SSE streaming, Prometheus `/metrics`, Bearer auth, KV-cache /
-  flash-attn knobs. Speaks **MCP, OpenAI and Ollama** from one process. A drop-in
-  `llama-server`, supercharged.
+  password-gated. The dashboard keeps the **1000 most-recently-updated GGUF repos**
+  in a searchable catalog, cached on disk (`--data-dir`, default `/var/lib/easyai/data`)
+  and refreshed from HuggingFace on request once it is >1h old. Full SSE streaming,
+  Prometheus `/metrics`, Bearer auth, KV-cache / flash-attn knobs. Speaks **MCP, OpenAI
+  and Ollama** from one process. A drop-in `llama-server`, supercharged.
 - 💬 **easyai-cli** — a gorgeous full-screen agent **TUI** (markdown, live tool rows
   with diffs, `/`-commands, `@`-file completion, themes), a hybrid **AI shell**
   (`--shell`), or one-shot `-p` scripting — against any OpenAI-protocol endpoint, with

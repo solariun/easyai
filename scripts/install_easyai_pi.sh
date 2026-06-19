@@ -80,6 +80,7 @@ service_model_dir="$service_home/models"
 service_model_link="ai.gguf"
 service_workspace="$service_home/workspace"
 service_rag="$service_home/rag"
+service_data_dir="$service_home/data"          # /models dashboard catalog cache
 service_name="easyai-server.service"
 config_dir="/etc/easyai"
 ini_file="$config_dir/easyai.ini"
@@ -304,7 +305,7 @@ else
     install -d -m 750 -o "$service_user" -g "$service_group" "$service_home"
 fi
 
-for d in "$service_home" "$service_model_dir" "$service_workspace" "$service_rag"; do
+for d in "$service_home" "$service_model_dir" "$service_workspace" "$service_rag" "$service_data_dir"; do
     install -d -m 750 -o "$service_user" -g "$service_group" "$d"
 done
 
@@ -349,6 +350,8 @@ sandbox         = $service_workspace
 system_file     = $system_file
 external_tools  = $external_tools_dir
 rag             = $service_rag
+data_dir        = $service_data_dir
+catalog_size    = 1000
 webui_title     = Bonsai
 metrics         = off
 verbose         = off

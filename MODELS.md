@@ -47,12 +47,15 @@ Browser ──/models (page) ────────────► embedded we
 chat webui ──(injected "MODELS" pill)─► /models
 ```
 
-- **No external dependency, no catalog file.** Hardware is detected through ggml
-  (`ggml_backend_dev_memory` for VRAM) + the OS (RAM/CPU). The Recommend list is
-  the **live HuggingFace listing** (`/api/models?filter=gguf`); each result is
-  enriched by listing its repo's GGUF files (libcurl) — done in parallel and
-  cached per repo for the session. Scoring, the hardware plan, and GGUF
-  introspection are all native C++.
+- **No external dependency; a small on-disk catalog cache.** Hardware is detected
+  through ggml (`ggml_backend_dev_memory` for VRAM) + the OS (RAM/CPU). The
+  Recommend list is the **1000 most-recently-updated GGUF repos** on HuggingFace
+  (`/api/models?filter=gguf&sort=lastModified`, cursor-paged until 1000 or the
+  listing is exhausted), persisted to `data_dir/easyai_hf_catalog.json` and
+  refreshed from HuggingFace on request once the snapshot is >1h old — so a
+  restart shows the list instantly. Per-repo specifics (exact params / quant /
+  fit) are read live from the remote GGUF header on demand. Scoring, the hardware
+  plan, and GGUF introspection are all native C++.
 - **Hot-swap is in-process.** `Engine::reload()` tears down the current model
   (model, context, sampler, chat templates) and loads the new one under the
   engine lock — in-flight chats finish first, then the swap happens; the HTTP
@@ -86,8 +89,9 @@ directory. Override the password at install time:
 ```sh
 easyai-server -m models/your-model.gguf \
   --download-dir ./models \
+  --data-dir ./data \
   --webui-password 's3cret'
-# The Recommend tab queries HuggingFace live — nothing else to configure.
+# Recommend caches the 1000 most-recent GGUF repos in --data-dir, refreshed >1h on request.
 ```
 
 Then open `/models` (or click the MODELS pill in the chat UI).
@@ -103,6 +107,8 @@ All keys live in `[SERVER]`; each has a matching CLI flag. Precedence is
 | --- | --- | --- | --- |
 | `webui_password` | `--webui-password` | (empty — open) | Password for `/models` and **all** its API routes. A session cookie, separate from `api_key` (which still guards `/v1/*`). The installer sets it to `0000`. |
 | `download_dir` | `--download-dir` | directory of `--model` | Where GGUF weights are downloaded / listed / deleted, and the directory the dashboard introspects + hot-swaps from. |
+| `data_dir` | `--data-dir` | `download_dir` | Where the dashboard persists its HuggingFace catalog snapshot (`easyai_hf_catalog.json`). Loaded on startup so the list shows instantly, and the 1-hour refresh clock survives a restart. The server creates it if missing. |
+| `catalog_size` | `--catalog-size` | `1000` | How many of the **most-recently-updated** GGUF repos to keep in the searchable catalog, paged from HuggingFace (cursor-followed until this many or the listing runs out) and refreshed on request once the snapshot is >1h old. Clamped to `[1, 1000]`. |
 
 ---
 
@@ -241,11 +247,13 @@ curl -s -b cj -X POST $B/models/api/run -H 'Content-Type: application/json' -d '
 
 ## 9. The model source & scoring fidelity
 
-- **Source:** the Recommend list is a **static snapshot of the top ~100 GGUF
-  models** on HuggingFace (`/api/models?filter=gguf&sort=downloads`), held in
-  memory. It is rebuilt **on startup**, **lazily when accessed if >1 h old**, and
-  on demand via the **Refresh list** button — each rebuild is a single HF API
-  call. While a rebuild runs the UI shows a "Rebuilding…" banner.
+- **Source:** the Recommend list is a snapshot of the **1000 most-recently-updated
+  GGUF repos** on HuggingFace (`/api/models?filter=gguf&sort=lastModified`),
+  followed across the listing cursor until it has 1000 or the listing is
+  exhausted (`--catalog-size` caps it, default/max 1000). It is **persisted to
+  `data_dir/easyai_hf_catalog.json`** so a restart serves it instantly, refreshed
+  **lazily when accessed if >1 h old**, and on demand via the **Refresh list**
+  button. While a rebuild runs the UI shows a "Rebuilding…" banner.
 - **List vs detail accuracy:** in the list, **params are inferred from the repo
   name (e.g. `…-7B`)** and quant defaults to Q4_K_M (the scorer still picks the
   best quant that fits). **Clicking a model** fetches its repo's best GGUF and

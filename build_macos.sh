@@ -207,13 +207,16 @@ if [[ "$DO_INSTALL" == "1" ]]; then
     echo "Run e.g.:"
     echo "    easyai-server -m \$HOME/easyai/models/Bonsai-8B-Q1_0.gguf \\"
     echo "        --ngl 99 -c 8192 --temperature 0.5 --top-p 0.85 --top-k 20 \\"
-    echo "        --host 0.0.0.0 --port 8080"
+    echo "        --host 0.0.0.0 --port 8080 \\"
+    echo "        --download-dir \$HOME/easyai/models --data-dir \$HOME/easyai/data"
+    echo "    # /models dashboard caches the 1000 most-recent GGUF repos in --data-dir (auto-created)."
 else
     echo
     echo "Run one without installing, e.g.:"
     echo "    $BUILD_DIR/easyai-server -m \$HOME/easyai/models/Bonsai-8B-Q1_0.gguf \\"
     echo "        --ngl 99 -c 8192 --temperature 0.5 --top-p 0.85 --top-k 20 \\"
-    echo "        --host 0.0.0.0 --port 8080"
+    echo "        --host 0.0.0.0 --port 8080 \\"
+    echo "        --download-dir \$HOME/easyai/models --data-dir \$HOME/easyai/data"
     echo
     echo "Or install system-wide with:"
     echo "    ./build_macos.sh --install               # → /usr/local (sudo)"

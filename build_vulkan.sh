@@ -100,4 +100,5 @@ echo "==> Done. Binaries in $BUILD_DIR:"
 ls "$BUILD_DIR" 2>/dev/null | grep -E '^easyai' | sed 's/^/    /'
 echo
 echo "Run one without installing, e.g.:"
-echo "    $BUILD_DIR/easyai-server -m /path/to/model.gguf --host 0.0.0.0 --port 8080"
+echo "    $BUILD_DIR/easyai-server -m /path/to/model.gguf --host 0.0.0.0 --port 8080 \\"
+echo "        --download-dir /var/lib/easyai/models --data-dir /var/lib/easyai/data"

@@ -10,7 +10,7 @@
 #      + easyai-agent + easyai-recipes + easyai-chat) with the selected
 #      GPU backend.
 #   4. Installs the binaries to $prefix/bin.
-#   5. Creates a system user, /var/lib/easyai/{models,workspace}, and
+#   5. Creates a system user, /var/lib/easyai/{models,workspace,data}, and
 #      /etc/easyai/{easyai.ini, system.txt_template, api_key} —
 #      out-of-the-box uses the binary's built-in "Deep" prompt; copy
 #      system.txt_template to system.txt to activate a custom persona.
@@ -293,6 +293,7 @@ service_home="/var/lib/easyai"
 service_model_dir="$service_home/models"
 service_model_link="ai.gguf"
 service_workspace="$service_home/workspace"
+service_data_dir="$service_home/data"          # /models dashboard catalog cache (easyai_hf_catalog.json)
 service_host="0.0.0.0"
 service_port=80                                # matches install_llama_server.sh default
 service_alias="EasyAi"
@@ -1177,7 +1178,7 @@ if [[ $do_service -eq 1 ]]; then
 
     log "creating $service_home + subdirs"
     sudo install -d -o "$service_user" -g "$service_group" -m 750 \
-        "$service_home" "$service_model_dir" "$service_workspace"
+        "$service_home" "$service_model_dir" "$service_workspace" "$service_data_dir"
 
     log "creating $config_dir"
     sudo install -d -o root -g "$service_group" -m 750 "$config_dir"
@@ -1517,6 +1518,15 @@ webui_password  = $webui_password
 #   and the directory the dashboard introspects + hot-swaps from. Defaults to
 #   this server's models dir so downloads sit beside the model in use.
 download_dir    = $service_model_dir
+# data_dir: where the /models dashboard persists its HuggingFace catalog
+#   snapshot (easyai_hf_catalog.json), so a restart serves the last list
+#   instantly and the 1-hour refresh clock survives. The server creates it if
+#   missing.
+data_dir        = $service_data_dir
+# catalog_size: how many of the most-recently-updated GGUF repos to keep in the
+#   searchable catalog (paged from HuggingFace, refreshed on request once >1h
+#   old). Clamped to [1, 1000].
+catalog_size    = 1000
 metrics         = $([[ "$enable_metrics" -eq 1 ]] && echo on || echo off)
 allow_fs        = off
 allow_bash      = off

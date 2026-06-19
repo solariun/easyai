@@ -109,6 +109,8 @@ The HTTP layer, paths, tool gating, MCP auth.
 | `webui_placeholder` | string | `--webui-placeholder` | `Type a message…` | Input box hint. |
 | `webui_password` | string | `--webui-password` | (none — open) | Password gate for the `/models` dashboard and its API. Empty leaves it open. A session cookie, separate from `api_key` (which still guards `/v1/*`). See §7 "MODELS dashboard". |
 | `download_dir` | path | `--download-dir` | (directory of `--model`) | Where the MODELS download manager writes / lists / deletes GGUF weights, and the directory the dashboard introspects + hot-swaps from. Defaults to the folder the loaded model lives in. |
+| `data_dir` | path | `--data-dir` | (`download_dir`) | Where the MODELS dashboard persists its HuggingFace catalog snapshot (`easyai_hf_catalog.json`), so a restart serves the last list instantly and the 1-hour refresh clock survives. The server creates it if missing. The installer sets it to `/var/lib/easyai/data`. |
+| `catalog_size` | int | `--catalog-size` | `1000` | How many of the **most-recently-updated** GGUF repos to keep in the searchable `/models` catalog. Paged from HuggingFace (cursor-followed until this many or the listing is exhausted), refreshed on request once the snapshot is >1h old. Clamped to `[1, 1000]`. |
 | `metrics` | bool | `--metrics` | `off` | Expose Prometheus `/metrics`. |
 | `verbose` | bool | `-v`, `--verbose` | `off` | Noisy logs. Enables HTTP-level `→` / `←` lines per request (with status, duration, bytes, running totals). The periodic `METRICS` line is **independent of verbose** — see `metrics_interval` below. |
 | `metrics_interval` | int | `--metrics-interval` | `300` | Periodic METRICS log line every N seconds, **ALWAYS ON regardless of `verbose`** since 2026-05-09. Reports CPU%, iowait%, load avg, process RSS + peak, system mem, GPU GTT (Linux/AMD), HTTP in-flight + cumulative reqs / err / bytes, fd usage, AND TCP state breakdown with **explicit `TIME_WAIT N/M ephemeral ports (X.X% [elevated\|HIGH\|CRITICAL])`** so socket exhaustion shows up before connections fail. `0` disables. Default `300` (5 min) — low-overhead enough to leave on permanently; bump down (60, 30, 5) when actively troubleshooting. Lives outside Prometheus `/metrics` so you can tail it from journalctl. |
@@ -798,8 +800,9 @@ requires the session cookie when `webui_password` is set):
 ```sh
 easyai-server -m /var/lib/easyai/models/ai.gguf \
   --download-dir /var/lib/easyai/models \
+  --data-dir /var/lib/easyai/data \
   --webui-password 's3cret'
-# The Recommend tab queries HuggingFace live — no catalog file to manage.
+# Recommend caches the 1000 most-recent GGUF repos in --data-dir, refreshed >1h on request.
 ```
 
 ---
