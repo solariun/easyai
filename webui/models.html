@@ -85,8 +85,11 @@
   .empty{color:var(--mut2);text-align:center;padding:50px 10px}
   .src{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line2)}
 
-  /* status tab */
-  .stgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px;align-items:start}
+  /* status tab — free vertical column packing (masonry): up to 3 columns,
+     cards flow top-to-bottom per column with no row alignment */
+  .stgrid{columns:300px 3;column-gap:14px}
+  .stcard{display:inline-block;width:100%;vertical-align:top;margin:0 0 14px;
+    break-inside:avoid;-webkit-column-break-inside:avoid;page-break-inside:avoid}
   .stcard h3{margin:0 0 10px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);
     display:flex;align-items:center;gap:8px}
   .stcard .kv{margin:0}
@@ -585,7 +588,7 @@ async function loadStatus(){
     ['Open FDs',mt.open_fds?`${fmtNum(mt.open_fds)} / ${fmtNum(mt.fd_limit)}`:'–'],
   ])}</div>`);
 
-  $('#statusWrap').innerHTML=`<div class="stgrid">${serverCard}${modelCard}${paramsCard}${servicesCard}${hwCard}${catCard}${dlCard}${metricsCard}</div>`;
+  $('#statusWrap').innerHTML=`<div class="stgrid">${serverCard}${modelCard}${paramsCard}${hwCard}${catCard}${dlCard}${servicesCard}${metricsCard}</div>`;
   scheduleStatus();
 }
 
