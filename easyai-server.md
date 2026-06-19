@@ -752,13 +752,14 @@ downloading local models. No external binary.
 
 **What it does.**
 - **Recommend** — detects this machine's hardware (RAM / CPU / GPU+VRAM via ggml)
-  and searches **HuggingFace live** (`/api/models?filter=gguf`) for GGUF models,
-  enriching each with its repo's best GGUF (size → estimated params/quant) and
-  scoring it for fit / speed / quality against your hardware, or a *simulated*
-  machine. The scoring is a native C++ port of
-  [LLMFit](https://github.com/AlexsJones/llmfit)'s; since params/quant are
-  inferred from the file (no bundled metadata catalog), the numbers are
-  estimates.
+  and keeps a **static list of the top GGUF models on HuggingFace**
+  (`/api/models?filter=gguf`), rebuilt on startup, lazily after 1 h, and via a
+  **Refresh** button, scoring each for fit / speed / quality against your
+  hardware (or a *simulated* one). List params are estimated from the repo name;
+  **clicking a model reads its remote GGUF header (HTTP range request) for a
+  precise fit**. Scoring is a native C++ port of
+  [LLMFit](https://github.com/AlexsJones/llmfit)'s. Runtime is fixed to
+  **llama.cpp / GGUF**.
 - **Local models** — lists the `.gguf` files in `download_dir`; click one for a
   panel of all its parameters (read from the GGUF header), its fit on this
   hardware, and the matching `[MODEL_*]` INI profile.
@@ -780,7 +781,9 @@ requires the session cookie when `webui_password` is set):
 | GET | `/models/api/auth` | `{authed, required, catalog_loaded, catalog_size, status, download_dir}` (open). |
 | POST | `/models/api/login` / `logout` | `{password}` → sets / clears the `easyai_models` cookie (HttpOnly, SameSite=Strict). |
 | GET | `/models/api/system` | Detected/simulated hardware (`ram_gb`, `vram_gb`, `cpu_cores` to simulate). |
-| GET | `/models/api/models` | Scored catalog (`search`, `min_fit`, `runtime`, `use_case`, `sort`, `limit`, + sim params). |
+| GET | `/models/api/models` | The scored model snapshot (`search`, `min_fit`, `use_case`, `sort`, `limit`, + sim params); envelope carries `refreshing`/`last_refresh`/`stale`. |
+| POST | `/models/api/refresh` | Rebuild the static model list from HuggingFace (background). |
+| GET | `/models/api/hf/detail?repo=<repo>` | Precise fit for a HF model — reads its remote GGUF header (HTTP range). |
 | POST | `/models/api/plan` | `{model, context, quant?, kv_quant?, …}` → hardware plan + KV alternatives. |
 | GET | `/models/api/local` | List `.gguf` in `download_dir` (`name, size, mtime, is_current`). |
 | GET | `/models/api/local/detail?file=<name>` | GGUF params + fit + `[MODEL_*]` profile for one local model. |

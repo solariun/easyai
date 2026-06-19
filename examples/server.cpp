@@ -7048,6 +7048,8 @@ int main(int argc, char ** argv) {
             dl_dir.c_str(),
             ctx->webui_password.empty() ? "OPEN (set webui_password to require login)"
                                         : "password required");
+        // Build the model list from HuggingFace on startup (background).
+        ctx->models->start_refresh(true);
     }
 
     // -------- http server -------------------------------------------------
@@ -7541,6 +7543,21 @@ int main(int argc, char ** argv) {
         if (!models_require_auth(ctx_ref, req, res)) return;
         if (!models_ready(res)) return;
         res.set_content(ctx_ref.models->plan_json(req.body), "application/json");
+    });
+    // Rebuild the static model list from HuggingFace (the Refresh button).
+    svr.Post("/models/api/refresh", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        ctx_ref.models->start_refresh(true);
+        res.set_content("{\"refreshing\":true}", "application/json");
+    });
+    // Precise fit for a HuggingFace model — reads its remote GGUF header.
+    svr.Get("/models/api/hf/detail", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        std::string repo = req.has_param("repo") ? req.get_param_value("repo") : "";
+        res.set_content(ctx_ref.models->hf_detail_json(repo, httplib::detail::params_to_query_str(req.params)),
+                        "application/json");
     });
     // ---- local model directory: list / detail / delete ----
     svr.Get("/models/api/local", [&](const httplib::Request & req, httplib::Response & res) {

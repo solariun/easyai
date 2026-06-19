@@ -79,6 +79,27 @@ bool ends_with_ci(const std::string & s, const std::string & suf) {
 double round1(double v) { return std::round(v * 10.0) / 10.0; }
 double round2(double v) { return std::round(v * 100.0) / 100.0; }
 double clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
+std::int64_t now_sec() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+constexpr std::int64_t kSnapshotTtlSec = 3600;   // auto-refresh after 1 hour
+constexpr int          kSnapshotSize   = 100;    // top-N GGUF repos in the list
+
+// Pull a params figure (billions) out of a repo name ("…-7B…", "…-0.5B",
+// "…-500M"): the largest token wins. nullopt if none.
+std::optional<double> params_from_name(const std::string & name) {
+    static const std::regex re(R"((\d+(?:\.\d+)?)\s*([bBmM]))");
+    double best = -1;
+    for (auto it = std::sregex_iterator(name.begin(), name.end(), re); it != std::sregex_iterator(); ++it) {
+        double v; try { v = std::stod((*it)[1].str()); } catch (...) { continue; }
+        char u = (char) std::tolower((unsigned char) (*it)[2].str()[0]);
+        double b = (u == 'm') ? v / 1000.0 : v;
+        if (b > best) best = b;
+    }
+    if (best > 0) return best;
+    return std::nullopt;
+}
 
 // Parse "key=value&key2=value2" (already URL-decoded by httplib) into a map.
 std::map<std::string, std::string> parse_query(const std::string & q) {
@@ -257,7 +278,12 @@ struct ModelEntry {
 // A HuggingFace search hit (pre-enrichment) and an enriched, cached entry.
 struct HfHit  { std::string repo, owner, pipeline; std::uint64_t downloads = 0, likes = 0; };
 struct CachedHf { std::string repo; ModelEntry entry; std::uint64_t best_size = 0, downloads = 0, likes = 0; bool ok = false; };
-struct ModelsEngine::HfCache { std::map<std::string, CachedHf> by_repo; };
+// The static model snapshot: enriched HF entries + when it was last rebuilt.
+struct ModelsEngine::HfCache {
+    std::vector<CachedHf> snapshot;
+    std::int64_t          last_refresh = 0;   // unix seconds; 0 = never
+    std::string           error;
+};
 
 namespace {
 
@@ -519,10 +545,8 @@ std::string fit_label(const std::string & c) {
     return "Too tight";
 }
 
-std::string select_runtime(const SystemSpecs & s, const std::string & force) {
-    if (force == "mlx" || force == "llamacpp" || force == "vllm") return force;
-    if (contains_ci(s.backend, "metal") && s.unified_memory) return "mlx";
-    return "llamacpp";
+std::string select_runtime(const SystemSpecs &, const std::string &) {
+    return "llamacpp";   // easyai serves GGUF via llama.cpp only — runtime is fixed
 }
 
 double estimate_tps(const ModelEntry & m, const std::string & quant,
@@ -837,13 +861,9 @@ std::string ftype_to_quant(std::uint32_t ft) {
     }
 }
 
-GgufMeta read_gguf_meta(const std::string & path) {
-    GgufMeta g;
-    std::error_code ec; g.file_size = (std::uint64_t) fs::file_size(path, ec);
-    gguf_init_params p; p.no_alloc = true; p.ctx = nullptr;
-    gguf_context * c = gguf_init_from_file(path.c_str(), p);
-    if (!c) return g;
-    g.ok = true;
+// Pull the fields we care about out of an already-parsed GGUF context. Shared
+// by the local-file reader and the remote-header reader.
+void extract_gguf_meta(const gguf_context * c, GgufMeta & g) {
     auto sval = [&](const char * k) -> std::string {
         int64_t id = gguf_find_key(c, k);
         return id >= 0 ? ggval_to_string(c, id) : std::string();
@@ -853,7 +873,6 @@ GgufMeta read_gguf_meta(const std::string & path) {
     bool f;
     std::uint64_t ft = ggval_u64(c, "general.file_type", f);
     if (f) g.quant = ftype_to_quant((std::uint32_t) ft);
-    // filename-derived quant is more reliable; caller may override.
     auto a = [&](const std::string & suf) { return g.arch.empty() ? suf : g.arch + "." + suf; };
     g.context_length = (std::uint32_t) ggval_u64(c, a("context_length"), f);
     g.n_layers       = (std::uint32_t) ggval_u64(c, a("block_count"), f);
@@ -866,10 +885,16 @@ GgufMeta read_gguf_meta(const std::string & path) {
     g.expert_used    = (std::uint32_t) ggval_u64(c, a("expert_used_count"), f);
     g.vocab          = (std::uint32_t) ggval_u64(c, a("vocab_size"), f);
     g.parameters     = ggval_u64(c, "general.parameter_count", g.has_params);
-    // a couple of human extras
-    std::string org = sval("general.organization");
-    if (!org.empty()) g.extra["organization"] = org;
-    std::string ft_name = sval("general.file_type");
+    g.ok = true;
+}
+
+GgufMeta read_gguf_meta(const std::string & path) {
+    GgufMeta g;
+    std::error_code ec; g.file_size = (std::uint64_t) fs::file_size(path, ec);
+    gguf_init_params p; p.no_alloc = true; p.ctx = nullptr;
+    gguf_context * c = gguf_init_from_file(path.c_str(), p);
+    if (!c) return g;
+    extract_gguf_meta(c, g);
     gguf_free(c);
     return g;
 }
@@ -890,6 +915,7 @@ ModelsEngine::ModelsEngine(std::string download_dir, const config::Ini * ini,
 ModelsEngine::~ModelsEngine() {
     cancel_.store(true);
     if (worker_.joinable()) worker_.join();
+    if (refresh_thread_.joinable()) refresh_thread_.join();
 }
 
 std::string ModelsEngine::status_message() const { return status_; }
@@ -1137,6 +1163,34 @@ bool curl_get_string(const std::string & url, std::string & out, std::string & e
     if (code >= 400) { err = "HTTP " + std::to_string(code); return false; }
     return true;
 }
+// Uncapped append (the HTTP range bounds the size).
+size_t append_write_cb(void * buf, size_t sz, size_t n, void * ud) {
+    auto * out = static_cast<std::string *>(ud);
+    out->append(static_cast<char *>(buf), sz * n);
+    return sz * n;
+}
+// Range-GET the first `maxbytes` of a URL into a string — used to read a remote
+// GGUF header without downloading the whole multi-GB file. Follows the HF
+// resolve -> CDN redirect (the CDN honours Range).
+bool curl_get_range(const std::string & url, long maxbytes, std::string & out, std::string & err) {
+    ensure_curl_global();
+    CURL * c = curl_easy_init();
+    if (!c) { err = "curl_easy_init failed"; return false; }
+    out.clear();
+    std::string range = "0-" + std::to_string(maxbytes - 1);
+    curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c, CURLOPT_RANGE, range.c_str());
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, append_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &out);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 60L);
+    apply_common_curl(c);
+    CURLcode rc = curl_easy_perform(c);
+    long code = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_cleanup(c);
+    if (rc != CURLE_OK) { err = std::string("curl: ") + curl_easy_strerror(rc); return false; }
+    if (code >= 400)    { err = "HTTP " + std::to_string(code); return false; }
+    return true;
+}
 size_t raw_file_write(char * buf, size_t sz, size_t n, void * ud) {
     return std::fwrite(buf, 1, sz * n, static_cast<std::FILE *>(ud));
 }
@@ -1182,6 +1236,96 @@ int xfer_cb(void * ud, curl_off_t dltotal, curl_off_t dlnow, curl_off_t, curl_of
 }
 #endif  // EASYAI_HAVE_CURL
 }  // namespace
+
+std::string ModelsEngine::hf_detail_json(const std::string & repo, const std::string & query) {
+#if !defined(EASYAI_HAVE_CURL)
+    (void) repo; (void) query;
+    return "{\"error\":\"server built without libcurl\"}";
+#else
+    auto q = parse_query(query);
+    SystemSpecs s = detect_system();
+    apply_sim(s, qnum(q, "ram_gb", qnum(q, "ram", -1)), qnum(q, "vram_gb", qnum(q, "memory", -1)),
+              (int) qnum(q, "cpu_cores", -1));
+    if (repo.empty() || repo.find("..") != std::string::npos) return "{\"error\":\"invalid repo\"}";
+
+    // 1. find the best GGUF file in the repo.
+    std::string treeurl = "https://huggingface.co/api/models/" + repo + "/tree/main?recursive=true";
+    std::string body, err;
+    if (!curl_get_string(treeurl, body, err)) return "{\"error\":\"HuggingFace: " + err + "\"}";
+    std::string best_path; std::uint64_t bsize = 0; int best_rank = 1 << 30;
+    try {
+        auto j = nlohmann::json::parse(body);
+        if (j.is_array()) for (auto & e : j) {
+            if (e.value("type", std::string()) != "file") continue;
+            std::string path = e.value("path", std::string());
+            if (!ends_with_ci(path, ".gguf")) continue;
+            int rk = quant_rank(base_name(path));
+            std::uint64_t sz = e.value("size", (std::uint64_t) 0);
+            if (rk < best_rank || (rk == best_rank && sz > bsize)) { best_rank = rk; best_path = path; bsize = sz; }
+        }
+    } catch (...) {}
+    if (best_path.empty()) return "{\"error\":\"no .gguf files in " + repo + "\"}";
+
+    std::string fquant;
+    { static const char * order[] = { "Q8_0","Q6_K_L","Q6_K","Q5_K_M","Q5_K_S","Q5_0","Q4_K_M","Q4_K_S","Q4_0",
+        "Q3_K_L","Q3_K_M","Q3_K_S","Q2_K","IQ4_XS","IQ3_M","IQ2_M","IQ1_M","F16","BF16","F32" };
+      std::string uc = to_upper(base_name(best_path));
+      for (auto * o : order) if (uc.find(o) != std::string::npos) { fquant = o; break; } }
+
+    // 2. read the remote GGUF header (range request) and parse it.
+    GgufMeta g; g.file_size = bsize;
+    std::string fileurl = "https://huggingface.co/" + repo + "/resolve/main/" + best_path;
+    std::string buf;
+    if (curl_get_range(fileurl, 12 * 1024 * 1024, buf, err) && !buf.empty()) {
+        gguf_init_params p; p.no_alloc = true; p.ctx = nullptr;
+        gguf_context * gc = gguf_init_from_buffer(buf.data(), buf.size(), p);
+        if (gc) { extract_gguf_meta(gc, g); gguf_free(gc); }
+    }
+
+    // 3. build a ModelEntry — precise from the header, else estimated.
+    ModelEntry m;
+    m.name = g.name.empty() ? repo : g.name;
+    auto sl = repo.find('/'); m.provider = sl == std::string::npos ? repo : repo.substr(0, sl);
+    m.architecture = g.arch;
+    m.quantization = !fquant.empty() ? fquant : (g.quant.empty() ? "Q4_K_M" : g.quant);
+    m.context_length = g.context_length;
+    m.num_hidden_layers = g.n_layers; m.num_attention_heads = g.n_heads;
+    m.num_key_value_heads = g.n_kv_heads; m.head_dim = g.head_dim; m.hidden_size = g.embd; m.vocab_size = g.vocab;
+    m.is_moe = g.expert_count > 1; m.num_experts = g.expert_count; m.active_experts = g.expert_used;
+    m.has_active_experts = g.expert_used > 0;
+    if (g.has_params) { m.parameters_raw = g.parameters; m.has_params_raw = true; }
+    else { auto pn = params_from_name(repo);
+           double pb0 = pn ? *pn : (bsize > 0 ? (double) bsize / quant_bpp(m.quantization) / 1e9 : 7.0);
+           m.parameters_raw = (std::uint64_t) (pb0 * 1e9); m.has_params_raw = true; }
+    double pb = m.params_b();
+    char pc[32];
+    if (pb >= 1) std::snprintf(pc, sizeof(pc), "%.1fB", pb);
+    else         std::snprintf(pc, sizeof(pc), "%dM", (int) std::round(pb * 1000));
+    m.parameter_count = pc;
+    m.min_ram_gb = estimate_memory_gb(m, m.quantization,
+        m.context_length ? std::min<std::uint32_t>(m.context_length, 8192) : 4096);
+    m.recommended_ram_gb = m.min_ram_gb * 1.25;
+    m.gguf_sources = { { repo, m.provider } };
+
+    FitRow r = score_model(m, s, 0, "");
+    r.file_size = bsize;
+
+    ordered_json params = {
+        {"architecture", g.arch}, {"quantization", m.quantization},
+        {"params_b", round2(pb)}, {"parameter_count", m.parameter_count},
+        {"context_length", g.context_length}, {"num_hidden_layers", g.n_layers},
+        {"num_attention_heads", g.n_heads}, {"num_key_value_heads", g.n_kv_heads},
+        {"head_dim", g.head_dim}, {"embedding_length", g.embd}, {"vocab_size", g.vocab},
+        {"expert_count", g.expert_count}, {"expert_used_count", g.expert_used},
+        {"is_moe", m.is_moe}, {"file_size_bytes", bsize}, {"best_file", best_path},
+    };
+    ordered_json out = {
+        {"repo", repo}, {"display_name", m.name}, {"gguf_readable", g.ok},
+        {"params", params}, {"fit", fit_to_json(r)}, {"system", system_to_json(s)["system"]},
+    };
+    return out.dump();
+#endif
+}
 
 bool ModelsEngine::hf_repo_files(const std::string & repo, std::vector<RepoFile> & out, std::string & err) {
     out.clear();
@@ -1324,21 +1468,6 @@ std::string url_encode(const std::string & s) {
     return o;
 }
 
-// Pull a params figure (billions) out of a repo name ("…-7B…", "…-0.5B",
-// "…-500M"): the largest token wins. nullopt if none.
-std::optional<double> params_from_name(const std::string & name) {
-    static const std::regex re(R"((\d+(?:\.\d+)?)\s*([bBmM]))");
-    double best = -1;
-    for (auto it = std::sregex_iterator(name.begin(), name.end(), re); it != std::sregex_iterator(); ++it) {
-        double v; try { v = std::stod((*it)[1].str()); } catch (...) { continue; }
-        char u = (char) std::tolower((unsigned char) (*it)[2].str()[0]);
-        double b = (u == 'm') ? v / 1000.0 : v;
-        if (b > best) best = b;
-    }
-    if (best > 0) return best;
-    return std::nullopt;
-}
-
 // HuggingFace model search restricted to GGUF repos.
 bool hf_search(const std::string & query, int limit, const std::string & sort,
                std::vector<HfHit> & out, std::string & err) {
@@ -1417,8 +1546,65 @@ bool hf_build_entry(const HfHit & h, ModelEntry & out, std::uint64_t & best_size
     return true;
 }
 
+// Build a snapshot entry from a search hit WITHOUT a per-repo tree call:
+// params come from the repo name (fallback 7B) and the quant defaults to
+// Q4_K_M (the scorer still picks the best quant that fits the hardware). This
+// keeps a full-list refresh to a single HF API call.
+void build_light_entry(const HfHit & h, ModelEntry & out) {
+    out = ModelEntry{};
+    out.name = h.repo; out.provider = h.owner; out.quantization = "Q4_K_M";
+    auto pn = params_from_name(h.repo);
+    double pb = pn ? *pn : 7.0;
+    out.parameters_raw = (std::uint64_t) (pb * 1e9); out.has_params_raw = true;
+    char pc[32];
+    if (pb >= 1) std::snprintf(pc, sizeof(pc), "%.1fB", pb);
+    else         std::snprintf(pc, sizeof(pc), "%dM", (int) std::round(pb * 1000));
+    out.parameter_count = pc;
+    out.context_length = 0; out.is_moe = false;
+    out.min_ram_gb = pb * quant_bpp("Q4_K_M") + 0.5;
+    out.recommended_ram_gb = out.min_ram_gb * 1.25;
+    out.gguf_sources = { { h.repo, h.owner } };
+}
+
 }  // namespace
 #endif  // EASYAI_HAVE_CURL
+
+void ModelsEngine::start_refresh(bool force) {
+    {
+        std::lock_guard<std::mutex> lk(hf_cache_mu_);
+        bool stale = hf_cache_->snapshot.empty() ||
+                     (now_sec() - hf_cache_->last_refresh) > kSnapshotTtlSec;
+        if (!force && !stale) return;
+    }
+    bool expected = false;
+    if (!refreshing_.compare_exchange_strong(expected, true)) return;  // one at a time
+    if (refresh_thread_.joinable()) refresh_thread_.join();             // reap the previous
+    refresh_thread_ = std::thread([this]() {
+#if defined(EASYAI_HAVE_CURL)
+        std::vector<HfHit> hits; std::string err;
+        bool ok = hf_search("", kSnapshotSize, "downloads", hits, err);
+        std::vector<CachedHf> snap;
+        if (ok) {
+            snap.reserve(hits.size());
+            for (auto & h : hits) {
+                CachedHf c; c.repo = h.repo; c.downloads = h.downloads; c.likes = h.likes;
+                build_light_entry(h, c.entry); c.best_size = 0; c.ok = true;
+                snap.push_back(std::move(c));
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(hf_cache_mu_);
+            if (ok) { hf_cache_->snapshot = std::move(snap); hf_cache_->error.clear(); }
+            else    { hf_cache_->error = err; }
+            hf_cache_->last_refresh = now_sec();
+        }
+        easyai::log::write("[models] snapshot refreshed: %zu models%s\n",
+                           ok ? hits.size() : (std::size_t) 0,
+                           ok ? "" : " (HF error)");
+#endif
+        refreshing_.store(false);
+    });
+}
 
 std::string ModelsEngine::models_json(const std::string & query) {
     auto q = parse_query(query);
@@ -1426,67 +1612,36 @@ std::string ModelsEngine::models_json(const std::string & query) {
     apply_sim(s, qnum(q, "ram_gb", qnum(q, "ram", -1)), qnum(q, "vram_gb", qnum(q, "memory", -1)),
               (int) qnum(q, "cpu_cores", -1));
     ordered_json env = system_to_json(s);
-#if !defined(EASYAI_HAVE_CURL)
-    env["total_models"] = 0; env["returned_models"] = 0; env["models"] = ordered_json::array();
-    env["error"] = "server built without libcurl";
-    return env.dump();
-#else
-    std::string search  = qget(q, "search");
-    std::string runtime = qget(q, "runtime", "any");
+
+    start_refresh(false);   // lazy: rebuild in the background if empty or >1h old
+
+    std::string search  = to_lower(qget(q, "search"));
     std::string usecase = qget(q, "use_case", "all");
     std::string sort    = qget(q, "sort", "score");
-    std::string force   = qget(q, "force_runtime");
     std::string min_fit = qget(q, "min_fit", "marginal");
     bool include_tt = qget(q, "include_too_tight", "true") != "false";
-    int limit = (int) qnum(q, "limit", qnum(q, "n", 30));
-    if (limit <= 0) limit = 30; if (limit > 80) limit = 80;
+    int limit = (int) qnum(q, "limit", qnum(q, "n", 50));
+    if (limit <= 0) limit = 50;
     int min_fit_rank = min_fit == "perfect" ? 4 : min_fit == "good" ? 3 : min_fit == "too_tight" ? 1 : 2;
 
-    std::string hf_sort = (sort == "date") ? "lastModified" : (sort == "likes") ? "likes" : "downloads";
-    std::vector<HfHit> hits; std::string err;
-    if (!hf_search(search, limit, hf_sort, hits, err)) {
-        env["total_models"] = 0; env["returned_models"] = 0; env["models"] = ordered_json::array();
-        env["error"] = "HuggingFace: " + err;
-        return env.dump();
-    }
-
-    // Resolve from cache or fetch (bounded-concurrency) the uncached repos.
-    std::vector<CachedHf> all; all.reserve(hits.size());
-    std::vector<HfHit> to_fetch;
+    // Snapshot copy (cheap: ~100 entries) so scoring doesn't hold the lock and
+    // FitRow's pointers into it stay valid for this whole call.
+    std::vector<CachedHf> snap; std::int64_t last; std::string err;
     {
         std::lock_guard<std::mutex> lk(hf_cache_mu_);
-        for (auto & h : hits) {
-            auto it = hf_cache_->by_repo.find(h.repo);
-            if (it != hf_cache_->by_repo.end()) { CachedHf c = it->second; c.downloads = h.downloads; c.likes = h.likes; all.push_back(std::move(c)); }
-            else to_fetch.push_back(h);
-        }
-    }
-    const std::size_t MAXC = 8;
-    for (std::size_t i = 0; i < to_fetch.size(); i += MAXC) {
-        std::vector<std::future<CachedHf>> batch;
-        for (std::size_t k = i; k < std::min(i + MAXC, to_fetch.size()); ++k) {
-            HfHit h = to_fetch[k];
-            batch.push_back(std::async(std::launch::async, [h]() {
-                CachedHf c; c.repo = h.repo; c.downloads = h.downloads; c.likes = h.likes;
-                std::string e; c.ok = hf_build_entry(h, c.entry, c.best_size, e);
-                return c;
-            }));
-        }
-        for (auto & f : batch) {
-            CachedHf c = f.get();
-            { std::lock_guard<std::mutex> lk(hf_cache_mu_); hf_cache_->by_repo[c.repo] = c; }
-            all.push_back(std::move(c));
-        }
+        snap = hf_cache_->snapshot; last = hf_cache_->last_refresh; err = hf_cache_->error;
     }
 
-    // Score. FitRow holds a pointer into all[i].entry — `all` is stable now.
     std::vector<FitRow> rows;
-    for (auto & c : all) {
+    for (auto & c : snap) {
         if (!c.ok) continue;
+        if (!search.empty()) {
+            std::string hay = to_lower(c.entry.name + " " + c.entry.provider + " " + c.entry.parameter_count);
+            if (hay.find(search) == std::string::npos) continue;
+        }
         if (usecase != "all" && infer_use_case(c.entry) != usecase) continue;
-        FitRow r = score_model(c.entry, s, 0, force);
+        FitRow r = score_model(c.entry, s, 0, "");
         r.hf_downloads = c.downloads; r.hf_likes = c.likes; r.file_size = c.best_size;
-        if (runtime != "any" && r.runtime != runtime) continue;
         if (r.fit_level == "too_tight" && !include_tt) continue;
         if (fit_rank(r.fit_level) < min_fit_rank) continue;
         rows.push_back(r);
@@ -1499,15 +1654,20 @@ std::string ModelsEngine::models_json(const std::string & query) {
         if (sort == "likes")     return a.hf_likes > b.hf_likes;
         return a.score > b.score;
     });
+    int total = (int) rows.size();
+    if (limit > 0 && (int) rows.size() > limit) rows.resize(limit);
 
     ordered_json models = ordered_json::array();
     for (const auto & r : rows) models.push_back(fit_to_json(r));
-    env["total_models"] = (int) rows.size();
+    env["total_models"]    = total;
     env["returned_models"] = (int) rows.size();
-    env["source"] = "huggingface";
+    env["source"]          = "huggingface";
+    env["refreshing"]      = refreshing_.load();
+    env["last_refresh"]    = last;
+    env["stale"]           = (now_sec() - last) > kSnapshotTtlSec;
+    if (!err.empty()) env["error"] = "HuggingFace: " + err;
     env["models"] = models;
     return env.dump();
-#endif
 }
 
 std::string ModelsEngine::plan_json(const std::string & body) {

@@ -90,14 +90,25 @@ public:
 
     std::string status_message() const;
 
+    // Rebuild the static model list from HuggingFace in the background.
+    // `force` ignores the freshness check; otherwise it only refreshes when the
+    // snapshot is empty or older than 1 hour. Idempotent (a refresh already in
+    // flight is a no-op). Call on startup + from the Refresh button; models_json
+    // also calls it lazily (force=false) so an access after >1h triggers one.
+    void start_refresh(bool force);
+
     // ---- JSON endpoints (raw query string / body in, JSON out) ----
     // `query` is the request's URL query (e.g. "search=qwen&min_fit=good&ram_gb=64").
     std::string system_json(const std::string & query);
-    std::string models_json(const std::string & query);       // live HF search
+    std::string models_json(const std::string & query);       // static HF snapshot
     std::string plan_json(const std::string & body);          // POST body
     std::string local_models_json();                          // list
     std::string local_model_json(const std::string & filename,
                                  const std::string & query);  // detail panel
+    // Precise fit for a HuggingFace model: reads the remote GGUF header (an HTTP
+    // range request — no full download) to recover real params / context /
+    // layers, then scores accurately. Falls back to the name/size estimate.
+    std::string hf_detail_json(const std::string & repo, const std::string & query);
 
     // ---- download manager (native libcurl → HuggingFace) ----
     bool hf_repo_files(const std::string & repo,
@@ -125,11 +136,14 @@ private:
     std::function<std::string()>  current_model_;
     std::string                   status_;
 
-    // Per-repo cache of enriched HF entries (opaque pImpl; real type in the
-    // .cpp), so re-filtering / re-sorting doesn't re-hit the HF API.
+    // The static model snapshot (opaque pImpl; real type in the .cpp): the
+    // enriched HF entries + last-refresh time. Guarded by hf_cache_mu_; rebuilt
+    // by a background refresh thread.
     struct HfCache;
     std::unique_ptr<HfCache>      hf_cache_;
     std::mutex                    hf_cache_mu_;
+    std::atomic<bool>             refreshing_{false};
+    std::thread                   refresh_thread_;
 
     // download manager
     std::mutex         dl_start_mu_;     // serializes start_download()

@@ -131,22 +131,24 @@
       <label>Min fit<select id="f-minfit">
         <option value="marginal">Marginal+</option><option value="good">Good+</option>
         <option value="perfect">Perfect</option><option value="too_tight">Show all</option></select></label>
-      <label>Runtime<select id="f-runtime">
-        <option value="any">Any</option><option value="llamacpp">llama.cpp</option>
-        <option value="mlx">MLX</option><option value="vllm">vLLM</option></select></label>
       <label>Use case<select id="f-usecase">
         <option value="all">All</option><option value="general">General</option><option value="coding">Coding</option>
         <option value="reasoning">Reasoning</option><option value="chat">Chat</option>
         <option value="multimodal">Multimodal</option><option value="embedding">Embedding</option></select></label>
       <label>Sort<select id="f-sort">
         <option value="score">Score</option><option value="tps">tok/s</option><option value="params">Params</option>
-        <option value="mem">Memory</option><option value="ctx">Context</option><option value="date">Release</option></select></label>
-      <label>Limit<select id="f-limit"><option>25</option><option selected>50</option><option>100</option><option>200</option></select></label>
+        <option value="mem">Memory</option><option value="downloads">Downloads</option><option value="likes">Likes</option></select></label>
+      <label>Limit<select id="f-limit"><option>25</option><option selected>50</option><option>100</option></select></label>
       <div class="sep"></div>
       <label>Sim RAM GB<input id="s-ram" type="number" min="0" placeholder="auto" style="width:80px"></label>
       <label>Sim VRAM GB<input id="s-vram" type="number" min="0" placeholder="auto" style="width:80px"></label>
       <label>Sim cores<input id="s-cores" type="number" min="0" placeholder="auto" style="width:70px"></label>
       <label>&nbsp;<button class="btn" onclick="resetSim()">Reset sim</button></label>
+      <label>&nbsp;<button class="btn acc" id="refBtn" onclick="refreshList()" title="Rebuild the list from HuggingFace">↻ Refresh list</button></label>
+    </div>
+    <div id="refreshBanner" class="hide" style="display:flex;align-items:center;gap:10px;margin:0 0 14px;padding:10px 14px;border:1px solid var(--acc);border-radius:10px;background:rgba(255,130,54,.10);color:#ffd9bf">
+      <span class="spin"></span><b>Rebuilding the model list from HuggingFace…</b>
+      <span class="muted small" style="margin-left:auto" id="refMeta"></span>
     </div>
     <div class="row">
       <div class="grow panel" style="padding:0;overflow:hidden">
@@ -231,15 +233,26 @@ async function loadSystem(){
 /* ---------- recommend ---------- */
 let modelsTimer=null;
 function debounceModels(){clearTimeout(modelsTimer);modelsTimer=setTimeout(loadModels,250);}
+let refreshTimer=null;
+function fmtAgo(sec){if(!sec)return 'never';let d=Math.max(0,Math.floor(Date.now()/1000-sec));
+  if(d<60)return 'just now';if(d<3600)return Math.floor(d/60)+'m ago';if(d<86400)return Math.floor(d/3600)+'h ago';return Math.floor(d/86400)+'d ago';}
+function showRefresh(on,meta){$('#refreshBanner').classList.toggle('hide',!on);if(meta!==undefined)$('#refMeta').textContent=meta;let b=$('#refBtn');if(b)b.disabled=on;}
+function schedulePoll(){clearTimeout(refreshTimer);refreshTimer=setTimeout(loadModels,2000);}
 async function loadModels(){
   let p=simQS();
   p.set('search',$('#f-search').value);p.set('min_fit',$('#f-minfit').value);
-  p.set('runtime',$('#f-runtime').value);p.set('use_case',$('#f-usecase').value);
-  p.set('sort',$('#f-sort').value);p.set('limit',$('#f-limit').value);
-  $('#modelsWrap').innerHTML='<div class="empty"><span class="spin"></span> Searching HuggingFace &amp; scoring…</div>';
+  p.set('use_case',$('#f-usecase').value);p.set('sort',$('#f-sort').value);p.set('limit',$('#f-limit').value);
+  if(!$('#modelsWrap').querySelector('table'))$('#modelsWrap').innerHTML='<div class="empty"><span class="spin"></span> Loading…</div>';
   try{
     let d=await api('/models/api/models?'+p);
-    if(!d.models.length){$('#modelsWrap').innerHTML='<div class="empty">No models match.</div>';return;}
+    showRefresh(!!d.refreshing,'list updated '+fmtAgo(d.last_refresh));
+    if(d.refreshing)schedulePoll();else clearTimeout(refreshTimer);
+    if(!d.models.length){
+      $('#modelsWrap').innerHTML=d.refreshing
+        ?'<div class="empty"><span class="spin"></span> Building the model list from HuggingFace…</div>'
+        :(d.error?'<div class="empty">'+esch(d.error)+'</div>':'<div class="empty">No models match.</div>');
+      return;
+    }
     let rows=d.models.map(m=>`<tr data-name="${enc(m.name)}" onclick='selModel(${esc(JSON.stringify(m))},this)'>
       <td><div>${esch(m.name)}</div><div class="muted small">${esch(m.provider||'')}</div></td>
       <td class="num">${m.params_b}B</td>
@@ -252,8 +265,12 @@ async function loadModels(){
     $('#modelsWrap').innerHTML=`<table><thead><tr><th>Model</th><th class="num">Params</th><th>Fit</th>
       <th>Mode</th><th class="num">Score</th><th class="num">tok/s</th><th class="num">Mem</th><th class="num">↓&nbsp;HF</th>
       </tr></thead><tbody>${rows}</tbody></table>
-      <div class="muted small" style="padding:8px 12px">${d.returned_models} of ${d.total_models} models</div>`;
+      <div class="muted small" style="padding:8px 12px">${d.returned_models} of ${d.total_models} models · list updated ${fmtAgo(d.last_refresh)}</div>`;
   }catch(e){$('#modelsWrap').innerHTML='<div class="empty">'+esch(e.message)+'</div>';}
+}
+async function refreshList(){
+  try{await api('/models/api/refresh',{method:'POST'});showRefresh(true,'starting…');loadModels();}
+  catch(e){toast(e.message,true);}
 }
 function enc(s){return encodeURIComponent(s);}
 function esch(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
@@ -271,8 +288,9 @@ function selModel(m,tr){
     <div style="margin-top:8px"><span class="pill ${m.fit_level}">${m.fit_label}</span>
       <span class="pill ghost">${m.run_mode_label}</span>
       <span class="pill ghost">${m.runtime_label}</span></div>
+    <div class="sect" id="hfPrecise"><h3>Precise fit <span class="muted small">(reading GGUF header…)</span></h3><div class="muted small"><span class="spin"></span></div></div>
     <div class="kv">
-      <span class="k">Best quant</span><span class="v">${m.best_quant||'–'}</span>
+      <span class="k">Est. quant</span><span class="v">${m.best_quant||'–'}</span>
       <span class="k">Memory required</span><span class="v">${m.memory_required_gb} GB</span>
       <span class="k">Memory available</span><span class="v">${m.memory_available_gb} GB</span>
       <span class="k">Est. speed</span><span class="v">${m.estimated_tps} tok/s</span>
@@ -289,6 +307,32 @@ function selModel(m,tr){
         <label>&nbsp;<button class="btn" onclick="runPlan()">Estimate</button></label>
       </div><div id="planOut"></div></div>
     <div class="sect"><h3>GGUF sources</h3>${srcs}</div>`;
+  loadHfPrecise(m.name);
+}
+async function loadHfPrecise(repo){
+  let el=$('#hfPrecise');if(!el)return;
+  let qp=simQS();qp.set('repo',repo);
+  try{
+    let d=await api('/models/api/hf/detail?'+qp);
+    if(d.error){el.innerHTML='<h3>Precise fit</h3><div class="muted small">'+esch(d.error)+'</div>';return;}
+    let p=d.params,f=d.fit,sc=f.score_components;
+    el.innerHTML=`<h3>Precise fit ${d.gguf_readable?'<span class="muted small">(from GGUF header)</span>':'<span class="muted small">(header unreadable — estimated)</span>'}</h3>
+      <div style="margin:2px 0 8px"><span class="pill ${f.fit_level}">${f.fit_label}</span>
+        <span class="pill ghost">${f.run_mode_label}</span> <span class="muted small">score ${f.score}</span></div>
+      <div class="kv">
+        <span class="k">Architecture</span><span class="v">${esch(p.architecture||'–')}</span>
+        <span class="k">Parameters</span><span class="v">${p.parameter_count} (${p.params_b}B)</span>
+        <span class="k">Quantization</span><span class="v">${esch(p.quantization||'–')}</span>
+        <span class="k">Context length</span><span class="v">${p.context_length?fmtNum(p.context_length):'–'}</span>
+        <span class="k">Layers</span><span class="v">${fmtNum(p.num_hidden_layers)}</span>
+        <span class="k">Heads (q/kv)</span><span class="v">${p.num_attention_heads}/${p.num_key_value_heads}</span>
+        ${p.is_moe?`<span class="k">Experts</span><span class="v">${p.expert_used_count}/${p.expert_count}</span>`:''}
+        <span class="k">File size</span><span class="v">${fmtBytes(p.file_size_bytes)}</span>
+        <span class="k">Memory required</span><span class="v">${f.memory_required_gb} GB</span>
+        <span class="k">Est. speed</span><span class="v">${f.estimated_tps} tok/s</span>
+      </div>
+      <div class="scores" style="margin-top:6px">${scoreBar('Quality',sc.quality)}${scoreBar('Speed',sc.speed)}${scoreBar('Fit',sc.fit)}${scoreBar('Context',sc.context)}</div>`;
+  }catch(e){el.innerHTML='<h3>Precise fit</h3><div class="muted small">'+esch(e.message)+'</div>';}
 }
 async function runPlan(){
   let body={model:SEL.name,context:+$('#pl-ctx').value||8192,quant:$('#pl-quant').value||undefined};
@@ -418,7 +462,7 @@ function switchTab(t){$$('nav.tabs button').forEach(b=>b.classList.toggle('activ
   if(t==='local'||t==='downloads')loadLocal();
   if(t==='downloads')pollDl();}
 $$('nav.tabs button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
-['#f-search','#f-minfit','#f-runtime','#f-usecase','#f-sort','#f-limit'].forEach(s=>{
+['#f-search','#f-minfit','#f-usecase','#f-sort','#f-limit'].forEach(s=>{
   $(s).addEventListener('input',s==='#f-search'?debounceModels:loadModels);});
 ['#s-ram','#s-vram','#s-cores'].forEach(s=>$(s).addEventListener('change',()=>{
   SIM={ram:$('#s-ram').value,vram:$('#s-vram').value,cores:$('#s-cores').value};loadSystem();loadModels();}));

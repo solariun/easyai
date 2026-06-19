@@ -9,12 +9,14 @@ binary and no network service to babysit. Reachable at
 It does four things:
 
 1. **Recommend** — detects this machine's hardware (RAM / CPU / GPU + VRAM, via
-   ggml) and searches **HuggingFace live** for GGUF models, enriching each with
-   its repo's best GGUF (size → estimated params/quant) and scoring it for
-   **fit / speed / quality** against that hardware (or a *simulated* one). The
-   scoring is a native re-implementation of
-   [LLMFit](https://github.com/AlexsJones/llmfit)'s; because params/quant are
-   inferred from the file (no bundled metadata catalog), the figures are estimates.
+   ggml) and keeps a **static list of the top GGUF models on HuggingFace**
+   (rebuilt on startup, lazily after 1 hour, and on a **Refresh** button),
+   scoring each for **fit / speed / quality** against that hardware (or a
+   *simulated* one). List-level params/quant are estimated from the repo name;
+   **clicking a model reads its remote GGUF header (an HTTP range request) for a
+   precise fit**. Scoring is a native re-implementation of
+   [LLMFit](https://github.com/AlexsJones/llmfit)'s. The runtime is fixed to
+   **llama.cpp / GGUF**.
 2. **Local models** — lists the `.gguf` files in your model directory; click one
    to open a panel with **all of its parameters** (read straight from the GGUF
    header — architecture, params, layers, heads, quant, context…), whether it
@@ -134,12 +136,14 @@ the server's `api_key` Bearer auth on `/v1/*`.
 - **Hardware simulation** — enter RAM / VRAM / CPU-core values to re-score every
   model *as if* the box had that hardware (handy before you buy or upgrade).
   **Reset sim** clears it.
-- **Filters** — search, minimum fit, runtime, use case, sort, limit.
+- **Filters** — search, minimum fit, use case, sort, limit. **Refresh list**
+  rebuilds the snapshot from HuggingFace.
 - **Table** — params, **fit** (colour-coded), run mode, score, est. tok/s, memory
-  utilisation, context. Click a row for the detail drawer: score breakdown,
-  notes, a **hardware plan** (context/quant → minimum & recommended hardware +
-  KV-cache alternatives), and the model's **GGUF sources** (each jumps to the
-  Downloads tab pre-filled).
+  utilisation, HF downloads. Click a row for the detail drawer: a **Precise fit**
+  card (loaded by reading the model's remote GGUF header), a score breakdown, a
+  **hardware plan** (context/quant → minimum & recommended hardware + KV-cache
+  alternatives), and the model's **GGUF sources** (each jumps to the Downloads
+  tab pre-filled).
 
 ### Local models tab
 
@@ -207,7 +211,9 @@ is set.
 | GET | `/models/api/auth` | `{authed, required, source, status, download_dir}` (open). |
 | POST | `/models/api/login` / `logout` | `{"password":"…"}` → sets / clears the cookie. |
 | GET | `/models/api/system` | Detected/simulated hardware. Query: `ram_gb`, `vram_gb`, `cpu_cores`. |
-| GET | `/models/api/models` | Live HuggingFace GGUF results, fit-scored. Query: `search`, `min_fit`, `runtime`, `use_case`, `sort` (`score`/`tps`/`params`/`mem`/`downloads`/`likes`), `limit`, + the sim params. |
+| GET | `/models/api/models` | The scored model snapshot. Query: `search`, `min_fit`, `use_case`, `sort` (`score`/`tps`/`params`/`mem`/`downloads`/`likes`), `limit`, + sim params. Envelope also carries `refreshing`, `last_refresh`, `stale`. |
+| POST | `/models/api/refresh` | Rebuild the static model list from HuggingFace (runs in the background). |
+| GET | `/models/api/hf/detail?repo=<repo>` | Precise fit for a HF model — reads its remote GGUF header (HTTP range). |
 | POST | `/models/api/plan` | `{model, context, quant?, kv_quant?, ram_gb?, vram_gb?, cpu_cores?}` → min/recommended hardware + KV alternatives. |
 | GET | `/models/api/local` | `{dir, models:[{name, size_bytes, mtime, is_current}]}`. |
 | GET | `/models/api/local/detail?file=<name>` | GGUF params + fit + `[MODEL_*]` profile for one local model. |
@@ -232,14 +238,17 @@ curl -s -b cj -X POST $B/models/api/run -H 'Content-Type: application/json' -d '
 
 ## 9. The model source & scoring fidelity
 
-- **Source:** the Recommend list is the **live HuggingFace listing**
-  (`/api/models?filter=gguf`, sorted by downloads or your chosen field). Each
-  result is enriched by listing its repo's GGUF files to find the best quant and
-  its size; **params are inferred from the repo name (e.g. `…-7B`) or the file
-  size, and quant from the filename** — so the figures are estimates (a small
-  model's file is mostly embeddings, so size→params can be off; MoE layout and
-  context length are unknown). Results are fetched in parallel and cached per
-  repo for the session. There is no bundled catalog and nothing to update.
+- **Source:** the Recommend list is a **static snapshot of the top ~100 GGUF
+  models** on HuggingFace (`/api/models?filter=gguf&sort=downloads`), held in
+  memory. It is rebuilt **on startup**, **lazily when accessed if >1 h old**, and
+  on demand via the **Refresh list** button — each rebuild is a single HF API
+  call. While a rebuild runs the UI shows a "Rebuilding…" banner.
+- **List vs detail accuracy:** in the list, **params are inferred from the repo
+  name (e.g. `…-7B`)** and quant defaults to Q4_K_M (the scorer still picks the
+  best quant that fits). **Clicking a model** fetches its repo's best GGUF and
+  **reads the remote GGUF header via an HTTP range request** (no full download),
+  recovering the real architecture / params / context length / layers / heads
+  for a **precise fit** — shown in the "Precise fit" card of the detail panel.
 - **Scoring** is a faithful native port of llmfit's memory model, fit levels,
   quant selection, tok/s estimation and the four score components (quality /
   speed / fit / context), with llmfit's constants. A few exotic branches (full
