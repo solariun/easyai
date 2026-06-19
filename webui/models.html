@@ -64,7 +64,7 @@
   tbody tr:hover{background:#23292b}
   tbody tr.sel{background:#262d2f;box-shadow:inset 2px 0 0 var(--acc)}
   td.num,th.num{text-align:right;font-family:var(--mono)}
-  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;border:1px solid}
+  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;border:1px solid;white-space:nowrap}
   .pill.perfect{color:var(--perfect);border-color:rgba(73,183,255,.4);background:rgba(73,183,255,.1)}
   .pill.good{color:var(--good);border-color:rgba(94,194,122,.4);background:rgba(94,194,122,.1)}
   .pill.marginal{color:var(--marg);border-color:rgba(232,196,90,.4);background:rgba(232,196,90,.1)}
@@ -317,6 +317,7 @@ async function loadDetail(){
   $('#detail').innerHTML=`
     <h2>${esch(m.name)}</h2>
     <div class="muted small">${esch(m.provider||'')} · ${esch(m.category||'')}${date?' · updated '+date:''}</div>
+    <div class="small" style="margin-top:3px"><a href="https://hf.co/${encodeURI(m.name)}" target="_blank" rel="noopener noreferrer">↗ huggingface.co/${esch(m.name)}</a></div>
     <div style="margin:8px 0"><span class="pill ${f.fit_level}">${f.fit_label}</span>
       <span class="pill ghost">${f.run_mode_label}</span><span class="pill ghost">llama.cpp</span>
       <span class="muted small">score ${f.score} · ${f.estimated_tps} tok/s</span></div>
