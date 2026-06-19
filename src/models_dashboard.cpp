@@ -86,6 +86,7 @@ std::int64_t now_sec() {
 constexpr std::int64_t kSnapshotTtlSec = 3600;   // auto-refresh after 1 hour
 constexpr int          kSnapshotSize   = 100;    // top-N GGUF repos in the list
 constexpr std::uint32_t kFitContext    = 131072; // 128K — the context fit is judged at
+constexpr long         kGgufHeaderBytes = 16 * 1024 * 1024; // range-read budget for a remote GGUF header
 
 // Pull a params figure (billions) out of a repo name ("…-7B…", "…-0.5B",
 // "…-500M"): the largest token wins. nullopt if none.
@@ -1136,6 +1137,17 @@ int quant_rank(const std::string & filename) {
     for (int i = 0; i < n; ++i) if (uc.find(order[i]) != std::string::npos) return i;
     return n + 1;
 }
+// Shard position of a split GGUF ("…-00002-of-00003.gguf" -> {2,3}); {0,0} when
+// not a shard. Only shard 1 carries the full KV header — later shards hold just
+// tensor weights + a minimal split header, so the header read must target it.
+std::pair<int, int> shard_index(const std::string & path) {
+    static const std::regex re(R"(-(\d{5})-of-(\d{5})\.gguf$)", std::regex::icase);
+    std::smatch m; std::string bn = base_name(path);
+    if (std::regex_search(bn, m, re)) {
+        try { return { std::stoi(m[1].str()), std::stoi(m[2].str()) }; } catch (...) {}
+    }
+    return { 0, 0 };
+}
 
 #if defined(EASYAI_HAVE_CURL)
 void ensure_curl_global() {
@@ -1274,8 +1286,15 @@ std::string ModelsEngine::hf_detail_json(const std::string & repo, const std::st
     std::string treeurl = "https://huggingface.co/api/models/" + repo + "/tree/main?recursive=true";
     std::string body, err;
     if (!curl_get_string(treeurl, body, err)) return "{\"error\":\"HuggingFace: " + err + "\"}";
-    std::string best_path; std::uint64_t bsize = 0; int best_rank = 1 << 30;
-    std::map<std::string, std::uint64_t> avail;   // quant -> representative size
+    // Pass 1 — collapse shards into FAMILIES (the family base is the path minus
+    // the "-NNNNN-of-NNNNN" suffix). A repo carries many variants that share a
+    // quant token (Q6_K, UD-Q6_K, UD-Q6_K_XL …), each its own multi-shard set;
+    // a family is one downloadable model, so its size is the sum of ITS shards.
+    // A split GGUF keeps the full KV header (arch/layers/heads/context/experts)
+    // ONLY in shard 1 — later, larger shards hold tensor weights and a minimal
+    // split header, so reading "the biggest file" yields a metadata-less GGUF.
+    struct Family { std::uint64_t total = 0; std::string header_path; int header_idx = 1 << 30; };
+    std::map<std::string, Family> fams;
     try {
         auto j = nlohmann::json::parse(body);
         if (j.is_array()) for (auto & e : j) {
@@ -1283,24 +1302,62 @@ std::string ModelsEngine::hf_detail_json(const std::string & repo, const std::st
             std::string path = e.value("path", std::string());
             if (!ends_with_ci(path, ".gguf")) continue;
             std::uint64_t sz = e.value("size", (std::uint64_t) 0);
-            std::string fq = quant_from_filename(base_name(path));
-            if (!fq.empty()) { auto it = avail.find(fq); if (it == avail.end() || sz > it->second) avail[fq] = sz; }
-            int rk = quant_rank(base_name(path));
-            if (rk < best_rank || (rk == best_rank && sz > bsize)) { best_rank = rk; best_path = path; bsize = sz; }
+            Family & fa = fams[family_base(path)];
+            fa.total += sz;
+            std::pair<int, int> sh = shard_index(path);
+            int idx = sh.second ? sh.first : 1;           // a lone file acts as shard 1
+            if (idx < fa.header_idx) { fa.header_idx = idx; fa.header_path = path; }
         }
     } catch (...) {}
-    if (best_path.empty()) return "{\"error\":\"no .gguf files in " + repo + "\"}";
+    if (fams.empty()) return "{\"error\":\"no .gguf files in " + repo + "\"}";
 
-    std::string best_quant = quant_from_filename(base_name(best_path));
-    if (best_quant.empty()) best_quant = "Q4_K_M";
+    // Pass 2 — bucket families by quant token for the picker, keeping the
+    // smallest (plainest, non-XL) family of each token as its representative, so
+    // a token maps to one real variant's size — not a sum across variants.
+    // Families whose quant we don't recognize (MXFP4, TQ1_0, …-XL, exotic IQ)
+    // are skipped rather than dumped into a default bucket, which would corrupt
+    // that bucket's size with an unrelated variant.
+    struct QuantAgg { std::uint64_t total = 0; std::string header_path; int rank = 1 << 30; };
+    std::map<std::string, QuantAgg> byq;
+    for (const auto & kvp : fams) {
+        const Family & fa = kvp.second;
+        std::string fq = quant_from_filename(base_name(kvp.first));
+        if (fq.empty()) continue;
+        QuantAgg & ag = byq[fq];
+        ag.rank = std::min(ag.rank, quant_rank(base_name(kvp.first)));
+        if (ag.header_path.empty() || fa.total < ag.total) { ag.total = fa.total; ag.header_path = fa.header_path; }
+    }
+    // Fallback: a repo whose every file has an unconventional name (a lone
+    // "model.gguf", or only MXFP4/TQ variants) — bucket the largest family under
+    // its own label so the header still reads and the panel still renders.
+    if (byq.empty()) {
+        const std::string * fb = nullptr; const Family * fa = nullptr;
+        for (const auto & kvp : fams)
+            if (!fa || kvp.second.total > fa->total) { fa = &kvp.second; fb = &kvp.first; }
+        std::string lbl = quant_from_filename(base_name(*fb));
+        if (lbl.empty()) lbl = "GGUF";
+        byq[lbl] = QuantAgg{ fa->total, fa->header_path, quant_rank(base_name(*fb)) };
+    }
+
+    // best quant = best quality rank (ties broken by larger total size).
+    std::string best_quant; const QuantAgg * best = nullptr;
+    for (const auto & kvp : byq) {
+        const QuantAgg & ag = kvp.second;
+        if (!best || ag.rank < best->rank || (ag.rank == best->rank && ag.total > best->total)) {
+            best = &ag; best_quant = kvp.first;
+        }
+    }
     std::string chosen = !want_quant.empty() ? want_quant : best_quant;
+    std::uint64_t best_total   = best->total;                                   // for the quant-independent param estimate
+    std::uint64_t chosen_total = byq.count(chosen) ? byq[chosen].total : best_total; // what the user would download
 
-    // 2. read the remote GGUF header (range request). arch/params/layers are
-    //    quant-independent, so always read the best file once.
-    GgufMeta g; g.file_size = bsize;
-    std::string fileurl = "https://huggingface.co/" + repo + "/resolve/main/" + best_path;
+    // 2. read the GGUF header from shard 1 of the best quant (range request, so
+    //    we never pull the multi-GB weights). arch/params/layers are quant-
+    //    independent, so reading the best quant's header once is enough.
+    GgufMeta g; g.file_size = best_total;
+    std::string fileurl = "https://huggingface.co/" + repo + "/resolve/main/" + best->header_path;
     std::string buf;
-    if (curl_get_range(fileurl, 12 * 1024 * 1024, buf, err) && !buf.empty()) {
+    if (curl_get_range(fileurl, kGgufHeaderBytes, buf, err) && !buf.empty()) {
         gguf_init_params p; p.no_alloc = true; p.ctx = nullptr;
         gguf_context * gc = gguf_init_from_buffer(buf.data(), buf.size(), p);
         if (gc) { extract_gguf_meta(gc, g); gguf_free(gc); }
@@ -1317,7 +1374,10 @@ std::string ModelsEngine::hf_detail_json(const std::string & repo, const std::st
     m.has_active_experts = g.expert_used > 0;
     if (g.has_params) { m.parameters_raw = g.parameters; m.has_params_raw = true; }
     else { auto pn = params_from_name(repo);
-           double pb0 = pn ? *pn : (bsize > 0 ? (double) bsize / quant_bpp(chosen) / 1e9 : 7.0);
+           // estimate from the best quant's TOTAL size paired with its own
+           // bytes-per-weight (never the user-chosen quant — that mixes a size
+           // and a bpp from two different quants and skews the count).
+           double pb0 = pn ? *pn : (best_total > 0 ? (double) best_total / quant_bpp(best_quant) / 1e9 : 7.0);
            m.parameters_raw = (std::uint64_t) (pb0 * 1e9); m.has_params_raw = true; }
     double pb = m.params_b();
     char pc[32];
@@ -1331,7 +1391,7 @@ std::string ModelsEngine::hf_detail_json(const std::string & repo, const std::st
 
     // fit at the chosen quant + context.
     FitRow r = score_model(m, s, want_ctx, "", chosen);
-    r.file_size = bsize;
+    r.file_size = chosen_total;
 
     // hardware plan at the chosen quant + context.
     double model_mem = estimate_memory_gb(m, chosen, fit_ctx);
@@ -1354,8 +1414,10 @@ std::string ModelsEngine::hf_detail_json(const std::string & repo, const std::st
         {"kv_alternatives", kv_alts},
     };
 
-    // available quants for the picker (best-quality first).
-    std::vector<std::pair<std::string, std::uint64_t>> aq(avail.begin(), avail.end());
+    // available quants for the picker (best-quality first), each sized by its
+    // representative variant's shards.
+    std::vector<std::pair<std::string, std::uint64_t>> aq;
+    for (const auto & kvp : byq) aq.push_back({ kvp.first, kvp.second.total });
     std::sort(aq.begin(), aq.end(), [](const auto & a, const auto & b) { return quant_rank(a.first) < quant_rank(b.first); });
     ordered_json quants = ordered_json::array();
     for (auto & qp : aq) quants.push_back({ {"quant", qp.first}, {"size_bytes", qp.second} });
@@ -1367,7 +1429,7 @@ std::string ModelsEngine::hf_detail_json(const std::string & repo, const std::st
         {"num_attention_heads", g.n_heads}, {"num_key_value_heads", g.n_kv_heads},
         {"head_dim", g.head_dim}, {"embedding_length", g.embd}, {"vocab_size", g.vocab},
         {"expert_count", g.expert_count}, {"expert_used_count", g.expert_used},
-        {"is_moe", m.is_moe}, {"file_size_bytes", bsize}, {"best_file", best_path},
+        {"is_moe", m.is_moe}, {"file_size_bytes", chosen_total}, {"best_file", best->header_path},
     };
     ordered_json out = {
         {"repo", repo}, {"display_name", m.name}, {"gguf_readable", g.ok},
