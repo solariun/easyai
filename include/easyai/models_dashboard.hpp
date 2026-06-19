@@ -69,16 +69,19 @@ public:
         std::string   error;
     };
 
-    // download_dir  — where GGUF weights are downloaded / listed / deleted.
-    // catalog_path  — data/hf_models.json (resolved by the server); empty or
-    //                 missing ⇒ recommendations are unavailable but local
-    //                 models + downloads still work.
+    // download_dir  — where GGUF weights are downloaded / listed / deleted, and
+    //                 where a network-updated catalog copy is cached.
+    // catalog_path  — bundled/installed data/hf_models.json (resolved by the
+    //                 server); empty or missing ⇒ recommendations are
+    //                 unavailable but local models + downloads still work.
+    // catalog_url   — source for update_catalog() (the upstream llmfit raw
+    //                 hf_models.json by default); empty disables updates.
     // ini           — borrowed pointer to the server's parsed INI (for
     //                 [MODEL_*] profile lookups); may be null.
     // current_model — getter returning the absolute path of the model the
     //                 engine is currently serving (to flag the active model).
     ModelsEngine(std::string download_dir, std::string catalog_path,
-                 const config::Ini * ini,
+                 std::string catalog_url, const config::Ini * ini,
                  std::function<std::string()> current_model);
     ~ModelsEngine();
 
@@ -88,6 +91,12 @@ public:
     bool        catalog_loaded() const;
     std::size_t catalog_size()   const;
     std::string status_message() const;
+    std::string catalog_source() const;          // path the catalog was loaded from
+    const std::string & catalog_url() const { return catalog_url_; }
+    // Fetch the catalog from catalog_url_, validate it, cache it in the
+    // download dir, and hot-reload it in place. Returns false + err on any
+    // failure (the previous catalog stays intact).
+    bool update_catalog(std::string & err);
 
     // ---- JSON endpoints (raw query string / body in, JSON out) ----
     // `query` is the request's URL query (e.g. "search=qwen&min_fit=good&ram_gb=64").
@@ -120,14 +129,19 @@ private:
     void download_worker(int id, std::string repo, std::vector<RepoFile> files);
 
     std::string                   download_dir_;
-    std::string                   catalog_path_;
+    std::string                   catalog_path_;     // bundled/installed copy
+    std::string                   catalog_url_;      // network source for updates
+    std::string                   catalog_source_;   // path actually loaded
     const config::Ini *           ini_ = nullptr;
     std::function<std::string()>  current_model_;
     std::string                   status_;
 
-    // catalogue (opaque pImpl-ish vector lives in the .cpp via a forward type)
+    // catalogue (opaque pImpl-ish vector lives in the .cpp via a forward type).
+    // catalog_mu_ guards reads (models_json / plan_json hold pointers into the
+    // vector) against the hot-swap in update_catalog().
     struct Catalog;
     std::unique_ptr<Catalog>      catalog_;
+    std::mutex                    catalog_mu_;
 
     // download manager
     std::mutex         dl_start_mu_;     // serializes start_download()

@@ -147,6 +147,7 @@
       <label>Sim VRAM GB<input id="s-vram" type="number" min="0" placeholder="auto" style="width:80px"></label>
       <label>Sim cores<input id="s-cores" type="number" min="0" placeholder="auto" style="width:70px"></label>
       <label>&nbsp;<button class="btn" onclick="resetSim()">Reset sim</button></label>
+      <label>&nbsp;<button class="btn" id="updBtn" onclick="updateCatalog()" title="Fetch the latest model catalog from the network">Update catalog</button></label>
     </div>
     <div class="row">
       <div class="grow panel" style="padding:0;overflow:hidden">
@@ -423,6 +424,13 @@ $$('nav.tabs button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
 ['#s-ram','#s-vram','#s-cores'].forEach(s=>$(s).addEventListener('change',()=>{
   SIM={ram:$('#s-ram').value,vram:$('#s-vram').value,cores:$('#s-cores').value};loadSystem();loadModels();}));
 function resetSim(){SIM={};$('#s-ram').value=$('#s-vram').value=$('#s-cores').value='';loadSystem();loadModels();}
+async function updateCatalog(){
+  let b=$('#updBtn'),old=b.textContent;b.disabled=true;b.innerHTML='<span class="spin"></span> Updating…';
+  try{let d=await api('/models/api/catalog/update',{method:'POST'});
+    toast('Catalog updated — '+d.catalog_size+' models');await loadModels();}
+  catch(e){toast('Update failed: '+e.message,true);}
+  finally{b.disabled=false;b.textContent=old;}
+}
 
 async function boot(){try{await loadSystem();await loadModels();}catch(e){}}
 async function init(){

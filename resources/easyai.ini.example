@@ -200,6 +200,12 @@
 ; absent; only the recommendation panels need it.
 ;models_catalog    = /etc/easyai/hf_models.json
 
+; Network source for the dashboard's "Update catalog" button (and the
+; POST /models/api/catalog/update endpoint). Defaults to the upstream
+; llmfit catalog. The fetched copy is cached in download_dir and is
+; preferred over the bundled one on the next start.
+;models_catalog_url = https://raw.githubusercontent.com/AlexsJones/llmfit/main/llmfit-core/data/hf_models.json
+
 ; ============================================================
 ; [ENGINE] — model loading + inference tunables
 ; ============================================================

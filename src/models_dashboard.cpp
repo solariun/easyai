@@ -920,23 +920,33 @@ GgufMeta read_gguf_meta(const std::string & path) {
 // ModelsEngine
 // ===========================================================================
 ModelsEngine::ModelsEngine(std::string download_dir, std::string catalog_path,
-                           const config::Ini * ini, std::function<std::string()> current_model)
+                           std::string catalog_url, const config::Ini * ini,
+                           std::function<std::string()> current_model)
     : download_dir_(std::move(download_dir)),
       catalog_path_(std::move(catalog_path)),
+      catalog_url_(std::move(catalog_url)),
       ini_(ini),
       current_model_(std::move(current_model)),
       catalog_(std::make_unique<Catalog>()) {
-    if (!catalog_path_.empty()) {
+    // Prefer a network-updated copy cached in the download dir over the
+    // bundled/installed catalog, so an Update persists across restarts.
+    std::error_code ec;
+    std::string cache = download_dir_.empty() ? std::string() : (download_dir_ + "/hf_models.json");
+    std::string load_from;
+    if (!cache.empty() && fs::exists(cache, ec)) load_from = cache;
+    else if (!catalog_path_.empty())             load_from = catalog_path_;
+    if (!load_from.empty()) {
         std::string err;
-        if (load_catalog(catalog_path_, catalog_->models, err)) {
+        if (load_catalog(load_from, catalog_->models, err)) {
+            catalog_source_ = load_from;
             status_ = "catalog loaded: " + std::to_string(catalog_->models.size()) + " models";
-            easyai::log::write("[models] %s (%s)\n", status_.c_str(), catalog_path_.c_str());
+            easyai::log::write("[models] %s (%s)\n", status_.c_str(), load_from.c_str());
         } else {
             status_ = "catalog unavailable: " + err;
             easyai::log::error("[models] %s\n", status_.c_str());
         }
     } else {
-        status_ = "no catalog path configured";
+        status_ = "no catalog found (use Update to fetch one)";
     }
 }
 ModelsEngine::~ModelsEngine() {
@@ -947,6 +957,7 @@ ModelsEngine::~ModelsEngine() {
 bool ModelsEngine::catalog_loaded() const { return catalog_ && !catalog_->models.empty(); }
 std::size_t ModelsEngine::catalog_size() const { return catalog_ ? catalog_->models.size() : 0; }
 std::string ModelsEngine::status_message() const { return status_; }
+std::string ModelsEngine::catalog_source() const { return catalog_source_; }
 
 std::string ModelsEngine::system_json(const std::string & query) {
     auto q = parse_query(query);
@@ -974,6 +985,9 @@ std::string ModelsEngine::models_json(const std::string & query) {
     int limit = (int) qnum(q, "limit", qnum(q, "n", 50));
     int min_fit_rank = min_fit == "perfect" ? 4 : min_fit == "good" ? 3 : min_fit == "too_tight" ? 1 : 2;
 
+    // Hold the catalog lock through scoring AND JSON emission: FitRow keeps a
+    // pointer into catalog_->models, which update_catalog() may swap.
+    std::lock_guard<std::mutex> lk(catalog_mu_);
     std::vector<FitRow> rows;
     rows.reserve(catalog_->models.size());
     for (const auto & m : catalog_->models) {
@@ -1022,6 +1036,7 @@ std::string ModelsEngine::plan_json(const std::string & body) {
     SystemSpecs s = detect_system();
     apply_sim(s, b.value("ram_gb", -1.0), b.value("vram_gb", -1.0), (int) b.value("cpu_cores", -1));
 
+    std::lock_guard<std::mutex> lk(catalog_mu_);   // `found` points into the catalog
     const ModelEntry * found = nullptr;
     for (const auto & m : catalog_->models) if (to_lower(m.name) == to_lower(name)) { found = &m; break; }
     if (!found) return "{\"error\":\"model '" + name + "' not found\"}";
@@ -1289,6 +1304,30 @@ bool curl_get_string(const std::string & url, std::string & out, std::string & e
     if (code >= 400) { err = "HTTP " + std::to_string(code); return false; }
     return true;
 }
+size_t raw_file_write(char * buf, size_t sz, size_t n, void * ud) {
+    return std::fwrite(buf, 1, sz * n, static_cast<std::FILE *>(ud));
+}
+// Stream a URL straight to a file (no size cap; used for the catalog refresh,
+// which is several MB — too large for the in-memory string helper).
+bool curl_download_file(const std::string & url, const std::string & dest, std::string & err) {
+    ensure_curl_global();
+    std::FILE * fp = std::fopen(dest.c_str(), "wb");
+    if (!fp) { err = "cannot open " + dest; return false; }
+    CURL * c = curl_easy_init();
+    if (!c) { std::fclose(fp); err = "curl_easy_init failed"; return false; }
+    curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, raw_file_write);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, fp);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 120L);
+    curl_easy_setopt(c, CURLOPT_FAILONERROR, 1L);
+    apply_common_curl(c);
+    CURLcode rc = curl_easy_perform(c);
+    long code = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_cleanup(c); std::fclose(fp);
+    if (rc != CURLE_OK) { std::remove(dest.c_str()); err = std::string("curl: ") + curl_easy_strerror(rc); return false; }
+    if (code >= 400)    { std::remove(dest.c_str()); err = "HTTP " + std::to_string(code); return false; }
+    return true;
+}
 struct DlCb {
     std::FILE * fp = nullptr; std::mutex * mu = nullptr;
     ModelsEngine::DownloadStatus * st = nullptr; std::atomic<bool> * cancel = nullptr;
@@ -1310,6 +1349,39 @@ int xfer_cb(void * ud, curl_off_t dltotal, curl_off_t dlnow, curl_off_t, curl_of
 }
 #endif  // EASYAI_HAVE_CURL
 }  // namespace
+
+bool ModelsEngine::update_catalog(std::string & err) {
+#if !defined(EASYAI_HAVE_CURL)
+    err = "server built without libcurl"; return false;
+#else
+    if (catalog_url_.empty()) { err = "no catalog URL configured (set models_catalog_url)"; return false; }
+    // Cache in the download dir (writable by the service) so the update
+    // survives restarts and is preferred over the bundled copy on next boot.
+    std::string target = download_dir_.empty() ? catalog_path_ : (download_dir_ + "/hf_models.json");
+    if (target.empty()) { err = "no writable location for the catalog"; return false; }
+    std::error_code ec; fs::create_directories(fs::path(target).parent_path(), ec);
+    std::string tmp = target + ".tmp";
+
+    easyai::log::write("[models] updating catalog from %s\n", catalog_url_.c_str());
+    if (!curl_download_file(catalog_url_, tmp, err)) return false;
+
+    std::vector<ModelEntry> fresh; std::string perr;
+    if (!load_catalog(tmp, fresh, perr) || fresh.empty()) {
+        std::remove(tmp.c_str());
+        err = "downloaded catalog invalid" + (perr.empty() ? std::string() : (": " + perr));
+        return false;
+    }
+    fs::rename(tmp, target, ec);
+    if (ec) { std::remove(tmp.c_str()); err = "could not save catalog: " + ec.message(); return false; }
+
+    std::size_t n;
+    { std::lock_guard<std::mutex> lk(catalog_mu_); catalog_->models = std::move(fresh); n = catalog_->models.size(); }
+    catalog_source_ = target;
+    status_ = "catalog updated: " + std::to_string(n) + " models";
+    easyai::log::write("[models] %s (%s)\n", status_.c_str(), target.c_str());
+    return true;
+#endif
+}
 
 bool ModelsEngine::hf_repo_files(const std::string & repo, std::vector<RepoFile> & out, std::string & err) {
     out.clear();

@@ -110,6 +110,7 @@ The HTTP layer, paths, tool gating, MCP auth.
 | `webui_password` | string | `--webui-password` | (none — open) | Password gate for the `/models` dashboard and its API. Empty leaves it open. A session cookie, separate from `api_key` (which still guards `/v1/*`). See §7 "MODELS dashboard". |
 | `download_dir` | path | `--download-dir` | (directory of `--model`) | Where the MODELS download manager writes / lists / deletes GGUF weights, and the directory the dashboard introspects + hot-swaps from. Defaults to the folder the loaded model lives in. |
 | `models_catalog` | path | `--models-catalog` | (auto-resolved) | Path to the model catalog `hf_models.json` backing the Recommend tab. Empty searches `data/hf_models.json`, `/etc/easyai`, `/usr/share/easyai`, `/usr/local/share/easyai`. |
+| `models_catalog_url` | string | `--models-catalog-url` | (upstream llmfit raw) | Source URL for the dashboard's **Update catalog** button / `POST /models/api/catalog/update`. The fetched copy is cached in `download_dir` and preferred over the bundled one on next start. |
 | `metrics` | bool | `--metrics` | `off` | Expose Prometheus `/metrics`. |
 | `verbose` | bool | `-v`, `--verbose` | `off` | Noisy logs. Enables HTTP-level `→` / `←` lines per request (with status, duration, bytes, running totals). The periodic `METRICS` line is **independent of verbose** — see `metrics_interval` below. |
 | `metrics_interval` | int | `--metrics-interval` | `300` | Periodic METRICS log line every N seconds, **ALWAYS ON regardless of `verbose`** since 2026-05-09. Reports CPU%, iowait%, load avg, process RSS + peak, system mem, GPU GTT (Linux/AMD), HTTP in-flight + cumulative reqs / err / bytes, fd usage, AND TCP state breakdown with **explicit `TIME_WAIT N/M ephemeral ports (X.X% [elevated\|HIGH\|CRITICAL])`** so socket exhaustion shows up before connections fail. `0` disables. Default `300` (5 min) — low-overhead enough to leave on permanently; bump down (60, 30, 5) when actively troubleshooting. Lives outside Prometheus `/metrics` so you can tail it from journalctl. |
@@ -779,6 +780,7 @@ requires the session cookie when `webui_password` is set):
 | GET | `/models/api/system` | Detected/simulated hardware (`ram_gb`, `vram_gb`, `cpu_cores` to simulate). |
 | GET | `/models/api/models` | Scored catalog (`search`, `min_fit`, `runtime`, `use_case`, `sort`, `limit`, + sim params). |
 | POST | `/models/api/plan` | `{model, context, quant?, kv_quant?, …}` → hardware plan + KV alternatives. |
+| POST | `/models/api/catalog/update` | Fetch the latest catalog from `models_catalog_url`, validate, cache in `download_dir`, and hot-reload it. |
 | GET | `/models/api/local` | List `.gguf` in `download_dir` (`name, size, mtime, is_current`). |
 | GET | `/models/api/local/detail?file=<name>` | GGUF params + fit + `[MODEL_*]` profile for one local model. |
 | POST | `/models/api/local/delete` | `{name}` → delete one (path-guarded; regular files only; not the running one). |

@@ -99,6 +99,7 @@ All keys live in `[SERVER]`; each has a matching CLI flag. Precedence is
 | `webui_password` | `--webui-password` | (empty — open) | Password for `/models` and **all** its API routes. A session cookie, separate from `api_key` (which still guards `/v1/*`). The installer sets it to `0000`. |
 | `download_dir` | `--download-dir` | directory of `--model` | Where GGUF weights are downloaded / listed / deleted, and the directory the dashboard introspects + hot-swaps from. |
 | `models_catalog` | `--models-catalog` | auto-resolved | Path to `hf_models.json`. Empty searches `data/hf_models.json` (dev), then `/etc/easyai`, `/usr/share/easyai`, `/usr/local/share/easyai`. |
+| `models_catalog_url` | `--models-catalog-url` | upstream llmfit raw | Source for the **Update catalog** button / `POST /models/api/catalog/update`. The fetched copy is cached in `download_dir` and preferred on next start. |
 
 ---
 
@@ -207,6 +208,7 @@ is set.
 | GET | `/models/api/system` | Detected/simulated hardware. Query: `ram_gb`, `vram_gb`, `cpu_cores`. |
 | GET | `/models/api/models` | Scored catalog. Query: `search`, `min_fit`, `runtime`, `use_case`, `sort`, `limit`, `include_too_tight`, `max_context`, + the sim params. |
 | POST | `/models/api/plan` | `{model, context, quant?, kv_quant?, ram_gb?, vram_gb?, cpu_cores?}` → min/recommended hardware + KV alternatives. |
+| POST | `/models/api/catalog/update` | Fetch the latest catalog from `models_catalog_url`, validate, cache in `download_dir`, hot-reload. |
 | GET | `/models/api/local` | `{dir, models:[{name, size_bytes, mtime, is_current}]}`. |
 | GET | `/models/api/local/detail?file=<name>` | GGUF params + fit + `[MODEL_*]` profile for one local model. |
 | POST | `/models/api/local/delete` | `{"name":"…"}` → delete one `.gguf`. |
@@ -230,9 +232,13 @@ curl -s -b cj -X POST $B/models/api/run -H 'Content-Type: application/json' -d '
 
 ## 9. The catalogue & scoring fidelity
 
-- **Catalogue:** `data/hf_models.json` (~5,000 models; schema follows llmfit's).
-  Regenerate it from upstream llmfit if you want a fresher list and drop it at one
-  of the resolved paths (or set `models_catalog`).
+- **Catalogue:** `data/hf_models.json` (~5,000 models; schema follows llmfit's),
+  bundled and loaded at startup. Click **Update catalog** in the Recommend tab
+  (or `POST /models/api/catalog/update`) to fetch the latest from
+  `models_catalog_url` (the upstream llmfit raw file by default); the fresh copy
+  is validated, cached in `download_dir`, and preferred on the next start. You
+  can also drop your own `hf_models.json` at any resolved path or set
+  `models_catalog`.
 - **Scoring** is a faithful native port of llmfit's memory model, fit levels,
   quant selection, tok/s estimation and the four score components (quality /
   speed / fit / context), with llmfit's constants. A few exotic branches (full

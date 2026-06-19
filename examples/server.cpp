@@ -3888,6 +3888,8 @@ struct ServerArgs {
     std::string download_dir;            // where GGUF weights are downloaded /
                                          // listed / deleted. Default: dir of --model.
     std::string models_catalog;          // path to hf_models.json; empty = auto-resolve.
+    std::string models_catalog_url =     // network source for "Update catalog"
+        "https://raw.githubusercontent.com/AlexsJones/llmfit/main/llmfit-core/data/hf_models.json";
     std::string webui_password;          // gates /models + its API; empty = open.
 
     // /mcp auth — by INI's [MCP_USER] when populated, OPEN otherwise.
@@ -4098,6 +4100,7 @@ static const std::vector<FlagDef> & kFlags() {
         // ----- MODELS dashboard (SERVER) -----
         { {"--download-dir"},      "SERVER", "download_dir",    "download_dir",   true,  SET_STR(&ServerArgs::download_dir) },
         { {"--models-catalog"},    "SERVER", "models_catalog",  "models_catalog", true,  SET_STR(&ServerArgs::models_catalog) },
+        { {"--models-catalog-url"},"SERVER", "models_catalog_url","models_catalog_url",true, SET_STR(&ServerArgs::models_catalog_url) },
         { {"--webui-password"},    "SERVER", "webui_password",  "webui_password", true,  SET_STR(&ServerArgs::webui_password) },
         { {"--webui"},             "SERVER", "webui_mode",     "webui_mode",     true,  SET_STR(&ServerArgs::webui_mode) },
 
@@ -7053,7 +7056,7 @@ int main(int argc, char ** argv) {
         ctx->session_token  = gen_session_token();
         ServerCtx * ctxp = ctx.get();
         ctx->models = std::make_unique<easyai::ModelsEngine>(
-            dl_dir, cat, &ini_config,
+            dl_dir, cat, args.models_catalog_url, &ini_config,
             [ctxp]() -> std::string { return ctxp->engine.model_path(); });
         std::fprintf(stderr,
             "[easyai-server] models: %s\n"
@@ -7505,6 +7508,8 @@ int main(int argc, char ** argv) {
             {"required",       !ctx_ref.webui_password.empty()},
             {"catalog_loaded", have && ctx_ref.models->catalog_loaded()},
             {"catalog_size",   have ? (int) ctx_ref.models->catalog_size() : 0},
+            {"catalog_source", have ? ctx_ref.models->catalog_source() : std::string()},
+            {"catalog_url",    have ? ctx_ref.models->catalog_url() : std::string()},
             {"status",         have ? ctx_ref.models->status_message()
                                     : std::string("engine not initialised")},
             {"download_dir",   have ? ctx_ref.models->download_dir() : std::string()},
@@ -7557,6 +7562,21 @@ int main(int argc, char ** argv) {
         if (!models_require_auth(ctx_ref, req, res)) return;
         if (!models_ready(res)) return;
         res.set_content(ctx_ref.models->plan_json(req.body), "application/json");
+    });
+    // Fetch the latest catalog from models_catalog_url, cache it, hot-reload it.
+    svr.Post("/models/api/catalog/update", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        std::string err;
+        if (!ctx_ref.models->update_catalog(err)) {
+            res.status = 502;
+            res.set_content(error_json(err, "bad_gateway"), "application/json");
+            return;
+        }
+        nlohmann::ordered_json j{{"ok", true},
+            {"catalog_size", (int) ctx_ref.models->catalog_size()},
+            {"status", ctx_ref.models->status_message()}};
+        res.set_content(j.dump(), "application/json");
     });
 
     // ---- local model directory: list / detail / delete ----
