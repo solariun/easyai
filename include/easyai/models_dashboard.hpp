@@ -5,10 +5,11 @@
 // three jobs:
 //
 //   1. RECOMMEND — detect this machine's hardware (RAM / CPU / GPU+VRAM via
-//      ggml), score a bundled catalogue of LLMs (data/hf_models.json) for
-//      fit / speed / quality / context against that hardware (or a simulated
-//      one), and answer the model/system/plan queries the UI makes. This is
-//      a native re-implementation of llmfit's scoring engine.
+//      ggml), search HuggingFace live for GGUF models, enrich each with its
+//      repo's best GGUF (size → estimated params/quant), and score it for
+//      fit / speed / quality against that hardware (or a simulated one). The
+//      scoring is a native re-implementation of llmfit's; the params/quant are
+//      estimated from the file, so the figures are approximate.
 //
 //   2. LOCAL MODELS — list the .gguf files in the download directory, read
 //      each one's parameters straight from the GGUF header (no weights
@@ -69,39 +70,30 @@ public:
         std::string   error;
     };
 
-    // download_dir  — where GGUF weights are downloaded / listed / deleted, and
-    //                 where a network-updated catalog copy is cached.
-    // catalog_path  — bundled/installed data/hf_models.json (resolved by the
-    //                 server); empty or missing ⇒ recommendations are
-    //                 unavailable but local models + downloads still work.
-    // catalog_url   — source for update_catalog() (the upstream llmfit raw
-    //                 hf_models.json by default); empty disables updates.
+    // download_dir  — where GGUF weights are downloaded / listed / deleted.
     // ini           — borrowed pointer to the server's parsed INI (for
     //                 [MODEL_*] profile lookups); may be null.
     // current_model — getter returning the absolute path of the model the
     //                 engine is currently serving (to flag the active model).
-    ModelsEngine(std::string download_dir, std::string catalog_path,
-                 std::string catalog_url, const config::Ini * ini,
+    //
+    // The Recommend tab sources models LIVE from the HuggingFace listing API
+    // (/api/models?filter=gguf) rather than a bundled catalog: each result is
+    // enriched with its repo's best GGUF (size → estimated params/quant) and
+    // scored against detected hardware. Results are cached per repo for the
+    // session.
+    ModelsEngine(std::string download_dir, const config::Ini * ini,
                  std::function<std::string()> current_model);
     ~ModelsEngine();
 
     ModelsEngine(const ModelsEngine &)             = delete;
     ModelsEngine & operator=(const ModelsEngine &) = delete;
 
-    bool        catalog_loaded() const;
-    std::size_t catalog_size()   const;
     std::string status_message() const;
-    std::string catalog_source() const;          // path the catalog was loaded from
-    const std::string & catalog_url() const { return catalog_url_; }
-    // Fetch the catalog from catalog_url_, validate it, cache it in the
-    // download dir, and hot-reload it in place. Returns false + err on any
-    // failure (the previous catalog stays intact).
-    bool update_catalog(std::string & err);
 
     // ---- JSON endpoints (raw query string / body in, JSON out) ----
     // `query` is the request's URL query (e.g. "search=qwen&min_fit=good&ram_gb=64").
     std::string system_json(const std::string & query);
-    std::string models_json(const std::string & query);
+    std::string models_json(const std::string & query);       // live HF search
     std::string plan_json(const std::string & body);          // POST body
     std::string local_models_json();                          // list
     std::string local_model_json(const std::string & filename,
@@ -129,19 +121,15 @@ private:
     void download_worker(int id, std::string repo, std::vector<RepoFile> files);
 
     std::string                   download_dir_;
-    std::string                   catalog_path_;     // bundled/installed copy
-    std::string                   catalog_url_;      // network source for updates
-    std::string                   catalog_source_;   // path actually loaded
     const config::Ini *           ini_ = nullptr;
     std::function<std::string()>  current_model_;
     std::string                   status_;
 
-    // catalogue (opaque pImpl-ish vector lives in the .cpp via a forward type).
-    // catalog_mu_ guards reads (models_json / plan_json hold pointers into the
-    // vector) against the hot-swap in update_catalog().
-    struct Catalog;
-    std::unique_ptr<Catalog>      catalog_;
-    std::mutex                    catalog_mu_;
+    // Per-repo cache of enriched HF entries (opaque pImpl; real type in the
+    // .cpp), so re-filtering / re-sorting doesn't re-hit the HF API.
+    struct HfCache;
+    std::unique_ptr<HfCache>      hf_cache_;
+    std::mutex                    hf_cache_mu_;
 
     // download manager
     std::mutex         dl_start_mu_;     // serializes start_download()

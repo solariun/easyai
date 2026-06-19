@@ -9,9 +9,12 @@ binary and no network service to babysit. Reachable at
 It does four things:
 
 1. **Recommend** — detects this machine's hardware (RAM / CPU / GPU + VRAM, via
-   ggml) and scores a bundled catalogue of ~5,000 models for **fit / speed /
-   quality / context** against that hardware (or a *simulated* one). A native
-   re-implementation of [LLMFit](https://github.com/AlexsJones/llmfit)'s scoring.
+   ggml) and searches **HuggingFace live** for GGUF models, enriching each with
+   its repo's best GGUF (size → estimated params/quant) and scoring it for
+   **fit / speed / quality** against that hardware (or a *simulated* one). The
+   scoring is a native re-implementation of
+   [LLMFit](https://github.com/AlexsJones/llmfit)'s; because params/quant are
+   inferred from the file (no bundled metadata catalog), the figures are estimates.
 2. **Local models** — lists the `.gguf` files in your model directory; click one
    to open a panel with **all of its parameters** (read straight from the GGUF
    header — architecture, params, layers, heads, quant, context…), whether it
@@ -35,24 +38,25 @@ It does four things:
 ```
 Browser ──/models (page) ────────────► embedded webui/models.html (vanilla JS)
         ──/models/api/login,/auth ────► cookie-session gate (examples/server.cpp)
-        ──/models/api/system,/models ─► ModelsEngine: ggml hardware + catalog scoring
+        ──/models/api/system,/models ─► ModelsEngine: ggml hardware + live HF + scoring
         ──/models/api/local{,/detail} ► ModelsEngine: GGUF header introspection + [MODEL_*]
         ──/models/api/run ────────────► Engine::reload() in-process + ai.gguf symlink
         ──/models/api/download* ──────► ModelsEngine: libcurl → HuggingFace
 chat webui ──(injected "MODELS" pill)─► /models
 ```
 
-- **No external dependency.** Hardware is detected through ggml
-  (`ggml_backend_dev_memory` for VRAM) + the OS (RAM/CPU). The catalogue is the
-  bundled `data/hf_models.json`. Fit/speed/quality scoring, the hardware plan,
-  and GGUF metadata reading are all native C++.
+- **No external dependency, no catalog file.** Hardware is detected through ggml
+  (`ggml_backend_dev_memory` for VRAM) + the OS (RAM/CPU). The Recommend list is
+  the **live HuggingFace listing** (`/api/models?filter=gguf`); each result is
+  enriched by listing its repo's GGUF files (libcurl) — done in parallel and
+  cached per repo for the session. Scoring, the hardware plan, and GGUF
+  introspection are all native C++.
 - **Hot-swap is in-process.** `Engine::reload()` tears down the current model
   (model, context, sampler, chat templates) and loads the new one under the
   engine lock — in-flight chats finish first, then the swap happens; the HTTP
   server and the dashboard you're looking at stay up.
-- **Graceful catalogue degradation.** If `hf_models.json` can't be found, the
-  page still loads and **Local models** + **Downloads** work fully; only the
-  Recommend tab is limited.
+- **Graceful degradation.** If HuggingFace is unreachable the Recommend tab
+  shows an error, but **Local models** + **Downloads** + **Run** work fully.
 
 Implementation: [`src/models_dashboard.cpp`](src/models_dashboard.cpp) +
 [`include/easyai/models_dashboard.hpp`](include/easyai/models_dashboard.hpp) (the
@@ -68,9 +72,8 @@ Implementation: [`src/models_dashboard.cpp`](src/models_dashboard.cpp) +
 ### Installed via `install_easyai_server.sh`
 
 The Linux installer writes the keys below into `/etc/easyai/easyai.ini` with
-`webui_password = 0000` by default, points `download_dir` at the models
-directory, and copies the catalogue to `/etc/easyai/hf_models.json`. Override the
-password at install time:
+`webui_password = 0000` by default and points `download_dir` at the models
+directory. Override the password at install time:
 
 ```sh
 ./install_easyai_server.sh --webui-password 's3cret'
@@ -82,7 +85,7 @@ password at install time:
 easyai-server -m models/your-model.gguf \
   --download-dir ./models \
   --webui-password 's3cret'
-# (run from the repo so data/hf_models.json auto-resolves, or pass --models-catalog)
+# The Recommend tab queries HuggingFace live — nothing else to configure.
 ```
 
 Then open `/models` (or click the MODELS pill in the chat UI).
@@ -98,8 +101,6 @@ All keys live in `[SERVER]`; each has a matching CLI flag. Precedence is
 | --- | --- | --- | --- |
 | `webui_password` | `--webui-password` | (empty — open) | Password for `/models` and **all** its API routes. A session cookie, separate from `api_key` (which still guards `/v1/*`). The installer sets it to `0000`. |
 | `download_dir` | `--download-dir` | directory of `--model` | Where GGUF weights are downloaded / listed / deleted, and the directory the dashboard introspects + hot-swaps from. |
-| `models_catalog` | `--models-catalog` | auto-resolved | Path to `hf_models.json`. Empty searches `data/hf_models.json` (dev), then `/etc/easyai`, `/usr/share/easyai`, `/usr/local/share/easyai`. |
-| `models_catalog_url` | `--models-catalog-url` | upstream llmfit raw | Source for the **Update catalog** button / `POST /models/api/catalog/update`. The fetched copy is cached in `download_dir` and preferred on next start. |
 
 ---
 
@@ -203,12 +204,11 @@ is set.
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/models` | The dashboard HTML. |
-| GET | `/models/api/auth` | `{authed, required, catalog_loaded, catalog_size, status, download_dir}` (open). |
+| GET | `/models/api/auth` | `{authed, required, source, status, download_dir}` (open). |
 | POST | `/models/api/login` / `logout` | `{"password":"…"}` → sets / clears the cookie. |
 | GET | `/models/api/system` | Detected/simulated hardware. Query: `ram_gb`, `vram_gb`, `cpu_cores`. |
-| GET | `/models/api/models` | Scored catalog. Query: `search`, `min_fit`, `runtime`, `use_case`, `sort`, `limit`, `include_too_tight`, `max_context`, + the sim params. |
+| GET | `/models/api/models` | Live HuggingFace GGUF results, fit-scored. Query: `search`, `min_fit`, `runtime`, `use_case`, `sort` (`score`/`tps`/`params`/`mem`/`downloads`/`likes`), `limit`, + the sim params. |
 | POST | `/models/api/plan` | `{model, context, quant?, kv_quant?, ram_gb?, vram_gb?, cpu_cores?}` → min/recommended hardware + KV alternatives. |
-| POST | `/models/api/catalog/update` | Fetch the latest catalog from `models_catalog_url`, validate, cache in `download_dir`, hot-reload. |
 | GET | `/models/api/local` | `{dir, models:[{name, size_bytes, mtime, is_current}]}`. |
 | GET | `/models/api/local/detail?file=<name>` | GGUF params + fit + `[MODEL_*]` profile for one local model. |
 | POST | `/models/api/local/delete` | `{"name":"…"}` → delete one `.gguf`. |
@@ -230,15 +230,16 @@ curl -s -b cj -X POST $B/models/api/run -H 'Content-Type: application/json' -d '
 
 ---
 
-## 9. The catalogue & scoring fidelity
+## 9. The model source & scoring fidelity
 
-- **Catalogue:** `data/hf_models.json` (~5,000 models; schema follows llmfit's),
-  bundled and loaded at startup. Click **Update catalog** in the Recommend tab
-  (or `POST /models/api/catalog/update`) to fetch the latest from
-  `models_catalog_url` (the upstream llmfit raw file by default); the fresh copy
-  is validated, cached in `download_dir`, and preferred on the next start. You
-  can also drop your own `hf_models.json` at any resolved path or set
-  `models_catalog`.
+- **Source:** the Recommend list is the **live HuggingFace listing**
+  (`/api/models?filter=gguf`, sorted by downloads or your chosen field). Each
+  result is enriched by listing its repo's GGUF files to find the best quant and
+  its size; **params are inferred from the repo name (e.g. `…-7B`) or the file
+  size, and quant from the filename** — so the figures are estimates (a small
+  model's file is mostly embeddings, so size→params can be off; MoE layout and
+  context length are unknown). Results are fetched in parallel and cached per
+  repo for the session. There is no bundled catalog and nothing to update.
 - **Scoring** is a faithful native port of llmfit's memory model, fit levels,
   quant selection, tok/s estimation and the four score components (quality /
   speed / fit / context), with llmfit's constants. A few exotic branches (full
@@ -251,7 +252,7 @@ curl -s -b cj -X POST $B/models/api/run -H 'Content-Type: application/json' -d '
 
 | Symptom | Cause / fix |
 | --- | --- |
-| Toast "Model catalog not found" / Recommend limited | `hf_models.json` not on a resolved path. Set `models_catalog`, or copy it to `/etc/easyai/hf_models.json` (the installer does this). Local models + downloads still work. |
+| Recommend tab shows "HuggingFace: …" error | The server couldn't reach the HuggingFace API (offline / rate-limited / DNS). Local models, Downloads, and Run still work. Retry, or narrow the search. |
 | GPU shows as CPU / wrong VRAM | ggml didn't detect a GPU backend (driver / build). On Apple Silicon VRAM == system RAM (unified). Use the simulation inputs to model target hardware. |
 | Run fails | The new GGUF couldn't load (corrupt / incompatible). The error is returned; the previous model stays unloaded — re-run a known-good model. |
 | Download 409 | One download at a time; wait or cancel. |
@@ -263,5 +264,5 @@ curl -s -b cj -X POST $B/models/api/run -H 'Content-Type: application/json' -d '
 
 - [`easyai-server.md`](easyai-server.md) §7 — server-side reference.
 - [`resources/easyai.ini.example`](resources/easyai.ini.example) — the `[SERVER]` keys.
-- [`scripts/install_easyai_server.sh`](scripts/install_easyai_server.sh) — `--webui-password` (default `0000`), `download_dir`, catalogue copy.
+- [`scripts/install_easyai_server.sh`](scripts/install_easyai_server.sh) — `--webui-password` (default `0000`), `download_dir`.
 - [LLMFit upstream](https://github.com/AlexsJones/llmfit) — the original scoring tool this is ported from.

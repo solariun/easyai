@@ -147,11 +147,10 @@
       <label>Sim VRAM GB<input id="s-vram" type="number" min="0" placeholder="auto" style="width:80px"></label>
       <label>Sim cores<input id="s-cores" type="number" min="0" placeholder="auto" style="width:70px"></label>
       <label>&nbsp;<button class="btn" onclick="resetSim()">Reset sim</button></label>
-      <label>&nbsp;<button class="btn" id="updBtn" onclick="updateCatalog()" title="Fetch the latest model catalog from the network">Update catalog</button></label>
     </div>
     <div class="row">
       <div class="grow panel" style="padding:0;overflow:hidden">
-        <div id="modelsWrap"><div class="empty">Loading catalog…</div></div>
+        <div id="modelsWrap"><div class="empty">Searching HuggingFace…</div></div>
       </div>
       <div class="drawer panel" id="detail"><div class="empty">Select a model to see its fit &amp; plan.</div></div>
     </div>
@@ -237,7 +236,7 @@ async function loadModels(){
   p.set('search',$('#f-search').value);p.set('min_fit',$('#f-minfit').value);
   p.set('runtime',$('#f-runtime').value);p.set('use_case',$('#f-usecase').value);
   p.set('sort',$('#f-sort').value);p.set('limit',$('#f-limit').value);
-  $('#modelsWrap').innerHTML='<div class="empty"><span class="spin"></span> Scoring…</div>';
+  $('#modelsWrap').innerHTML='<div class="empty"><span class="spin"></span> Searching HuggingFace &amp; scoring…</div>';
   try{
     let d=await api('/models/api/models?'+p);
     if(!d.models.length){$('#modelsWrap').innerHTML='<div class="empty">No models match.</div>';return;}
@@ -249,9 +248,9 @@ async function loadModels(){
       <td class="num">${m.score}</td>
       <td class="num">${m.estimated_tps}</td>
       <td class="num">${Math.round(m.utilization_pct)}%</td>
-      <td class="num small">${fmtNum(m.context_length)}</td></tr>`).join('');
+      <td class="num small">${fmtNum(m.hf_downloads)}</td></tr>`).join('');
     $('#modelsWrap').innerHTML=`<table><thead><tr><th>Model</th><th class="num">Params</th><th>Fit</th>
-      <th>Mode</th><th class="num">Score</th><th class="num">tok/s</th><th class="num">Mem</th><th class="num">Ctx</th>
+      <th>Mode</th><th class="num">Score</th><th class="num">tok/s</th><th class="num">Mem</th><th class="num">↓&nbsp;HF</th>
       </tr></thead><tbody>${rows}</tbody></table>
       <div class="muted small" style="padding:8px 12px">${d.returned_models} of ${d.total_models} models</div>`;
   }catch(e){$('#modelsWrap').innerHTML='<div class="empty">'+esch(e.message)+'</div>';}
@@ -424,19 +423,11 @@ $$('nav.tabs button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
 ['#s-ram','#s-vram','#s-cores'].forEach(s=>$(s).addEventListener('change',()=>{
   SIM={ram:$('#s-ram').value,vram:$('#s-vram').value,cores:$('#s-cores').value};loadSystem();loadModels();}));
 function resetSim(){SIM={};$('#s-ram').value=$('#s-vram').value=$('#s-cores').value='';loadSystem();loadModels();}
-async function updateCatalog(){
-  let b=$('#updBtn'),old=b.textContent;b.disabled=true;b.innerHTML='<span class="spin"></span> Updating…';
-  try{let d=await api('/models/api/catalog/update',{method:'POST'});
-    toast('Catalog updated — '+d.catalog_size+' models');await loadModels();}
-  catch(e){toast('Update failed: '+e.message,true);}
-  finally{b.disabled=false;b.textContent=old;}
-}
 
 async function boot(){try{await loadSystem();await loadModels();}catch(e){}}
 async function init(){
   try{let a=await api('/models/api/auth');
     if(a.required&&!a.authed){showLogin(true);return;}
-    if(!a.catalog_loaded)toast('Model catalog not found — recommendations limited. '+(a.status||''),true);
     boot();
   }catch(e){/* 401 handled in api() */}
 }

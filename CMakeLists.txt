@@ -451,9 +451,4 @@ if (EASYAI_INSTALL)
         ${CMAKE_CURRENT_BINARY_DIR}/easyaiConfig.cmake
         ${CMAKE_CURRENT_BINARY_DIR}/easyaiConfigVersion.cmake
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/easyai)
-
-    # Model catalog for the MODELS dashboard's Recommend tab. easyai-server
-    # auto-resolves <prefix>/share/easyai/hf_models.json at runtime.
-    install(FILES data/hf_models.json
-        DESTINATION ${CMAKE_INSTALL_DATADIR}/easyai OPTIONAL)
 endif()

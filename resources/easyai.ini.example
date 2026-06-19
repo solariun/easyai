@@ -175,12 +175,12 @@
 ;webui_mode        = modern
 
 ; ---------- MODELS dashboard (/models) ----------
-; A sober web UI, linked from the chat UI, that scores a bundled catalog
-; of models against this machine's detected (or simulated) hardware
-; (fit / speed / quality / context), introspects the local .gguf files,
-; hot-swaps the running model, and downloads weights. Everything is
-; native to easyai-server — there is no external binary. Full reference:
-; MODELS.md and easyai-server.md section 7.
+; A sober web UI, linked from the chat UI, that searches HuggingFace LIVE
+; for GGUF models and scores them against this machine's detected (or
+; simulated) hardware (fit / speed / quality), introspects the local .gguf
+; files, hot-swaps the running model, and downloads weights. Everything is
+; native to easyai-server — there is no external binary and no bundled
+; catalog. Full reference: MODELS.md and easyai-server.md section 7.
 
 ; Password gate for /models and all of its API routes. Empty (default)
 ; leaves the dashboard OPEN. Set this to require a login (a session
@@ -192,19 +192,6 @@
 ; directory the loaded --model lives in, so downloads land next to the
 ; models already in use.
 ;download_dir      = /var/lib/easyai/models
-
-; Path to the model catalog (hf_models.json) that backs the Recommend
-; tab. Empty = auto-resolve from data/hf_models.json (dev) or
-; /etc/easyai, /usr/share/easyai, /usr/local/share/easyai (installed).
-; The local-models + download features work even when the catalog is
-; absent; only the recommendation panels need it.
-;models_catalog    = /etc/easyai/hf_models.json
-
-; Network source for the dashboard's "Update catalog" button (and the
-; POST /models/api/catalog/update endpoint). Defaults to the upstream
-; llmfit catalog. The fetched copy is cached in download_dir and is
-; preferred over the bundled one on the next start.
-;models_catalog_url = https://raw.githubusercontent.com/AlexsJones/llmfit/main/llmfit-core/data/hf_models.json
 
 ; ============================================================
 ; [ENGINE] — model loading + inference tunables

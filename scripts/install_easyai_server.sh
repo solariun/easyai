@@ -1502,10 +1502,11 @@ webui_title     = $webui_title
 
 # ---------- MODELS dashboard (/models) ----------
 # Sober web UI (linked from the chat UI by an injected "MODELS" pill) that
-# scores a bundled catalog against this machine's hardware, introspects the
-# local .gguf files, hot-swaps the running model, and downloads weights — all
-# native to easyai-server (no external binary). Full reference: MODELS.md and
-# easyai-server.md section 7.
+# searches HuggingFace LIVE for GGUF models and scores them against this
+# machine's hardware, introspects the local .gguf files, hot-swaps the running
+# model, and downloads weights — all native to easyai-server (no external
+# binary, no bundled catalog). Full reference: MODELS.md and easyai-server.md
+# section 7.
 #
 # webui_password: gates /models and all of its API routes (a session cookie
 #   separate from api_key, which still guards /v1/*). Installed default is
@@ -1516,11 +1517,6 @@ webui_password  = $webui_password
 #   and the directory the dashboard introspects + hot-swaps from. Defaults to
 #   this server's models dir so downloads sit beside the model in use.
 download_dir    = $service_model_dir
-# models_catalog: the model catalog (hf_models.json) that backs the Recommend
-#   tab. The installer copies it to /etc/easyai/hf_models.json, which is one of
-#   the auto-resolved locations, so this is normally left commented out. The
-#   local-models + download features work even without it.
-#models_catalog  = /etc/easyai/hf_models.json
 metrics         = $([[ "$enable_metrics" -eq 1 ]] && echo on || echo off)
 allow_fs        = off
 allow_bash      = off
@@ -2015,16 +2011,6 @@ INI_FILE
         sudo chown root:"$service_group" "$ini_file"
     else
         log "$ini_file exists — leaving operator edits in place (pass --force to overwrite)"
-    fi
-
-    # ---- model catalog: copy hf_models.json to /etc/easyai so the MODELS
-    #      dashboard's Recommend tab can score the bundled catalog. This is
-    #      one of the locations easyai-server auto-resolves. ---------------
-    if [[ -f "$easyai_dir/data/hf_models.json" ]]; then
-        log "installing model catalog → $config_dir/hf_models.json"
-        sudo install -m 0644 "$easyai_dir/data/hf_models.json" "$config_dir/hf_models.json"
-    else
-        warn "$easyai_dir/data/hf_models.json not found — the MODELS Recommend tab will be limited until you set models_catalog"
     fi
 
     # ---- favicon: copy operator-supplied icon to /etc/easyai/favicon

@@ -32,6 +32,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <future>
 #include <regex>
 #include <sstream>
 
@@ -253,9 +254,10 @@ struct ModelEntry {
     }
 };
 
-struct ModelsEngine::Catalog {
-    std::vector<ModelEntry> models;
-};
+// A HuggingFace search hit (pre-enrichment) and an enriched, cached entry.
+struct HfHit  { std::string repo, owner, pipeline; std::uint64_t downloads = 0, likes = 0; };
+struct CachedHf { std::string repo; ModelEntry entry; std::uint64_t best_size = 0, downloads = 0, likes = 0; bool ok = false; };
+struct ModelsEngine::HfCache { std::map<std::string, CachedHf> by_repo; };
 
 namespace {
 
@@ -277,56 +279,9 @@ std::string jget_s(const ordered_json & j, const char * k) {
     try { return j[k].get<std::string>(); } catch (...) { return ""; }
 }
 
-bool load_catalog(const std::string & path, std::vector<ModelEntry> & out, std::string & err) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) { err = "cannot open catalog: " + path; return false; }
-    ordered_json j;
-    try { f >> j; } catch (const std::exception & e) { err = std::string("parse: ") + e.what(); return false; }
-    if (!j.is_array()) { err = "catalog is not a JSON array"; return false; }
-    out.reserve(j.size());
-    for (const auto & m : j) {
-        if (!m.is_object()) continue;
-        ModelEntry e;
-        e.name            = jget_s(m, "name");
-        if (e.name.empty()) continue;
-        e.provider        = jget_s(m, "provider");
-        e.parameter_count = jget_s(m, "parameter_count");
-        e.quantization    = jget_s(m, "quantization");
-        if (e.quantization.empty()) e.quantization = "Q4_K_M";
-        e.use_case        = jget_s(m, "use_case");
-        e.architecture    = jget_s(m, "architecture");
-        e.license         = jget_s(m, "license");
-        e.release_date    = jget_s(m, "release_date");
-        e.min_ram_gb          = jget_d(m, "min_ram_gb", 0);
-        e.recommended_ram_gb  = jget_d(m, "recommended_ram_gb", 0);
-        e.min_vram_gb         = jget_d(m, "min_vram_gb", -1);
-        e.parameters_raw      = jget_u64(m, "parameters_raw", e.has_params_raw);
-        e.context_length      = jget_u32(m, "context_length");
-        e.is_moe              = m.contains("is_moe") && m["is_moe"].is_boolean() && m["is_moe"].get<bool>();
-        e.num_experts         = jget_u32(m, "num_experts");
-        e.active_experts      = jget_u32(m, "active_experts");
-        e.has_active_experts  = e.active_experts > 0;
-        e.active_parameters   = jget_u64(m, "active_parameters", e.has_active_params);
-        e.num_attention_heads = jget_u32(m, "num_attention_heads");
-        e.num_key_value_heads = jget_u32(m, "num_key_value_heads");
-        e.num_hidden_layers   = jget_u32(m, "num_hidden_layers");
-        e.head_dim            = jget_u32(m, "head_dim");
-        e.hidden_size         = jget_u32(m, "hidden_size");
-        e.moe_intermediate_size = jget_u32(m, "moe_intermediate_size");
-        e.vocab_size          = jget_u32(m, "vocab_size");
-        if (m.contains("gguf_sources") && m["gguf_sources"].is_array()) {
-            for (const auto & g : m["gguf_sources"]) {
-                std::string repo = jget_s(g, "repo");
-                if (!repo.empty()) e.gguf_sources.emplace_back(repo, jget_s(g, "provider"));
-            }
-        }
-        if (m.contains("capabilities") && m["capabilities"].is_array()) {
-            for (const auto & c : m["capabilities"]) if (c.is_string()) e.capabilities.push_back(c.get<std::string>());
-        }
-        out.push_back(std::move(e));
-    }
-    return true;
-}
+// (The bundled-catalog loader was removed: the Recommend tab now sources
+// models live from the HuggingFace listing API — see hf_search /
+// hf_build_entry at the bottom of this file. jget_* are reused there.)
 
 // ----- use-case classification (models.rs:439) -----
 std::string infer_use_case(const ModelEntry & m) {
@@ -546,6 +501,8 @@ struct FitRow {
     double score = 0, q_quality = 0, q_speed = 0, q_fit = 0, q_context = 0;
     std::uint32_t est_ctx = 0;
     std::vector<std::string> notes;
+    // HuggingFace popularity / file size (live-source rows only).
+    std::uint64_t hf_downloads = 0, hf_likes = 0, file_size = 0;
 };
 
 std::string run_mode_label(const std::string & c) {
@@ -653,6 +610,7 @@ double fit_component_score(double req, double avail) {
     return 50.0;
 }
 double context_score(std::uint32_t ctx, const std::string & uc) {
+    if (ctx == 0) return 70.0;   // unknown (live HF rows) — neutral, don't tank the score
     std::uint32_t target = (uc == "coding" || uc == "reasoning") ? 8192 : uc == "embedding" ? 512 : 4096;
     if (ctx >= target) return 100.0;
     if (ctx >= target / 2) return 70.0;
@@ -819,6 +777,8 @@ ordered_json fit_to_json(const FitRow & r) {
         {"gguf_sources", srcs},
         {"capabilities", m.capabilities},
         {"license", m.license.empty() ? ordered_json(nullptr) : ordered_json(m.license)},
+        {"hf_downloads", r.hf_downloads}, {"hf_likes", r.hf_likes},
+        {"file_size_bytes", r.file_size},
     };
 }
 
@@ -919,45 +879,20 @@ GgufMeta read_gguf_meta(const std::string & path) {
 // ===========================================================================
 // ModelsEngine
 // ===========================================================================
-ModelsEngine::ModelsEngine(std::string download_dir, std::string catalog_path,
-                           std::string catalog_url, const config::Ini * ini,
+ModelsEngine::ModelsEngine(std::string download_dir, const config::Ini * ini,
                            std::function<std::string()> current_model)
     : download_dir_(std::move(download_dir)),
-      catalog_path_(std::move(catalog_path)),
-      catalog_url_(std::move(catalog_url)),
       ini_(ini),
       current_model_(std::move(current_model)),
-      catalog_(std::make_unique<Catalog>()) {
-    // Prefer a network-updated copy cached in the download dir over the
-    // bundled/installed catalog, so an Update persists across restarts.
-    std::error_code ec;
-    std::string cache = download_dir_.empty() ? std::string() : (download_dir_ + "/hf_models.json");
-    std::string load_from;
-    if (!cache.empty() && fs::exists(cache, ec)) load_from = cache;
-    else if (!catalog_path_.empty())             load_from = catalog_path_;
-    if (!load_from.empty()) {
-        std::string err;
-        if (load_catalog(load_from, catalog_->models, err)) {
-            catalog_source_ = load_from;
-            status_ = "catalog loaded: " + std::to_string(catalog_->models.size()) + " models";
-            easyai::log::write("[models] %s (%s)\n", status_.c_str(), load_from.c_str());
-        } else {
-            status_ = "catalog unavailable: " + err;
-            easyai::log::error("[models] %s\n", status_.c_str());
-        }
-    } else {
-        status_ = "no catalog found (use Update to fetch one)";
-    }
+      hf_cache_(std::make_unique<HfCache>()) {
+    status_ = "live HuggingFace catalog";
 }
 ModelsEngine::~ModelsEngine() {
     cancel_.store(true);
     if (worker_.joinable()) worker_.join();
 }
 
-bool ModelsEngine::catalog_loaded() const { return catalog_ && !catalog_->models.empty(); }
-std::size_t ModelsEngine::catalog_size() const { return catalog_ ? catalog_->models.size() : 0; }
 std::string ModelsEngine::status_message() const { return status_; }
-std::string ModelsEngine::catalog_source() const { return catalog_source_; }
 
 std::string ModelsEngine::system_json(const std::string & query) {
     auto q = parse_query(query);
@@ -967,111 +902,9 @@ std::string ModelsEngine::system_json(const std::string & query) {
     return system_to_json(s).dump();
 }
 
-std::string ModelsEngine::models_json(const std::string & query) {
-    auto q = parse_query(query);
-    SystemSpecs s = detect_system();
-    apply_sim(s, qnum(q, "ram_gb", qnum(q, "ram", -1)), qnum(q, "vram_gb", qnum(q, "memory", -1)),
-              (int) qnum(q, "cpu_cores", -1));
-
-    std::string search = to_lower(qget(q, "search"));
-    std::string provider = to_lower(qget(q, "provider"));
-    std::string min_fit = qget(q, "min_fit", "marginal");
-    std::string runtime = qget(q, "runtime", "any");
-    std::string usecase = qget(q, "use_case", "all");
-    std::string sort = qget(q, "sort", "score");
-    std::string force = qget(q, "force_runtime");
-    bool include_tt = qget(q, "include_too_tight", "true") != "false";
-    std::uint32_t ctx_cap = (std::uint32_t) qnum(q, "max_context", 0);
-    int limit = (int) qnum(q, "limit", qnum(q, "n", 50));
-    int min_fit_rank = min_fit == "perfect" ? 4 : min_fit == "good" ? 3 : min_fit == "too_tight" ? 1 : 2;
-
-    // Hold the catalog lock through scoring AND JSON emission: FitRow keeps a
-    // pointer into catalog_->models, which update_catalog() may swap.
-    std::lock_guard<std::mutex> lk(catalog_mu_);
-    std::vector<FitRow> rows;
-    rows.reserve(catalog_->models.size());
-    for (const auto & m : catalog_->models) {
-        if (!search.empty()) {
-            std::string hay = to_lower(m.name + " " + m.provider + " " + m.parameter_count + " " + m.use_case);
-            if (hay.find(search) == std::string::npos) continue;
-        }
-        if (!provider.empty() && to_lower(m.provider).find(provider) == std::string::npos) continue;
-        if (usecase != "all" && infer_use_case(m) != usecase) continue;
-        FitRow r = score_model(m, s, ctx_cap, force);
-        if (runtime != "any" && r.runtime != runtime) continue;
-        if (r.fit_level == "too_tight" && !include_tt) continue;
-        if (fit_rank(r.fit_level) < min_fit_rank) continue;
-        rows.push_back(std::move(r));
-    }
-
-    auto cmp = [&](const FitRow & a, const FitRow & b) {
-        if (sort == "tps")    return a.estimated_tps > b.estimated_tps;
-        if (sort == "params") return a.m->params_b() > b.m->params_b();
-        if (sort == "mem")    return a.memory_required_gb < b.memory_required_gb;
-        if (sort == "ctx")    return a.m->context_length > b.m->context_length;
-        if (sort == "date")   return a.m->release_date > b.m->release_date;
-        return a.score > b.score;  // default
-    };
-    std::sort(rows.begin(), rows.end(), cmp);
-
-    int total = (int) rows.size();
-    if (limit > 0 && (int) rows.size() > limit) rows.resize(limit);
-
-    ordered_json models = ordered_json::array();
-    for (const auto & r : rows) models.push_back(fit_to_json(r));
-    ordered_json env = system_to_json(s);
-    env["total_models"] = total;
-    env["returned_models"] = (int) rows.size();
-    env["models"] = models;
-    return env.dump();
-}
-
-std::string ModelsEngine::plan_json(const std::string & body) {
-    ordered_json b;
-    try { b = ordered_json::parse(body); } catch (...) { return "{\"error\":\"invalid JSON\"}"; }
-    std::string name = b.value("model", "");
-    std::uint32_t ctx = b.value("context", 8192u);
-    std::string quant = b.value("quant", "");
-    std::string kv_quant = b.value("kv_quant", "fp16");
-    SystemSpecs s = detect_system();
-    apply_sim(s, b.value("ram_gb", -1.0), b.value("vram_gb", -1.0), (int) b.value("cpu_cores", -1));
-
-    std::lock_guard<std::mutex> lk(catalog_mu_);   // `found` points into the catalog
-    const ModelEntry * found = nullptr;
-    for (const auto & m : catalog_->models) if (to_lower(m.name) == to_lower(name)) { found = &m; break; }
-    if (!found) return "{\"error\":\"model '" + name + "' not found\"}";
-    if (quant.empty()) quant = found->quantization;
-
-    double model_mem = estimate_memory_gb(*found, quant, ctx, kv_quant);
-    FitRow cur = score_model(*found, s, ctx, "");
-    double rec_vram = std::max(found->recommended_ram_gb, model_mem * 1.2);
-    double min_ram = std::max(model_mem * 0.2, 8.0);
-
-    ordered_json kv_alts = ordered_json::array();
-    double baseline_kv = kv_cache_gb(*found, ctx, "fp16");
-    for (const std::string & kvq : { std::string("fp16"), std::string("fp8"), std::string("q8_0"), std::string("q4_0") }) {
-        double kvgb = kv_cache_gb(*found, ctx, kvq);
-        double mem = estimate_memory_gb(*found, quant, ctx, kvq);
-        double sav = baseline_kv > 0 ? std::max(1.0 - kvgb / baseline_kv, 0.0) : 0.0;
-        kv_alts.push_back({ {"kv_quant", kvq}, {"memory_required_gb", round2(mem)},
-                            {"kv_cache_gb", round2(kvgb)}, {"savings_fraction", round2(sav)}, {"supported", true} });
-    }
-    ordered_json out = {
-        {"model_name", found->name}, {"provider", found->provider},
-        {"context", ctx}, {"quantization", quant}, {"kv_quant", kv_quant},
-        {"estimate_notice", "Estimates are heuristic; real usage varies with backend and settings."},
-        {"minimum",     { {"vram_gb", found->is_moe ? ordered_json(nullptr) : ordered_json(round2(model_mem))},
-                          {"ram_gb", round2(min_ram)}, {"cpu_cores", 4} }},
-        {"recommended", { {"vram_gb", round2(rec_vram)}, {"ram_gb", round2(std::max(min_ram * 1.25, 12.0))},
-                          {"cpu_cores", std::max(s.cpu_cores, 8)} }},
-        {"current", { {"fit_level", cur.fit_level}, {"run_mode", cur.run_mode},
-                      {"estimated_tps", round1(cur.estimated_tps)},
-                      {"memory_required_gb", round2(cur.memory_required_gb)},
-                      {"memory_available_gb", round2(cur.memory_available_gb)} }},
-        {"kv_alternatives", kv_alts},
-    };
-    return out.dump();
-}
+// models_json (live HuggingFace search) and plan_json (live HF, by repo id)
+// are defined at the BOTTOM of this file — after the curl + GGUF + HF helpers
+// they depend on.
 
 // ----- local models -----
 namespace {
@@ -1350,39 +1183,6 @@ int xfer_cb(void * ud, curl_off_t dltotal, curl_off_t dlnow, curl_off_t, curl_of
 #endif  // EASYAI_HAVE_CURL
 }  // namespace
 
-bool ModelsEngine::update_catalog(std::string & err) {
-#if !defined(EASYAI_HAVE_CURL)
-    err = "server built without libcurl"; return false;
-#else
-    if (catalog_url_.empty()) { err = "no catalog URL configured (set models_catalog_url)"; return false; }
-    // Cache in the download dir (writable by the service) so the update
-    // survives restarts and is preferred over the bundled copy on next boot.
-    std::string target = download_dir_.empty() ? catalog_path_ : (download_dir_ + "/hf_models.json");
-    if (target.empty()) { err = "no writable location for the catalog"; return false; }
-    std::error_code ec; fs::create_directories(fs::path(target).parent_path(), ec);
-    std::string tmp = target + ".tmp";
-
-    easyai::log::write("[models] updating catalog from %s\n", catalog_url_.c_str());
-    if (!curl_download_file(catalog_url_, tmp, err)) return false;
-
-    std::vector<ModelEntry> fresh; std::string perr;
-    if (!load_catalog(tmp, fresh, perr) || fresh.empty()) {
-        std::remove(tmp.c_str());
-        err = "downloaded catalog invalid" + (perr.empty() ? std::string() : (": " + perr));
-        return false;
-    }
-    fs::rename(tmp, target, ec);
-    if (ec) { std::remove(tmp.c_str()); err = "could not save catalog: " + ec.message(); return false; }
-
-    std::size_t n;
-    { std::lock_guard<std::mutex> lk(catalog_mu_); catalog_->models = std::move(fresh); n = catalog_->models.size(); }
-    catalog_source_ = target;
-    status_ = "catalog updated: " + std::to_string(n) + " models";
-    easyai::log::write("[models] %s (%s)\n", status_.c_str(), target.c_str());
-    return true;
-#endif
-}
-
 bool ModelsEngine::hf_repo_files(const std::string & repo, std::vector<RepoFile> & out, std::string & err) {
     out.clear();
 #if !defined(EASYAI_HAVE_CURL)
@@ -1506,6 +1306,257 @@ void ModelsEngine::download_worker(int id, std::string repo, std::vector<RepoFil
 void ModelsEngine::cancel_download() { cancel_.store(true, std::memory_order_relaxed); }
 ModelsEngine::DownloadStatus ModelsEngine::download_status() {
     std::lock_guard<std::mutex> lk(dl_mu_); return st_;
+}
+
+// ===========================================================================
+// Live HuggingFace source for the Recommend tab
+// ===========================================================================
+#if defined(EASYAI_HAVE_CURL)
+namespace {
+
+std::string url_encode(const std::string & s) {
+    static const char * hex = "0123456789ABCDEF";
+    std::string o; o.reserve(s.size());
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') o.push_back((char) c);
+        else { o.push_back('%'); o.push_back(hex[c >> 4]); o.push_back(hex[c & 15]); }
+    }
+    return o;
+}
+
+// Pull a params figure (billions) out of a repo name ("…-7B…", "…-0.5B",
+// "…-500M"): the largest token wins. nullopt if none.
+std::optional<double> params_from_name(const std::string & name) {
+    static const std::regex re(R"((\d+(?:\.\d+)?)\s*([bBmM]))");
+    double best = -1;
+    for (auto it = std::sregex_iterator(name.begin(), name.end(), re); it != std::sregex_iterator(); ++it) {
+        double v; try { v = std::stod((*it)[1].str()); } catch (...) { continue; }
+        char u = (char) std::tolower((unsigned char) (*it)[2].str()[0]);
+        double b = (u == 'm') ? v / 1000.0 : v;
+        if (b > best) best = b;
+    }
+    if (best > 0) return best;
+    return std::nullopt;
+}
+
+// HuggingFace model search restricted to GGUF repos.
+bool hf_search(const std::string & query, int limit, const std::string & sort,
+               std::vector<HfHit> & out, std::string & err) {
+    std::string url = "https://huggingface.co/api/models?filter=gguf&direction=-1&limit=" +
+                      std::to_string(limit) + "&sort=" + (sort.empty() ? "downloads" : sort);
+    if (!query.empty()) url += "&search=" + url_encode(query);
+    std::string body;
+    if (!curl_get_string(url, body, err)) return false;
+    try {
+        auto j = nlohmann::json::parse(body);
+        if (!j.is_array()) { err = "unexpected HF response"; return false; }
+        for (const auto & m : j) {
+            HfHit h;
+            h.repo = m.value("id", std::string());
+            if (h.repo.empty()) continue;
+            auto sl = h.repo.find('/');
+            h.owner     = sl == std::string::npos ? h.repo : h.repo.substr(0, sl);
+            h.downloads = m.value("downloads", (std::uint64_t) 0);
+            h.likes     = m.value("likes", (std::uint64_t) 0);
+            h.pipeline  = m.value("pipeline_tag", std::string());
+            out.push_back(std::move(h));
+        }
+    } catch (const std::exception & e) { err = std::string("parse: ") + e.what(); return false; }
+    return true;
+}
+
+// Enrich a hit into a scoreable ModelEntry by listing the repo's GGUF files
+// (best quant by preference order; params from the name, else from file size).
+bool hf_build_entry(const HfHit & h, ModelEntry & out, std::uint64_t & best_size, std::string & err) {
+    if (h.repo.empty() || h.repo.find("..") != std::string::npos) { err = "invalid repo"; return false; }
+    std::string url = "https://huggingface.co/api/models/" + h.repo + "/tree/main?recursive=true";
+    std::string body;
+    if (!curl_get_string(url, body, err)) return false;
+    std::string best_path; std::uint64_t bsize = 0; int best_rank = 1 << 30;
+    try {
+        auto j = nlohmann::json::parse(body);
+        if (!j.is_array()) { err = "unexpected tree"; return false; }
+        for (const auto & e : j) {
+            if (e.value("type", std::string()) != "file") continue;
+            std::string path = e.value("path", std::string());
+            if (!ends_with_ci(path, ".gguf")) continue;
+            int rk = quant_rank(base_name(path));
+            std::uint64_t sz = e.value("size", (std::uint64_t) 0);
+            if (rk < best_rank || (rk == best_rank && sz > bsize)) { best_rank = rk; best_path = path; bsize = sz; }
+        }
+    } catch (const std::exception & e) { err = std::string("parse: ") + e.what(); return false; }
+    if (best_path.empty()) { err = "no .gguf files"; return false; }
+    best_size = bsize;
+
+    std::string quant;
+    {
+        static const char * order[] = { "Q8_0","Q6_K_L","Q6_K","Q5_K_M","Q5_K_S","Q5_0","Q4_K_M","Q4_K_S","Q4_0",
+            "Q3_K_L","Q3_K_M","Q3_K_S","Q2_K","IQ4_XS","IQ3_M","IQ2_M","IQ1_M","F16","BF16","F32" };
+        std::string uc = to_upper(base_name(best_path));
+        for (auto * o : order) if (uc.find(o) != std::string::npos) { quant = o; break; }
+    }
+    if (quant.empty()) quant = "Q4_K_M";
+
+    double pb;
+    auto pn = params_from_name(h.repo);
+    if (pn) pb = *pn;
+    else    pb = bsize > 0 ? (double) bsize / quant_bpp(quant) / 1e9 : 7.0;
+
+    out = ModelEntry{};
+    out.name = h.repo; out.provider = h.owner; out.quantization = quant;
+    out.parameters_raw = (std::uint64_t) (pb * 1e9); out.has_params_raw = true;
+    char pc[32];
+    if (pb >= 1) std::snprintf(pc, sizeof(pc), "%.1fB", pb);
+    else         std::snprintf(pc, sizeof(pc), "%dM", (int) std::round(pb * 1000));
+    out.parameter_count = pc;
+    out.context_length = 0;          // unknown without reading the GGUF header
+    out.is_moe = false;
+    out.min_ram_gb = pb * quant_bpp(quant) + 0.5;
+    out.recommended_ram_gb = out.min_ram_gb * 1.25;
+    out.gguf_sources = { { h.repo, h.owner } };
+    return true;
+}
+
+}  // namespace
+#endif  // EASYAI_HAVE_CURL
+
+std::string ModelsEngine::models_json(const std::string & query) {
+    auto q = parse_query(query);
+    SystemSpecs s = detect_system();
+    apply_sim(s, qnum(q, "ram_gb", qnum(q, "ram", -1)), qnum(q, "vram_gb", qnum(q, "memory", -1)),
+              (int) qnum(q, "cpu_cores", -1));
+    ordered_json env = system_to_json(s);
+#if !defined(EASYAI_HAVE_CURL)
+    env["total_models"] = 0; env["returned_models"] = 0; env["models"] = ordered_json::array();
+    env["error"] = "server built without libcurl";
+    return env.dump();
+#else
+    std::string search  = qget(q, "search");
+    std::string runtime = qget(q, "runtime", "any");
+    std::string usecase = qget(q, "use_case", "all");
+    std::string sort    = qget(q, "sort", "score");
+    std::string force   = qget(q, "force_runtime");
+    std::string min_fit = qget(q, "min_fit", "marginal");
+    bool include_tt = qget(q, "include_too_tight", "true") != "false";
+    int limit = (int) qnum(q, "limit", qnum(q, "n", 30));
+    if (limit <= 0) limit = 30; if (limit > 80) limit = 80;
+    int min_fit_rank = min_fit == "perfect" ? 4 : min_fit == "good" ? 3 : min_fit == "too_tight" ? 1 : 2;
+
+    std::string hf_sort = (sort == "date") ? "lastModified" : (sort == "likes") ? "likes" : "downloads";
+    std::vector<HfHit> hits; std::string err;
+    if (!hf_search(search, limit, hf_sort, hits, err)) {
+        env["total_models"] = 0; env["returned_models"] = 0; env["models"] = ordered_json::array();
+        env["error"] = "HuggingFace: " + err;
+        return env.dump();
+    }
+
+    // Resolve from cache or fetch (bounded-concurrency) the uncached repos.
+    std::vector<CachedHf> all; all.reserve(hits.size());
+    std::vector<HfHit> to_fetch;
+    {
+        std::lock_guard<std::mutex> lk(hf_cache_mu_);
+        for (auto & h : hits) {
+            auto it = hf_cache_->by_repo.find(h.repo);
+            if (it != hf_cache_->by_repo.end()) { CachedHf c = it->second; c.downloads = h.downloads; c.likes = h.likes; all.push_back(std::move(c)); }
+            else to_fetch.push_back(h);
+        }
+    }
+    const std::size_t MAXC = 8;
+    for (std::size_t i = 0; i < to_fetch.size(); i += MAXC) {
+        std::vector<std::future<CachedHf>> batch;
+        for (std::size_t k = i; k < std::min(i + MAXC, to_fetch.size()); ++k) {
+            HfHit h = to_fetch[k];
+            batch.push_back(std::async(std::launch::async, [h]() {
+                CachedHf c; c.repo = h.repo; c.downloads = h.downloads; c.likes = h.likes;
+                std::string e; c.ok = hf_build_entry(h, c.entry, c.best_size, e);
+                return c;
+            }));
+        }
+        for (auto & f : batch) {
+            CachedHf c = f.get();
+            { std::lock_guard<std::mutex> lk(hf_cache_mu_); hf_cache_->by_repo[c.repo] = c; }
+            all.push_back(std::move(c));
+        }
+    }
+
+    // Score. FitRow holds a pointer into all[i].entry — `all` is stable now.
+    std::vector<FitRow> rows;
+    for (auto & c : all) {
+        if (!c.ok) continue;
+        if (usecase != "all" && infer_use_case(c.entry) != usecase) continue;
+        FitRow r = score_model(c.entry, s, 0, force);
+        r.hf_downloads = c.downloads; r.hf_likes = c.likes; r.file_size = c.best_size;
+        if (runtime != "any" && r.runtime != runtime) continue;
+        if (r.fit_level == "too_tight" && !include_tt) continue;
+        if (fit_rank(r.fit_level) < min_fit_rank) continue;
+        rows.push_back(r);
+    }
+    std::sort(rows.begin(), rows.end(), [&](const FitRow & a, const FitRow & b) {
+        if (sort == "tps")       return a.estimated_tps > b.estimated_tps;
+        if (sort == "params")    return a.m->params_b() > b.m->params_b();
+        if (sort == "mem")       return a.memory_required_gb < b.memory_required_gb;
+        if (sort == "downloads") return a.hf_downloads > b.hf_downloads;
+        if (sort == "likes")     return a.hf_likes > b.hf_likes;
+        return a.score > b.score;
+    });
+
+    ordered_json models = ordered_json::array();
+    for (const auto & r : rows) models.push_back(fit_to_json(r));
+    env["total_models"] = (int) rows.size();
+    env["returned_models"] = (int) rows.size();
+    env["source"] = "huggingface";
+    env["models"] = models;
+    return env.dump();
+#endif
+}
+
+std::string ModelsEngine::plan_json(const std::string & body) {
+    ordered_json b;
+    try { b = ordered_json::parse(body); } catch (...) { return "{\"error\":\"invalid JSON\"}"; }
+    std::string name = b.value("model", "");
+    std::uint32_t ctx = b.value("context", 8192u);
+    std::string quant = b.value("quant", "");
+    std::string kv_quant = b.value("kv_quant", "fp16");
+    SystemSpecs s = detect_system();
+    apply_sim(s, b.value("ram_gb", -1.0), b.value("vram_gb", -1.0), (int) b.value("cpu_cores", -1));
+#if !defined(EASYAI_HAVE_CURL)
+    return "{\"error\":\"server built without libcurl\"}";
+#else
+    HfHit h; h.repo = name;
+    auto sl = name.find('/'); h.owner = sl == std::string::npos ? name : name.substr(0, sl);
+    ModelEntry m; std::uint64_t sz = 0; std::string err;
+    if (!hf_build_entry(h, m, sz, err)) return "{\"error\":\"model '" + name + "': " + err + "\"}";
+    if (quant.empty()) quant = m.quantization;
+
+    double model_mem = estimate_memory_gb(m, quant, ctx, kv_quant);
+    FitRow cur = score_model(m, s, ctx, "");
+    double rec_vram = std::max(m.recommended_ram_gb, model_mem * 1.2);
+    double min_ram = std::max(model_mem * 0.2, 8.0);
+
+    ordered_json kv_alts = ordered_json::array();
+    double baseline_kv = kv_cache_gb(m, ctx, "fp16");
+    for (const std::string & kvq : { std::string("fp16"), std::string("fp8"), std::string("q8_0"), std::string("q4_0") }) {
+        double kvgb = kv_cache_gb(m, ctx, kvq);
+        double mem = estimate_memory_gb(m, quant, ctx, kvq);
+        double sav = baseline_kv > 0 ? std::max(1.0 - kvgb / baseline_kv, 0.0) : 0.0;
+        kv_alts.push_back({ {"kv_quant", kvq}, {"memory_required_gb", round2(mem)},
+                            {"kv_cache_gb", round2(kvgb)}, {"savings_fraction", round2(sav)}, {"supported", true} });
+    }
+    ordered_json out = {
+        {"model_name", m.name}, {"provider", m.provider},
+        {"context", ctx}, {"quantization", quant}, {"kv_quant", kv_quant},
+        {"estimate_notice", "Heuristic estimate — for HuggingFace models, params/quant are inferred from the GGUF file size/name."},
+        {"minimum",     { {"vram_gb", round2(model_mem)}, {"ram_gb", round2(min_ram)}, {"cpu_cores", 4} }},
+        {"recommended", { {"vram_gb", round2(rec_vram)}, {"ram_gb", round2(std::max(min_ram * 1.25, 12.0))},
+                          {"cpu_cores", std::max(s.cpu_cores, 8)} }},
+        {"current", { {"fit_level", cur.fit_level}, {"run_mode", cur.run_mode},
+                      {"estimated_tps", round1(cur.estimated_tps)},
+                      {"memory_required_gb", round2(cur.memory_required_gb)},
+                      {"memory_available_gb", round2(cur.memory_available_gb)} }},
+        {"kv_alternatives", kv_alts},
+    };
+    return out.dump();
+#endif
 }
 
 }  // namespace easyai
