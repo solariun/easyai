@@ -84,7 +84,6 @@ std::int64_t now_sec() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 constexpr std::int64_t kSnapshotTtlSec = 3600;   // auto-refresh after 1 hour
-constexpr int          kSnapshotSize   = 100;    // top-N GGUF repos in the list
 constexpr std::uint32_t kFitContext    = 131072; // 128K — the context fit is judged at
 constexpr long         kGgufHeaderBytes = 16 * 1024 * 1024; // range-read budget for a remote GGUF header
 
@@ -924,12 +923,16 @@ GgufMeta read_gguf_meta(const std::string & path) {
 // ModelsEngine
 // ===========================================================================
 ModelsEngine::ModelsEngine(std::string download_dir, const config::Ini * ini,
-                           std::function<std::string()> current_model)
+                           std::function<std::string()> current_model, int catalog_size,
+                           std::string data_dir)
     : download_dir_(std::move(download_dir)),
       ini_(ini),
       current_model_(std::move(current_model)),
+      catalog_size_(std::min(std::max(catalog_size, 1), 1000)),   // one HF listing page
+      data_dir_(data_dir.empty() ? download_dir_ : std::move(data_dir)),
       hf_cache_(std::make_unique<HfCache>()) {
     status_ = "live HuggingFace catalog";
+    load_catalog_cache();   // serve last catalog instantly; refresh lazily when stale
 }
 ModelsEngine::~ModelsEngine() {
     cancel_.store(true);
@@ -1606,18 +1609,15 @@ std::string url_encode(const std::string & s) {
     return o;
 }
 
-// HuggingFace model search restricted to GGUF repos.
-bool hf_search(const std::string & query, int limit, const std::string & sort,
-               std::vector<HfHit> & out, std::string & err) {
-    std::string url = "https://huggingface.co/api/models?filter=gguf&direction=-1&limit=" +
-                      std::to_string(limit) + "&sort=" + (sort.empty() ? "downloads" : sort);
-    if (!query.empty()) url += "&search=" + url_encode(query);
-    std::string body;
-    if (!curl_get_string(url, body, err)) return false;
+// Append the GGUF repos in one HF listing page to `out`, stopping at `target`.
+// Returns how many were added (0 = empty page / parse error → caller stops).
+std::size_t parse_hf_page(const std::string & body, int target, std::vector<HfHit> & out, std::string & err) {
+    std::size_t added = 0;
     try {
         auto j = nlohmann::json::parse(body);
-        if (!j.is_array()) { err = "unexpected HF response"; return false; }
+        if (!j.is_array()) { err = "unexpected HF response"; return 0; }
         for (const auto & m : j) {
+            if ((int) out.size() >= target) break;
             HfHit h;
             h.repo = m.value("id", std::string());
             if (h.repo.empty()) continue;
@@ -1626,12 +1626,63 @@ bool hf_search(const std::string & query, int limit, const std::string & sort,
             h.downloads = m.value("downloads", (std::uint64_t) 0);
             h.likes     = m.value("likes", (std::uint64_t) 0);
             h.pipeline      = m.value("pipeline_tag", std::string());
-            // The default listing returns createdAt (lastModified needs expand[],
-            // which drops downloads/likes) — use whichever is present.
+            // sort=lastModified returns lastModified AND keeps downloads/likes;
+            // fall back to createdAt just in case.
             h.last_modified = m.value("lastModified", m.value("createdAt", std::string()));
-            out.push_back(std::move(h));
+            out.push_back(std::move(h)); ++added;
         }
-    } catch (const std::exception & e) { err = std::string("parse: ") + e.what(); return false; }
+    } catch (const std::exception & e) { err = std::string("parse: ") + e.what(); }
+    return added;
+}
+
+// GET that also extracts the `Link: <url>; rel="next"` cursor from the response
+// headers (next_url empty = last page) — for paging the HF listing.
+bool curl_get_paged(const std::string & url, std::string & out, std::string & next_url, std::string & err) {
+    ensure_curl_global();
+    CURL * c = curl_easy_init();
+    if (!c) { err = "curl_easy_init failed"; return false; }
+    out.clear(); next_url.clear();
+    std::string link_hdr;
+    curl_easy_setopt(c, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, str_write_cb);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &out);
+    curl_easy_setopt(c, CURLOPT_HEADERFUNCTION,
+        +[](char * b, size_t sz, size_t n, void * ud) -> size_t {
+            size_t len = sz * n; auto * h = static_cast<std::string *>(ud);
+            if (len >= 5 && (b[0] == 'l' || b[0] == 'L') && (b[1] == 'i' || b[1] == 'I') &&
+                (b[2] == 'n' || b[2] == 'N') && (b[3] == 'k' || b[3] == 'K') && b[4] == ':')
+                h->append(b + 5, len - 5);
+            return len;
+        });
+    curl_easy_setopt(c, CURLOPT_HEADERDATA, &link_hdr);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(c, CURLOPT_FAILONERROR, 1L);
+    apply_common_curl(c);
+    CURLcode rc = curl_easy_perform(c);
+    long code = 0; curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_cleanup(c);
+    if (rc != CURLE_OK) { err = std::string("curl: ") + curl_easy_strerror(rc); return false; }
+    if (code >= 400)    { err = "HTTP " + std::to_string(code); return false; }
+    static const std::regex re(R"(<([^>]+)>\s*;\s*rel="next")");
+    std::smatch mm;
+    if (std::regex_search(link_hdr, mm, re)) next_url = mm[1].str();
+    return true;
+}
+
+// Pull up to `target` most-recently-updated GGUF repos, following the HF cursor
+// across pages until we have enough OR the listing is exhausted — we're bounded
+// by GGUF-only repos, so "keep going until 1000 or it's finished" terminates.
+bool hf_search_recent(int target, std::vector<HfHit> & out, std::string & err) {
+    out.clear();
+    if (target < 1) target = 1;
+    std::string url = "https://huggingface.co/api/models?filter=gguf&direction=-1&sort=lastModified&limit=" +
+                      std::to_string(std::min(target, 1000));
+    for (int guard = 0; (int) out.size() < target && !url.empty() && guard < 64; ++guard) {
+        std::string body, next;
+        if (!curl_get_paged(url, body, next, err)) return !out.empty();  // keep a partial list on a later-page error
+        if (parse_hf_page(body, target, out, err) == 0) break;           // empty page → exhausted
+        url = next;                                                       // follow the cursor
+    }
     return true;
 }
 
@@ -1708,6 +1759,50 @@ void build_light_entry(const HfHit & h, ModelEntry & out) {
     out.gguf_sources = { { h.repo, h.owner } };
 }
 
+// ---- persisted catalog cache (lives in the configured data dir) ------------
+// We store only the raw HF hits (the catalog is GGUF-bounded and small); the
+// scoreable entry is rebuilt cheaply via build_light_entry on load. Serving
+// from this file means a restart shows the last catalog instantly and the
+// 1-hour refresh clock survives across restarts.
+std::string catalog_cache_path(const std::string & data_dir) {
+    std::string d = data_dir.empty() ? std::string(".") : data_dir;
+    return (fs::path(d) / "easyai_hf_catalog.json").string();
+}
+void save_catalog_file(const std::string & path, const std::vector<HfHit> & hits, std::int64_t when) {
+    std::error_code ec;
+    fs::create_directories(fs::path(path).parent_path(), ec);   // engine creates the data dir
+    ordered_json arr = ordered_json::array();
+    for (const auto & h : hits)
+        arr.push_back({ {"repo", h.repo}, {"owner", h.owner}, {"downloads", h.downloads},
+                        {"likes", h.likes}, {"last_modified", h.last_modified}, {"pipeline", h.pipeline} });
+    ordered_json doc = { {"version", 1}, {"last_refresh", when}, {"sort", "lastModified"}, {"models", arr} };
+    std::string tmp = path + ".tmp";
+    { std::ofstream os(tmp, std::ios::binary); if (!os) return; os << doc.dump(); }
+    fs::rename(tmp, path, ec);                                   // replace atomically
+    if (ec) { std::error_code e2; fs::remove(tmp, e2); }
+}
+bool load_catalog_file(const std::string & path, std::vector<HfHit> & hits, std::int64_t & when) {
+    std::ifstream is(path, std::ios::binary);
+    if (!is) return false;
+    try {
+        ordered_json doc = ordered_json::parse(is);
+        when = doc.value("last_refresh", (std::int64_t) 0);
+        if (!doc.contains("models") || !doc["models"].is_array()) return false;
+        for (const auto & m : doc["models"]) {
+            HfHit h;
+            h.repo = m.value("repo", std::string());
+            if (h.repo.empty()) continue;
+            h.owner         = m.value("owner", std::string());
+            h.downloads     = m.value("downloads", (std::uint64_t) 0);
+            h.likes         = m.value("likes", (std::uint64_t) 0);
+            h.last_modified = m.value("last_modified", std::string());
+            h.pipeline      = m.value("pipeline", std::string());
+            hits.push_back(std::move(h));
+        }
+    } catch (...) { return false; }
+    return true;
+}
+
 }  // namespace
 #endif  // EASYAI_HAVE_CURL
 
@@ -1724,7 +1819,7 @@ void ModelsEngine::start_refresh(bool force) {
     refresh_thread_ = std::thread([this]() {
 #if defined(EASYAI_HAVE_CURL)
         std::vector<HfHit> hits; std::string err;
-        bool ok = hf_search("", kSnapshotSize, "downloads", hits, err);
+        bool ok = hf_search_recent(catalog_size_, hits, err);   // 1000 most-recent GGUF repos, paged
         std::vector<CachedHf> snap;
         if (ok) {
             snap.reserve(hits.size());
@@ -1734,18 +1829,43 @@ void ModelsEngine::start_refresh(bool force) {
                 snap.push_back(std::move(c));
             }
         }
+        std::int64_t when = now_sec();
         {
             std::lock_guard<std::mutex> lk(hf_cache_mu_);
             if (ok) { hf_cache_->snapshot = std::move(snap); hf_cache_->error.clear(); }
             else    { hf_cache_->error = err; }
-            hf_cache_->last_refresh = now_sec();
+            hf_cache_->last_refresh = when;
         }
+        if (ok) save_catalog_file(catalog_cache_path(data_dir_), hits, when);   // persist for next start
         easyai::log::write("[models] snapshot refreshed: %zu models%s\n",
                            ok ? hits.size() : (std::size_t) 0,
                            ok ? "" : " (HF error)");
 #endif
         refreshing_.store(false);
     });
+}
+
+// Populate the snapshot from the on-disk cache at startup, so /models serves the
+// last catalog immediately and only refreshes from HF once it is >1h stale.
+void ModelsEngine::load_catalog_cache() {
+#if defined(EASYAI_HAVE_CURL)
+    std::vector<HfHit> hits; std::int64_t when = 0;
+    if (!load_catalog_file(catalog_cache_path(data_dir_), hits, when) || hits.empty()) return;
+    std::vector<CachedHf> snap; snap.reserve(hits.size());
+    for (auto & h : hits) {
+        CachedHf c; c.repo = h.repo; c.downloads = h.downloads; c.likes = h.likes;
+        build_light_entry(h, c.entry); c.best_size = 0; c.ok = true;
+        snap.push_back(std::move(c));
+    }
+    {
+        std::lock_guard<std::mutex> lk(hf_cache_mu_);
+        hf_cache_->snapshot = std::move(snap);
+        hf_cache_->last_refresh = when;
+    }
+    easyai::log::write("[models] loaded %zu cached models (age %llds) from %s\n",
+                       hits.size(), (long long) (now_sec() - when),
+                       catalog_cache_path(data_dir_).c_str());
+#endif
 }
 
 std::string ModelsEngine::models_json(const std::string & query) {

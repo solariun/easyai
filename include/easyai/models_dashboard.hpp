@@ -81,8 +81,16 @@ public:
     // enriched with its repo's best GGUF (size → estimated params/quant) and
     // scored against detected hardware. Results are cached per repo for the
     // session.
+    // catalog_size — how many of the most-recently-updated GGUF repos to pull
+    // into the searchable snapshot on each refresh; clamped to [1, 1000]. The
+    // fetch follows the HuggingFace listing cursor until it has this many or the
+    // listing is exhausted.
+    // data_dir — directory where the catalog snapshot is persisted
+    // (easyai_hf_catalog.json), so a restart serves the last list instantly and
+    // the 1-hour refresh clock survives. Empty → falls back to download_dir.
     ModelsEngine(std::string download_dir, const config::Ini * ini,
-                 std::function<std::string()> current_model);
+                 std::function<std::string()> current_model, int catalog_size = 1000,
+                 std::string data_dir = "");
     ~ModelsEngine();
 
     ModelsEngine(const ModelsEngine &)             = delete;
@@ -127,6 +135,7 @@ public:
                        std::string & err);
 
     const std::string & download_dir() const { return download_dir_; }
+    const std::string & data_dir() const { return data_dir_; }
 
 private:
     void download_worker(int id, std::string repo, std::vector<RepoFile> files);
@@ -134,7 +143,11 @@ private:
     std::string                   download_dir_;
     const config::Ini *           ini_ = nullptr;
     std::function<std::string()>  current_model_;
+    int                           catalog_size_ = 1000;  // most-recent GGUF repos in the snapshot
+    std::string                   data_dir_;             // where the catalog cache is persisted
     std::string                   status_;
+
+    void load_catalog_cache();    // populate the snapshot from disk at startup
 
     // The static model snapshot (opaque pImpl; real type in the .cpp): the
     // enriched HF entries + last-refresh time. Guarded by hf_cache_mu_; rebuilt

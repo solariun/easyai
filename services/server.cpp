@@ -3889,6 +3889,15 @@ struct ServerArgs {
     std::string download_dir;            // where GGUF weights are downloaded /
                                          // listed / deleted. Default: dir of --model.
     std::string webui_password;          // gates /models + its API; empty = open.
+    int         catalog_size = 1000;     // most-recently-updated GGUF repos pulled
+                                         // into the searchable /models snapshot per
+                                         // refresh, paged from HF. Clamped [1,1000].
+                                         // CLI: --catalog-size N. INI:
+                                         // [SERVER] catalog_size.
+    std::string data_dir;                // where the /models catalog snapshot is
+                                         // cached (easyai_hf_catalog.json). Empty =
+                                         // alongside download_dir. CLI: --data-dir.
+                                         // INI: [SERVER] data_dir.
 
     // /mcp auth — by INI's [MCP_USER] when populated, OPEN otherwise.
     // `--no-mcp-auth` forces OPEN even if [MCP_USER] has entries
@@ -4097,6 +4106,8 @@ static const std::vector<FlagDef> & kFlags() {
         { {"--webui-placeholder"}, "SERVER", "webui_placeholder","webui_placeholder",true, SET_STR(&ServerArgs::webui_placeholder) },
         // ----- MODELS dashboard (SERVER) -----
         { {"--download-dir"},      "SERVER", "download_dir",    "download_dir",   true,  SET_STR(&ServerArgs::download_dir) },
+        { {"--data-dir"},          "SERVER", "data_dir",       "data_dir",       true,  SET_STR(&ServerArgs::data_dir) },
+        { {"--catalog-size"},      "SERVER", "catalog_size",   "catalog_size",   true,  SET_INT(&ServerArgs::catalog_size) },
         { {"--webui-password"},    "SERVER", "webui_password",  "webui_password", true,  SET_STR(&ServerArgs::webui_password) },
         { {"--webui"},             "SERVER", "webui_mode",     "webui_mode",     true,  SET_STR(&ServerArgs::webui_mode) },
 
@@ -7039,17 +7050,22 @@ int main(int argc, char ** argv) {
         ServerCtx * ctxp = ctx.get();
         ctx->models = std::make_unique<easyai::ModelsEngine>(
             dl_dir, &ini_config,
-            [ctxp]() -> std::string { return ctxp->engine.model_path(); });
+            [ctxp]() -> std::string { return ctxp->engine.model_path(); },
+            args.catalog_size, args.data_dir);
         std::fprintf(stderr,
             "[easyai-server] models: %s\n"
             "                download dir: %s\n"
+            "                catalog: %d most-recent GGUF repos, cached at %s/easyai_hf_catalog.json\n"
+            "                         (refreshed from HuggingFace on request, once >1h old)\n"
             "                /models auth: %s\n",
             ctx->models->status_message().c_str(),
             dl_dir.c_str(),
+            args.catalog_size, ctx->models->data_dir().c_str(),
             ctx->webui_password.empty() ? "OPEN (set webui_password to require login)"
                                         : "password required");
-        // Build the model list from HuggingFace on startup (background).
-        ctx->models->start_refresh(true);
+        // Serve the on-disk catalog cache (loaded in the ctor); only fetch from
+        // HuggingFace if it is missing or already >1h stale.
+        ctx->models->start_refresh(false);
     }
 
     // -------- http server -------------------------------------------------
