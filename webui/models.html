@@ -35,6 +35,8 @@
     position:sticky;top:0;background:rgba(27,31,32,.92);backdrop-filter:blur(8px);z-index:5}
   .brand{display:flex;align-items:center;gap:9px;font-weight:600;letter-spacing:.04em}
   .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--acc)}
+  .brand .logo{width:24px;height:24px;border-radius:6px;display:block;background:transparent}
+  .backChat{white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
   .brand .sub{color:var(--mut2);font-weight:400;letter-spacing:0}
   .sys{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto;align-items:center}
   .chip{background:var(--bg2);border:1px solid var(--line2);border-radius:999px;padding:4px 11px;font-size:12px;color:var(--mut)}
@@ -104,7 +106,7 @@
 <body>
 <div id="login" class="overlay hide">
   <form class="login" onsubmit="doLogin(event)">
-    <div class="brand" style="justify-content:center"><span class="dot"></span>MODELS</div>
+    <div class="brand" style="justify-content:center"><img src="/favicon" alt="" class="logo"><span id="loginName">MODELS</span></div>
     <h1>Sign in</h1>
     <div class="muted small">This dashboard is password-protected.</div>
     <input id="pw" type="password" placeholder="Password" autocomplete="current-password" autofocus>
@@ -114,8 +116,12 @@
 </div>
 
 <header class="top">
-  <div class="brand"><span class="dot"></span>MODELS<span class="sub small">&nbsp;· easyai</span></div>
+  <div class="brand">
+    <img src="/favicon" alt="" class="logo">
+    <span id="sysName">easyai</span><span class="sub small">&nbsp;· MODELS</span>
+  </div>
   <div class="sys" id="sysChips"><span class="muted small">detecting hardware…</span></div>
+  <a class="btn backChat" href="/" title="Return to the chat UI">←&nbsp;Back to chat</a>
 </header>
 <nav class="tabs">
   <button data-tab="recommend" class="active">Recommend</button>
@@ -465,8 +471,15 @@ $$('nav.tabs button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
 function resetSim(){SIM={};$('#s-ram').value=$('#s-vram').value=$('#s-cores').value='';loadSystem();loadModels();}
 
 async function boot(){try{await loadSystem();await loadModels();}catch(e){}}
+function applyBrand(a){
+  let name=(a&&a.title)?a.title:'easyai';
+  $('#sysName').textContent=name;
+  if($('#loginName'))$('#loginName').textContent=name;
+  document.title=name+' · MODELS';
+}
 async function init(){
   try{let a=await api('/models/api/auth');
+    applyBrand(a);
     if(a.required&&!a.authed){showLogin(true);return;}
     boot();
   }catch(e){/* 401 handled in api() */}

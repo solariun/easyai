@@ -7490,6 +7490,7 @@ int main(int argc, char ** argv) {
         nlohmann::ordered_json j{
             {"authed",       models_authed(ctx_ref, req)},
             {"required",     !ctx_ref.webui_password.empty()},
+            {"title",        args.webui_title},   // system name, shown in the page header
             {"source",       "huggingface"},
             {"status",       have ? ctx_ref.models->status_message()
                                   : std::string("engine not initialised")},
