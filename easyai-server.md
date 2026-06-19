@@ -1040,8 +1040,8 @@ Highlights of the work documented in [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md):
   explicit "File capability — NONE this session" block when no file
   tool is registered), the information pipeline, and the cite-sources
   block. The
-  ~180-line copies that used to live in `examples/server.cpp` and
-  `examples/local.cpp` collapsed onto 15-line wrappers.
+  ~180-line copies that used to live in `services/server.cpp` and
+  `services/local.cpp` collapsed onto 15-line wrappers.
 - **Auto-generated transaction logs at `/tmp/easyai-<pid>-<epoch>.log`
   are created with `O_EXCL | O_NOFOLLOW | O_CLOEXEC` and mode `0600`.**
   `O_EXCL` makes the create atomic-or-fail so a local attacker can't

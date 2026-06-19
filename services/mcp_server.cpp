@@ -200,7 +200,7 @@ private:
 };
 
 // =============================================================================
-// ServerArgs / FlagDef — same pattern as examples/server.cpp.
+// ServerArgs / FlagDef — same pattern as services/server.cpp.
 // One row per setting, both CLI parser and INI overlay walk the same
 // table.
 // =============================================================================
@@ -791,7 +791,7 @@ void route_tools(const ServerCtx & ctx,
 
 // =============================================================================
 // Signal handling — same atomic g_server pointer pattern as
-// examples/server.cpp.
+// services/server.cpp.
 // =============================================================================
 
 std::atomic<httplib::Server *> g_server{nullptr};

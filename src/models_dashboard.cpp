@@ -1436,11 +1436,34 @@ int ModelsEngine::start_download(const std::string & repo, const std::string & f
     if (target.empty()) { err = "no matching .gguf"; return -1; }
     std::sort(target.begin(), target.end(), [](const RepoFile & a, const RepoFile & b) { return a.path < b.path; });
 
+    std::uint64_t total_bytes = 0;
     for (auto & f : target) {
         fs::path dest; std::string verr;
         if (!safe_in_dir(download_dir_, base_name(f.path), dest, verr)) { err = verr + " (" + base_name(f.path) + ")"; return -1; }
         std::error_code ec;
         if (fs::exists(dest, ec)) { err = "already downloaded: " + base_name(f.path) + " — delete it first"; return -1; }
+        total_bytes += f.size_bytes;
+    }
+
+    // Disk guard: refuse if the completed download would leave the disk more
+    // than 95% full (i.e. less than 5% headroom).
+    {
+        std::error_code se;
+        auto sp = fs::space(download_dir_, se);
+        if (!se && sp.capacity > 0) {
+            std::uint64_t used_after = (sp.capacity - sp.available) + total_bytes;
+            if ((double) used_after > 0.95 * (double) sp.capacity) {
+                const double gb = 1024.0 * 1024.0 * 1024.0;
+                char m[256];
+                std::snprintf(m, sizeof(m),
+                    "not enough disk: this %.1f GB download would fill the disk to %.0f%% "
+                    "(%.1f GB free of %.1f GB) — downloads are blocked above 95%%",
+                    (double) total_bytes / gb, 100.0 * (double) used_after / (double) sp.capacity,
+                    (double) sp.available / gb, (double) sp.capacity / gb);
+                err = m;
+                return -1;
+            }
+        }
     }
 
     if (worker_.joinable()) worker_.join();

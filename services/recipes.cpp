@@ -1,4 +1,4 @@
-// examples/recipes.cpp
+// services/recipes.cpp
 // ----------------------------------------------------------------------------
 // "Recipe book" sample agent.  Companion to manual.md → "Writing your own
 // tools".  Demonstrates how a regular C++ developer (no llama.cpp / no JSON
@@ -162,7 +162,7 @@ int main(int argc, char ** argv) {
               << "  tools=" << engine.tools().size() << "\n\n";
 
     // One canned question that exercises both tools.  Replace with whatever
-    // you want, or wrap in a loop to make a REPL — see examples/chat.cpp.
+    // you want, or wrap in a loop to make a REPL — see services/chat.cpp.
     engine.chat("What's today's date, and what's the weather in Sao Paulo right now?");
     std::cout << "\n";
     return 0;

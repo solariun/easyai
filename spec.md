@@ -20,8 +20,8 @@ existing split-layout link lines still work.
 | One-call agent setup | `easyai::Session` (lib) |
 | External tool loader (`EASYAI-*.tools` manifests) | `easyai::load_external_tools_from_dir` (lib) |
 | MCP server / client | `easyai::mcp::*`, `easyai::McpClient` (lib) |
-| HTTP server, SSE, web UI | `examples/server.cpp` ONLY |
-| REPL, hybrid shell, signal handling | `examples/cli.cpp` ONLY |
+| HTTP server, SSE, web UI | `services/server.cpp` ONLY |
+| REPL, hybrid shell, signal handling | `services/cli.cpp` ONLY |
 | `--show-system-prompt`, presets, banners | shared via lib helpers; binary owns the flag |
 
 Rule: anything that touches the model, registers a tool, or composes a
@@ -146,9 +146,9 @@ the tool ships its own guidance):
 **Binary wiring** (resolution is lib-side; each binary registers only
 `enabled` specs, BEFORE `tool_lookup` so the snapshot covers them, and
 skips an enabled-but-url-less spec with a warning):
-* `examples/cli.cpp` `register_tools()` — re-reads the INI, honours an
+* `services/cli.cpp` `register_tools()` — re-reads the INI, honours an
   explicit `--tools` allowlist by `ai-<name>`.
-* `examples/server.cpp` — resolves from the server's own loaded
+* `services/server.cpp` — resolves from the server's own loaded
   `ini_config`. Tools execute SERVER-SIDE (the server is the agent),
   so the webui and any `/v1/chat/completions` consumer get them and
   they appear on `/v1/tools`. Gated by `--no-local-tools` /
@@ -297,12 +297,12 @@ self-gate on their flags:
 | `# AUTHORITATIVE DATE/TIME` (+ `# KNOWLEDGE CUTOFF` on server) | the `datetime` tool is registered — OR (server) the `--inject-datetime` flag/header is on. Tool presence forces it on even if the flag is off. |
 | `# KNOWLEDGE LOOP` + `# KNOWLEDGE VOCABULARY` | a `knowledge_*` tool is registered AND a store is configured (`--memory`/`--RAG`). Now INDEPENDENT of the datetime toggle — turning datetime off no longer suppresses memory. |
 
-* `examples/server.cpp` `prepare_engine_for_request`: `inject_dt =
+* `services/server.cpp` `prepare_engine_for_request`: `inject_dt =
   inject_now || view.datetime_on`; `mem_root = view.memory_on ?
   ctx.memory_root : ""`; `build_authoritative_preamble(ctx, inject_dt,
   mem_root)`. Per-request, off the engine's current tool set (so a
   client that replaces tools is judged on what it actually sent).
-* `examples/cli.cpp`: injects from `ToolsetView::from_tools(cli.tools())`
+* `services/cli.cpp`: injects from `ToolsetView::from_tools(cli.tools())`
   into the baked system prompt — `datetime` tool ⇒ date/time block (no
   CUTOFF; the remote model's cutoff is unknown), `knowledge_*` + `--memory`
   ⇒ memory blocks. `cite_sources=false` here (the cli prefix emits it).

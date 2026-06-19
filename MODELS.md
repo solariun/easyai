@@ -39,7 +39,7 @@ It does four things:
 
 ```
 Browser ──/models (page) ────────────► embedded webui/models.html (vanilla JS)
-        ──/models/api/login,/auth ────► cookie-session gate (examples/server.cpp)
+        ──/models/api/login,/auth ────► cookie-session gate (services/server.cpp)
         ──/models/api/system,/models ─► ModelsEngine: ggml hardware + live HF + scoring
         ──/models/api/local{,/detail} ► ModelsEngine: GGUF header introspection + [MODEL_*]
         ──/models/api/run ────────────► Engine::reload() in-process + ai.gguf symlink
@@ -64,7 +64,7 @@ Implementation: [`src/models_dashboard.cpp`](src/models_dashboard.cpp) +
 [`include/easyai/models_dashboard.hpp`](include/easyai/models_dashboard.hpp) (the
 `ModelsEngine`, in `libeasyai`), `Engine::reload()` in
 [`src/engine.cpp`](src/engine.cpp), the routes / cookie auth / nav-injection in
-[`examples/server.cpp`](examples/server.cpp), and the page in
+[`services/server.cpp`](services/server.cpp), and the page in
 [`webui/models.html`](webui/models.html) (xxd-embedded at build time).
 
 ---

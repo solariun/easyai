@@ -60,7 +60,7 @@ easyai/
 │                   ui,text,log,cli,backend,agent,easyai}.hpp                  # public API
 ├── src/{engine,tool,builtin_tools,presets,plan,client,
 │        ui,log,cli,cli_client,backend,agent}.cpp                              # impl
-├── examples/{local,cli,server,agent,chat,recipes}.cpp                         # binaries
+├── services/{local,cli,server,agent,chat,recipes}.cpp                         # binaries
 ├── webui/{index.html,bundle.js,bundle.css,loading.html,AI-brain.svg}          # llama-server fork
 ├── cmake/{xxd.cmake,easyaiConfig.cmake.in}                                    # build helpers + find_package
 ├── scripts/install_easyai_server.sh                                           # Linux installer
@@ -139,7 +139,7 @@ by creating IMPORTED targets at find_package time.
 - `render_string()` produces a GitHub-style markdown checklist
   (`- [ ] / [~] / [x]`).
 
-**Authoritative datetime + cutoff hint** (`examples/server.cpp`,
+**Authoritative datetime + cutoff hint** (`services/server.cpp`,
 `build_authoritative_preamble` + `prepare_engine_for_request`)
 - Per-request fresh timestamp injected into the system prompt: current
   date+time+TZ + knowledge-cutoff rule (verify post-cutoff facts via
@@ -152,7 +152,7 @@ by creating IMPORTED targets at find_package time.
 - Per-request override via `X-Easyai-Inject: on|off` HTTP header.
   Defaults to the server-side flag if header absent or unrecognised.
 
-**Server** (`examples/server.cpp`)
+**Server** (`services/server.cpp`)
 - cpp-httplib + nlohmann::json (vendored by llama.cpp).
 - Endpoints: `GET /` (webui), `/bundle.{js,css}`, `/loading.html`, `/favicon{.ico}`,
   `/health`, `/metrics`, `/v1/models`, `POST /v1/chat/completions` (OpenAI-compat
@@ -454,7 +454,7 @@ Webui title default also flips to `"Deep"`.
   headroom) and flood color (#00bcd4) all unchanged.
 
   Wiring: webui/AI-brain.svg (canonical) + inline kBrandSvg in
-  examples/server.cpp updated in lockstep so the favicon route
+  services/server.cpp updated in lockstep so the favicon route
   serves the same softened version downstream embedders see.
 
   Docs: README.md "What's new" entry with before/after table.
@@ -498,7 +498,7 @@ Webui title default also flips to `"Deep"`.
       + void Streaming::notify_tool(...) { on_tool_(...); }
         One-line forwarder.
 
-    examples/cli.cpp run_one()
+    services/cli.cpp run_one()
       The post-streaming.attach(cli) wrapper:
         cli.on_tool([&](const ToolCall & c, const ToolResult & r) {
             streaming.notify_tool(c, r);   // canonical UI
@@ -537,7 +537,7 @@ Webui title default also flips to `"Deep"`.
   headroom and doesn't get clipped at the SVG edge.
 
   Same SVG content in webui/AI-brain.svg (canonical) and inline
-  kBrandSvg in examples/server.cpp (compiled into the binary,
+  kBrandSvg in services/server.cpp (compiled into the binary,
   served at /favicon route).
 
   Subsequent tuning (cc92d51) softened the aura — see the aura
@@ -566,7 +566,7 @@ Webui title default also flips to `"Deep"`.
     --compress + --no-continue now warns instead of erroring (the
     auto_continue=off + auto_compress=on case from INI).
 
-  Options struct (examples/cli.cpp):
+  Options struct (services/cli.cpp):
     * Renamed: continue_session -> auto_continue (default true)
     * Renamed: compress_session -> auto_compress (default false)
     * Added: auto_continue_cli_set, auto_compress_cli_set,
@@ -653,7 +653,7 @@ Webui title default also flips to `"Deep"`.
       history_json vector<string> the streaming loop already
       populates — no separate serialisation path to maintain.
 
-  Code (examples/cli.cpp):
+  Code (services/cli.cpp):
     * session_file_path() resolves to <cwd>/.easyai_session.
     * save_session() atomic write (tempfile + rename, O_NOFOLLOW,
       mode 0600) — called after every cli.chat() return in
@@ -674,11 +674,11 @@ Webui title default also flips to `"Deep"`.
     * Top-of-file comment block updated with the new specials.
 
   Code (raw log default flipped to OFF):
-    * examples/cli.cpp: the binary's open_log_tee() only fires when
+    * services/cli.cpp: the binary's open_log_tee() only fires when
       --log-file PATH is given.  Previous --verbose-implies-auto-/tmp
       behaviour removed — operators got a stale .log per session
       whether they wanted one or not.
-    * examples/cli.cpp main(): EASYAI_NO_AUTO_LOG=1 is set by default
+    * services/cli.cpp main(): EASYAI_NO_AUTO_LOG=1 is set by default
       (only if the env var is not already set, so operator override
       still wins) — suppresses the library-side auto-open in
       src/log.cpp::auto_open that was firing on every Client
@@ -784,7 +784,7 @@ Webui title default also flips to `"Deep"`.
 2026-05-11 — Brand asset: AI Box logo inlined as constexpr in server.cpp.
              Replaced webui/AI-brain.svg's xxd build-step with an
              inline constexpr std::string_view kBrandSvg in
-             examples/server.cpp.  Removed the brand-specific
+             services/server.cpp.  Removed the brand-specific
              add_custom_command from CMakeLists.txt.  Canonical
              copy stays at webui/AI-brain.svg for external rebrand /
              docs use.  Favicon route's #if EASYAI_BUILD_WEBUI guard
@@ -1324,8 +1324,8 @@ Webui title default also flips to `"Deep"`.
       and traps the model into using bash for file work).
     * --allow-fs becomes implied by either flag; still works
       explicitly for the no-sandbox / no-bash case.
-    * Toolbelt::tools() predicate + examples/cli.cpp wants()
-      lambda + examples/server.cpp arg wiring all updated
+    * Toolbelt::tools() predicate + services/cli.cpp wants()
+      lambda + services/server.cpp arg wiring all updated
       together.
     * In-the-wild bug: a session with --allow-bash but no
       --allow-fs produced a model with bash but no fs tools, so
@@ -1476,9 +1476,9 @@ Webui title default also flips to `"Deep"`.
       `--http-timeout SECONDS` / `[SERVER] http_timeout` in INI.
 
   CLI / INI wiring:
-    * examples/cli.cpp: --http-retries N, EASYAI_HTTP_RETRIES env,
+    * services/cli.cpp: --http-retries N, EASYAI_HTTP_RETRIES env,
       EASYAI_TIMEOUT env.
-    * examples/server.cpp: --http-retries N + --http-timeout SECONDS,
+    * services/server.cpp: --http-retries N + --http-timeout SECONDS,
       both via the FlagDef table (so they get CLI + INI for free).
       MCP-client opts inherit both values.
     * Startup banner now echoes "http_timeout=Xs http_retries=Y"
@@ -1515,12 +1515,12 @@ Webui title default also flips to `"Deep"`.
       "EXPERIMENTAL —" prefix, dispatcher section header),
       include/easyai/backend.hpp + src/backend.cpp (Config gains
       split_rag bool; LocalBackend picks the factory by it),
-      examples/cli.cpp (--split-rag flag, register_tools branch
-      flipped, --tools/--RAG help refreshed), examples/server.cpp
+      services/cli.cpp (--split-rag flag, register_tools branch
+      flipped, --tools/--RAG help refreshed), services/server.cpp
       (FlagDef table: split_rag/--split-rag/SERVER.split_rag,
       registration block flipped, --RAG/--split-rag help
-      refreshed), examples/mcp_server.cpp (same FlagDef + INI
-      key + registration flip), examples/local.cpp (--split-rag
+      refreshed), services/mcp_server.cpp (same FlagDef + INI
+      key + registration flip), services/local.cpp (--split-rag
       arg, plumbed into LocalBackend::Config). All four affected
       binaries build clean. easyai-cli --list-tools --RAG <dir>
       reports "rag" by default; with --split-rag added, reports
@@ -1531,8 +1531,8 @@ Webui title default also flips to `"Deep"`.
 
   (2) Default system prompt rewritten to emphasise plan → act →
       iterate in tight steps, kept brief on purpose so the user
-      has room to refine. examples/server.cpp's kBuiltinSystem
-      and examples/local.cpp's kBuiltinSystem went from ~30-90
+      has room to refine. services/server.cpp's kBuiltinSystem
+      and services/local.cpp's kBuiltinSystem went from ~30-90
       lines of operating-loop / rule prose down to ~20-30 lines
       that say: answer briefly; for real work, plan ONE small
       next step, act on it in the same turn, read the result,
@@ -1595,8 +1595,8 @@ Webui title default also flips to `"Deep"`.
                  user-prefs, user-projects, user-hardware,
                  user-corrections.
                  All four consumers updated to register the new
-                 tool: examples/server.cpp, examples/mcp_server.cpp,
-                 examples/cli.cpp (with tools_enabled gating
+                 tool: services/server.cpp, services/mcp_server.cpp,
+                 services/cli.cpp (with tools_enabled gating
                  mirroring the rest), src/backend.cpp (used by
                  easyai-local + easyai-chat). Help-text strings
                  also updated — the lib went from 5/6 to seven
@@ -1773,7 +1773,7 @@ d0f7965  Tools: get_current_dir builtin + JSON-manifest external tools
                      env passthrough opt-in allowlist; closed stdin; setpgid +
                      SIGTERM-then-SIGKILL kills grandchildren. New --tools-json
                      PATH flag in easyai-local / easyai-cli / easyai-server.
-                     manual.md §3.3.3 + §3.3.4. examples/tools.example.json.)
+                     manual.md §3.3.3 + §3.3.4. services/tools.example.json.)
 
 2026-04-29 (earlier) — robustness pass on server + CLI streaming.
 
@@ -2035,7 +2035,7 @@ c6a09d6  Single combined bar above the textarea (tone + ctx + last)
 
 ## 7. Common pitfalls / debugging tips
 
-- After any `examples/server.cpp` change that affects the served HTML/JS
+- After any `services/server.cpp` change that affects the served HTML/JS
   injection, the user MUST do **Cmd+Shift+R** in the browser to bypass cache.
 - The bundle.js is 6.2 MB; binary size jumps from ~1.5 MB to ~8.3 MB.
 - `--ngl 99` poisons `common_fit_params` (refuses to lower a user-pinned
@@ -2099,7 +2099,7 @@ sudo journalctl -u easyai-server -f
 
 ### Files touched
 
-`examples/cli.cpp`, `src/rag_tools.cpp`, `include/easyai/ui.hpp`, `src/ui.cpp`, `src/cli_client.cpp`, `spec.md`, `easyai-cli.md`, `RAG.md`, `manual.md`, `design.md`, `README.md`.
+`services/cli.cpp`, `src/rag_tools.cpp`, `include/easyai/ui.hpp`, `src/ui.cpp`, `src/cli_client.cpp`, `spec.md`, `easyai-cli.md`, `RAG.md`, `manual.md`, `design.md`, `README.md`.
 
 ---
 

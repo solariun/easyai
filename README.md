@@ -10,10 +10,13 @@ it C++ functions; it gives the model the ability to call them.  That's
 the whole pitch.
 
 It ships **one unified library** (`libeasyai`) you can
-`find_package(easyai)` and link against, plus seven ready-to-run
-binaries. The library is the product; the binaries are demos that
-prove what it can do. See [`LIB_GUIDE.md`](LIB_GUIDE.md) for the
-OpenAI-Python-SDK-shaped `easyai::Session` quickstart and the tour of
+`find_package(easyai)` and link against — **plus a complete set of
+ready-to-run applications** built on it: a private, OpenAI-compatible
+**AI server** with a polished web dashboard, a full-screen agent
+**CLI/TUI**, an **MCP provider**, and a local **REPL** — all backed by a
+**batteries-included toolset** (web search & fetch, sandboxed files,
+shell, Python, memory/RAG, MCP). See [`LIB_GUIDE.md`](LIB_GUIDE.md) for
+the OpenAI-Python-SDK-shaped `easyai::Session` quickstart and the tour of
 the lib surface.
 
 | Library             | Purpose                                                                                                                                       |
@@ -30,6 +33,45 @@ the lib surface.
 | `easyai-agent`       | A demo agent showing every built-in tool plus an inline custom tool.                                                                                |
 | `easyai-recipes`     | Tutorial agent paired with `manual.md` — implements `today_is` and `weather` (HTTP-calling) from scratch.                                          |
 | `easyai-chat`        | A bare-bones REPL with no tools — useful as a sanity check.                                                                                          |
+
+## ⭐ Applications & a batteries-included toolset
+
+easyai is more than a library — it's a **complete, self-hostable AI stack** with a
+**rich set of tools** the model can use out of the box.
+
+**The applications**
+
+- 🖥️ **easyai-server** — your own private, **OpenAI-compatible AI server** with a
+  polished chat web UI and the **[MODELS dashboard](MODELS.md)** (`/models`): browse &
+  fit-score HuggingFace models against *your* hardware, read a model's GGUF
+  parameters, **hot-swap the running model in one click**, and download weights — all
+  password-gated. Full SSE streaming, Prometheus `/metrics`, Bearer auth, KV-cache /
+  flash-attn knobs. Speaks **MCP, OpenAI and Ollama** from one process. A drop-in
+  `llama-server`, supercharged.
+- 💬 **easyai-cli** — a gorgeous full-screen agent **TUI** (markdown, live tool rows
+  with diffs, `/`-commands, `@`-file completion, themes), a hybrid **AI shell**
+  (`--shell`), or one-shot `-p` scripting — against any OpenAI-protocol endpoint, with
+  full sampling control and server-management subcommands.
+- 🔌 **easyai-mcp-server** — expose the **entire toolset as an MCP provider** that any
+  agent (Claude Desktop, Cursor, …) can call, with a tunable worker pool for
+  thousands-of-clients deployments.
+- ⚡ **easyai-local** — a local GGUF **REPL** (`llama-cli`++) with tools, presets, and
+  sandboxing — no server required.
+
+**The toolset** — registered with a single flag, available to every app and the MCP
+server:
+
+| Tool | What it does |
+|------|--------------|
+| 🌐 **web** | Live internet **search + fetch** (SearXNG / Google CSE / direct URL). |
+| 📁 **fs** | Sandboxed **read / write / list / grep** over a directory. |
+| 🐚 **bash** · 🧮 **evaluate** | Run shell commands, or **isolated stdlib-only Python** for compute. |
+| 🧠 **memory + RAG** | Persistent knowledge store with **automatic vocabulary injection** ([`RAG.md`](RAG.md)). |
+| 🔗 **MCP client** | Consume tools from **any remote MCP server** ([`MCP.md`](MCP.md)). |
+| 🛠️ **external tools** | Wire up **your own CLIs** from a JSON manifest — zero code ([`EXTERNAL_TOOLS.md`](EXTERNAL_TOOLS.md)). |
+| 🧩 **plan · datetime · tool_lookup · remote-model** | Planning, authoritative time, large-catalogue tool discovery, peer-model delegation. |
+
+Full catalogue and safety model: **[`AI_TOOLS.md`](AI_TOOLS.md)**.
 
 > **Status** — used in production on a Linux Vulkan box (Radeon 680M)
 > as a self-hosted ChatGPT-style assistant.  Apple Silicon (Metal),
@@ -72,8 +114,8 @@ session.chat("hello");
 Pair with `easyai::Tool::builder(...).system_addendum("...")` to let a
 custom tool ship its own system-prompt guardrails — Session
 auto-concatenates them. Full reference in
-[`LIB_GUIDE.md`](LIB_GUIDE.md); minimum demo in `examples/library_demo.cpp`
-(binary `easyai-library-demo`). `examples/local.cpp` has been
+[`LIB_GUIDE.md`](LIB_GUIDE.md); minimum demo in `services/library_demo.cpp`
+(binary `easyai-library-demo`). `services/local.cpp` has been
 migrated to Session as a reference for in-process agents; `cli.cpp`
 and `server.cpp` follow in a later pass and continue to work via the
 existing Engine/Client paths.
@@ -231,7 +273,7 @@ block omitted, no wasted tokens.
 | `easyai-cli`    | Once when building the system prefix sent to the remote server. |
 
 The AUTHORITATIVE preamble used to live as a `build_authoritative_
-preamble` inside `examples/server.cpp` with parallel partial
+preamble` inside `services/server.cpp` with parallel partial
 copies in `local.cpp` and nothing in `cli.cpp`. That drift is gone:
 the builder is now public in libeasyai —
 
@@ -464,7 +506,7 @@ Gaussian blurs to subtler values:
 Gradient, mark geometry, viewBox headroom and filter cyan flood
 (`#00bcd4`) all unchanged.  Both `webui/AI-brain.svg` (the
 canonical SVG source) and the inline `constexpr kBrandSvg` in
-[`examples/server.cpp`](examples/server.cpp) updated in lockstep,
+[`services/server.cpp`](services/server.cpp) updated in lockstep,
 so the favicon route serves the same softened version every
 embedder sees.
 
@@ -1525,7 +1567,7 @@ use `easyai-cli`.
 
 ### Example apps (lib API demos)
 
-Three small binaries under `examples/` show the lib API in
+Three small binaries under `services/` show the lib API in
 context. They take minimal flags — the real config happens in
 the C++ source as fluent setter chains. Read these as the
 canonical "how do I use the lib?" answer.
@@ -2411,7 +2453,7 @@ actually answered.
 
 * [`manual.md`](manual.md) — hands-on developer manual.  Includes a
   step-by-step **"Recipe book — write your first tools"** chapter
-  (section 3.8) that walks through `examples/recipes.cpp` line by
+  (section 3.8) that walks through `services/recipes.cpp` line by
   line in a friendly, accessible style.  Best place to start if you
   want to extend easyai with your own services.
 * [`design.md`](design.md) — architecture, data flow, why we build on top of
@@ -2443,7 +2485,7 @@ custom destructor:
 * HTTP handlers cap request bodies at 8 MiB (configurable via `--max-body`)
   and catch every `std::exception` at the boundary so a malformed request
   cannot tear down the server.
-* No raw `new`/`delete` anywhere in `src/` or `examples/`.
+* No raw `new`/`delete` anywhere in `src/` or `services/`.
 
 ---
 

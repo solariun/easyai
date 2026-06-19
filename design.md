@@ -971,7 +971,7 @@ is well known but worth describing as it lives in this codebase,
 because it interacts subtly with client-supplied system prompts.
 
 **One builder, three binaries.** The preamble used to live as
-`build_authoritative_preamble` inside `examples/server.cpp`, with
+`build_authoritative_preamble` inside `services/server.cpp`, with
 parallel partial copies in `local.cpp` and nothing in `cli.cpp`.
 That drift was a smell — change the format and you'd silently miss
 the others.  Since 2026-05-16 the builder lives in libeasyai:
@@ -1888,7 +1888,7 @@ patterns (a few tools/call per turn from one model) don't need it.
   tool error and reacts (typical model behaviour: try once more
   through the model, then narrate the failure to the user).
 * **Name collision with a local tool** → the tool wiring code in
-  the consumer (e.g. `examples/server.cpp`) skips the remote dup and
+  the consumer (e.g. `services/server.cpp`) skips the remote dup and
   logs at startup. Local tools always win.
 
 ### Retry semantics (`ClientOptions::retries`, default 5)
@@ -1912,7 +1912,7 @@ partial body from a failed try doesn't leak into the next.  Because
 streaming), the "never retry mid-stream" rule from libeasyai-cli
 doesn't apply here — every retry is safe by construction.
 
-`opts.retries` is wired into `examples/server.cpp` from the new
+`opts.retries` is wired into `services/server.cpp` from the new
 `--http-retries` flag (default 5), so the server's MCP-client side
 inherits the same retry budget that the operator picks for the
 listen socket.
@@ -2062,7 +2062,7 @@ For each suspect category we ran a targeted scan:
 
 | Category                       | How we scanned                                                                        |
 |--------------------------------|---------------------------------------------------------------------------------------|
-| `std::regex` usage             | `grep -nE 'std::regex\|regex_(replace\|search\|match)\|sregex_iterator' src/ examples/`|
+| `std::regex` usage             | `grep -nE 'std::regex\|regex_(replace\|search\|match)\|sregex_iterator' src/ services/`|
 | Direct & mutual recursion      | Python AST-ish walker: for each function definition, search its body for its own name; manually validate each hit |
 | Stack-allocated big buffers    | `grep -nE '\b(char\|int\|float\|...)\s+[a-z_]+\s*\[[0-9]+\]'`; sort by declared size  |
 | `alloca` / VLAs                | `grep -nE 'alloca\|__builtin_alloca'` + manual scan for VLA `T name[expr]` patterns   |
@@ -2076,7 +2076,7 @@ For each suspect category we ran a targeted scan:
 The following code paths are **stack-safe** under any input:
 
 * **No `alloca`, no VLAs, no large stack arrays anywhere.**  The
-  largest stack-allocated buffer in `src/` and `examples/` is
+  largest stack-allocated buffer in `src/` and `services/` is
   `char buf[16]` (in `strip_html`'s replacement and in the recipes
   example's `today_is`).  All other buffers are 3–8 bytes.
 * **`Engine::Impl::generate_until_done`** is a flat `while`-loop with
@@ -2105,8 +2105,8 @@ The following code paths are **stack-safe** under any input:
 | Site                                              | Risk                                         | Fix                                                                                  |
 |---------------------------------------------------|----------------------------------------------|--------------------------------------------------------------------------------------|
 | `src/builtin_tools.cpp::strip_html` (old)         | `std::regex_replace` with `[\s\S]*?` and a back-reference; libstdc++ recursive engine blew the stack on real-world HTML pages fetched by `fetch_web` (94 766 frames in the production coredump) | Rewrote as forward-only scanner.  Inline `<script>`/`<style>` block skip via `starts_with_ci` probes; no regex, no recursion. |
-| `examples/server.cpp::on_token` lambda            | `common_chat_msg_diff::compute_diffs` throws `"Invalid diff: now finding less tool calls!"` when partial-parse temporarily extracts then unextracts a tool_call — the exception unwound through the engine and tore down the request | Wrapped `compute_diffs` in `try/catch`, hold `prev_msg` on the last good state and wait for the next token to settle |
-| `examples/server.cpp::handle_chat_stream` final pass | When every partial parse threw (malformed Qwen tool_call markup) the loop emitted zero content deltas and the user saw an empty bubble | Capture `engine_final_content = chat_continue()`; emit a synthesised content delta if `any_content_emitted == false` |
+| `services/server.cpp::on_token` lambda            | `common_chat_msg_diff::compute_diffs` throws `"Invalid diff: now finding less tool calls!"` when partial-parse temporarily extracts then unextracts a tool_call — the exception unwound through the engine and tore down the request | Wrapped `compute_diffs` in `try/catch`, hold `prev_msg` on the last good state and wait for the next token to settle |
+| `services/server.cpp::handle_chat_stream` final pass | When every partial parse threw (malformed Qwen tool_call markup) the loop emitted zero content deltas and the user saw an empty bubble | Capture `engine_final_content = chat_continue()`; emit a synthesised content delta if `any_content_emitted == false` |
 
 ### 10.4  Open risks — HIGH
 
@@ -2152,9 +2152,9 @@ practical because the operator chose to run it.
 #### 10.4.2  `nlohmann::json::parse` on the HTTP request body
 
 **Sites:**
-* `examples/server.cpp:1419`  — `json::parse(req.body)` for `/v1/chat/completions`
-* `examples/server.cpp:1973`  — `json::parse(req.body)` for `/v1/preset`
-* `examples/cli.cpp:436, 580`  — JSON parsing of upstream SSE events
+* `services/server.cpp:1419`  — `json::parse(req.body)` for `/v1/chat/completions`
+* `services/server.cpp:1973`  — `json::parse(req.body)` for `/v1/preset`
+* `services/cli.cpp:436, 580`  — JSON parsing of upstream SSE events
 
 `nlohmann::json` builds its DOM via recursive descent on arrays and
 objects.  An attacker who can post to the server can fit roughly

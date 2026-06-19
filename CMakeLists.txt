@@ -256,22 +256,22 @@ endif()
 # examples (binaries)
 # ============================================================================
 if (EASYAI_BUILD_EXAMPLES)
-    add_executable(easyai-chat examples/chat.cpp)
+    add_executable(easyai-chat services/chat.cpp)
     target_link_libraries(easyai-chat PRIVATE easyai)
 
-    add_executable(easyai-agent examples/agent.cpp)
+    add_executable(easyai-agent services/agent.cpp)
     target_link_libraries(easyai-agent PRIVATE easyai)
 
     # Tutorial agent paired with manual.md → "Writing your own tools".
     if (CURL_FOUND)
-        add_executable(easyai-recipes examples/recipes.cpp)
+        add_executable(easyai-recipes services/recipes.cpp)
         target_link_libraries(easyai-recipes PRIVATE easyai CURL::libcurl)
     endif()
 
     # easyai-local — local-only REPL: loads a GGUF model in-process via
     # easyai::Engine.  No HTTP transport here.  For talking to a remote
     # OpenAI-compatible endpoint, see easyai-cli below.
-    add_executable(easyai-local examples/local.cpp)
+    add_executable(easyai-local services/local.cpp)
     # local.cpp uses std::atomic<int64_t> for the SIGINT debounce
     # timestamp; same 32-bit-ARM caveat as server.cpp — link
     # libatomic when the probe failed.
@@ -299,17 +299,17 @@ if (EASYAI_BUILD_EXAMPLES)
     endif()
 
     # The brand SVG (AI Box favicon) is no longer xxd-generated; it
-    # lives inline as `kBrandSvg` in examples/server.cpp.  Canonical
+    # lives inline as `kBrandSvg` in services/server.cpp.  Canonical
     # copy stays at webui/AI-brain.svg for external use / rebrand.
 
-    add_executable(easyai-server examples/server.cpp ${EASYAI_WEBUI_HEADERS})
+    add_executable(easyai-server services/server.cpp ${EASYAI_WEBUI_HEADERS})
     target_link_libraries(easyai-server PRIVATE easyai cpp-httplib llama-common ${EASYAI_ATOMIC_LIBS})
 
     # easyai-server's VerboseServer subclass overrides the
     # httplib::Server::process_and_close_socket virtual to log per-TCP
     # connect/close events. Upstream declares that virtual `private:`;
     # we widen it to `protected` for our TU only via a tiny macro trick
-    # local to examples/server.cpp (`#define private protected` around
+    # local to services/server.cpp (`#define private protected` around
     # the httplib.h include, scoped by httplib.h's own include guard).
     # That keeps llama.cpp's source untouched and produces no derivative
     # copy of cpp-httplib in our build tree.
@@ -325,7 +325,7 @@ if (EASYAI_BUILD_EXAMPLES)
     # /v1/chat/completions endpoint (our easyai-server, llama-server, etc.).
     # No local model — pair with easyai-local when you want to run a GGUF
     # in-process instead.
-    add_executable(easyai-cli examples/cli.cpp)
+    add_executable(easyai-cli services/cli.cpp)
     target_link_libraries(easyai-cli PRIVATE easyai)
     target_include_directories(easyai-cli PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor)
@@ -333,7 +333,7 @@ if (EASYAI_BUILD_EXAMPLES)
     # easyai-library-demo — minimum-viable Session demo (OpenAI-Python-
     # SDK shape).  Paired with LIB_GUIDE.md: shows third-party authors
     # the smallest "build an agent, register a tool, chat" program.
-    add_executable(easyai-library-demo examples/library_demo.cpp)
+    add_executable(easyai-library-demo services/library_demo.cpp)
     target_link_libraries(easyai-library-demo PRIVATE easyai)
 
     # easyai-mcp-server — standalone Model Context Protocol provider.
@@ -344,7 +344,7 @@ if (EASYAI_BUILD_EXAMPLES)
     # /mcp, nothing else.  Designed for high-concurrency multi-client
     # deployments (configurable cpp-httplib ThreadPool + per-tool
     # concurrent-call cap inside the binary).
-    add_executable(easyai-mcp-server examples/mcp_server.cpp)
+    add_executable(easyai-mcp-server services/mcp_server.cpp)
     # mcp_server.cpp uses std::atomic<uint64_t> for the /metrics
     # counters and std::atomic<int> for the in-flight limiter; the
     # 64-bit case hits the same libatomic-missing error on 32-bit ARM

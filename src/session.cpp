@@ -3,8 +3,8 @@
 // Session owns one Backend (LocalBackend or RemoteBackend) and exposes
 // the OpenAI-Python-SDK-shaped fluent surface declared in
 // easyai/session.hpp.  All the "build the agent" orchestration that
-// used to live duplicated in examples/cli.cpp, examples/server.cpp,
-// and examples/local.cpp is centralised here so a third-party agent
+// used to live duplicated in services/cli.cpp, services/server.cpp,
+// and services/local.cpp is centralised here so a third-party agent
 // gets the same defaults for free.
 //
 // Lives in the unified libeasyai library alongside Engine, Client,

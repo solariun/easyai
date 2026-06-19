@@ -26,7 +26,7 @@
 // validates the target path.
 //
 // The header stays free of httplib / curl / json / llama types so
-// examples/server.cpp can include it cheaply; all of that lives in
+// services/server.cpp can include it cheaply; all of that lives in
 // src/models_dashboard.cpp (compiled into libeasyai).
 #pragma once
 

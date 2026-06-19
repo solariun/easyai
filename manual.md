@@ -591,7 +591,7 @@ sees just `write me a poem`.
 ./build/easyai-agent -m models/qwen2.5-1.5b-instruct-q4_k_m.gguf
 ```
 
-Look at `examples/agent.cpp` to see how the tools are registered. The
+Look at `services/agent.cpp` to see how the tools are registered. The
 inline `flip_coin` example is six lines.
 
 ---
@@ -1091,7 +1091,7 @@ if (!one.error.empty()) { std::fprintf(stderr, "%s\n", one.error.c_str()); retur
 for (auto & t : one.tools) engine.add_tool(std::move(t));
 ```
 
-Manifest schema (one entry — see `examples/EASYAI-example.tools` and
+Manifest schema (one entry — see `services/EASYAI-example.tools` and
 `EXTERNAL_TOOLS.md` for more):
 
 ```json
@@ -1182,7 +1182,7 @@ placeholder:
 GNU coreutils, util-linux, git, grep, ripgrep, find, and pgrep all
 honour `--`. Integer/number/boolean parameters are immune (they're
 not strings) and don't need this. See
-`examples/EASYAI-example.tools` and `EXTERNAL_TOOLS.md` for the
+`services/EASYAI-example.tools` and `EXTERNAL_TOOLS.md` for the
 pattern.
 
 ```sh
@@ -1629,7 +1629,7 @@ fifty lines of code, and at the end you'll have a working agent that
 genuinely reaches out to the internet on your behalf.
 
 There's a finished version of everything below in
-**`examples/recipes.cpp`**.  Build it now so you can compare:
+**`services/recipes.cpp`**.  Build it now so you can compare:
 
 ```bash
 cmake --build build -j --target easyai-recipes
@@ -1747,7 +1747,7 @@ That's it.  Eight lines for the tool plus three for the wiring, and
 your agent now has reliable date access.
 
 > **Try it.**  Wrap the snippet above in a `main()`, link against
-> `easyai`, build, and run.  Or just look at `examples/recipes.cpp` —
+> `easyai`, build, and run.  Or just look at `services/recipes.cpp` —
 > it's the same code, ready to go.
 
 ---
@@ -1896,7 +1896,7 @@ Two return flavours, only:
 
 #### Putting it together — your first running agent
 
-The whole `main()` is in `examples/recipes.cpp`:
+The whole `main()` is in `services/recipes.cpp`:
 
 ```cpp
 easyai::Engine engine;
@@ -2005,7 +2005,7 @@ Same engine, same callback shape, full schema control.
 * **`src/builtin_tools.cpp`** — the unified `web` and `fs` tools and
   `bash`. All written with the exact API you've been using. No
   internal magic; copy any of them as a starting point.
-* **`examples/agent.cpp`** — every built-in plus a one-liner
+* **`services/agent.cpp`** — every built-in plus a one-liner
   `flip_coin` for the shortest possible custom tool.
 * [3.3 Sandboxed filesystem tools](#33-sandboxed-filesystem-tools) —
   expose a directory to the model without giving away the whole disk.
@@ -2153,7 +2153,7 @@ cli.metrics(prom_text);                   // GET /metrics (Prometheus)
 cli.set_preset("creative");               // POST /v1/preset
 ```
 
-The `easyai-cli` binary (`examples/cli.cpp`) is a
+The `easyai-cli` binary (`services/cli.cpp`) is a
 ready-to-run reference for all of the above — REPL or one-shot, every
 sampling knob exposed as a flag, seven management subcommands
 (`--list-models`, `--list-tools`, `--list-remote-tools`, `--health`,
@@ -2374,7 +2374,7 @@ cli.set_preset("creative");                // POST /v1/preset
 
 ### 4.8 The `easyai-cli` binary as a reference
 
-Everything above is exposed as flags on `examples/cli.cpp`.
+Everything above is exposed as flags on `services/cli.cpp`.
 Read its source to see one possible "wire it all up" pattern; lift
 chunks into your own app verbatim.
 
@@ -2672,7 +2672,7 @@ plan.remove("3");        // marks "deleted" — stays visible, struck through
 
 ### 5.7 Cookbook — system observability tools
 
-`examples/cli.cpp` ships four inline `system_*` tools that
+`services/cli.cpp` ships four inline `system_*` tools that
 read `/proc/*` and report back.  The whole pattern is:
 
 1. Read a `/proc` file with `ifstream`.
@@ -3458,9 +3458,9 @@ If you want to go deeper:
   `Engine::chat_continue`, request-body assembly with the full
   sampling/penalty surface.
 * `src/plan.cpp` — multi-action plan tool with `add/start/done/list`.
-* `examples/server.cpp` — the per-request flow is annotated; great
+* `services/server.cpp` — the per-request flow is annotated; great
   starting point for a custom HTTP layer.
-* `examples/cli.cpp` — REPL + management subcommands +
+* `services/cli.cpp` — REPL + management subcommands +
   inline `system_*` tools, doubles as the cookbook for adding your
   own tool to a `Client`-based agent.
 * `scripts/install_easyai_server.sh` — production deployment as a

@@ -1,4 +1,4 @@
-// examples/agent.cpp — agent with the full built-in toolbelt + a custom tool.
+// services/agent.cpp — agent with the full built-in toolbelt + a custom tool.
 //
 //   ./easyai-agent -m models/qwen2.5-0.5b-instruct.gguf
 //

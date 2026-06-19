@@ -711,8 +711,8 @@ shared lib code with `easyai-server`.**
 What's planned next, roughly in priority order:
 
 1. **Factor the MCP auth helper into the lib.** `check_mcp_auth` is
-   currently duplicated between `examples/server.cpp` and
-   `examples/mcp_server.cpp`. The next refactor lifts it into
+   currently duplicated between `services/server.cpp` and
+   `services/mcp_server.cpp`. The next refactor lifts it into
    `easyai::mcp::check_bearer()` so both binaries call the same
    code. Same for the `[MCP_USER]` table loader.
 2. **Per-user / per-token rate limit.** Today the only backpressure

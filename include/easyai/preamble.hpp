@@ -2,8 +2,8 @@
 // system message before generation.
 //
 // This used to live as `build_authoritative_preamble` inside
-// `examples/server.cpp`, with parallel copies in `examples/local.cpp`
-// (memory-vocab portion only) and nothing in `examples/cli.cpp`. The
+// `services/server.cpp`, with parallel copies in `services/local.cpp`
+// (memory-vocab portion only) and nothing in `services/cli.cpp`. The
 // drift was a smell: change the format here and you'd silently miss
 // the other binaries. Now there's one builder; every consumer
 // (server, local, cli, anything else linking libeasyai) calls it.
@@ -38,7 +38,7 @@
 //     turn before each generate() if your memory is mutating.
 //   * Network-facing server — call per request and append to
 //     whichever system message goes into the model's prompt (see
-//     examples/server.cpp's prepare_engine_for_request).
+//     services/server.cpp's prepare_engine_for_request).
 //   * Agentic HTTP client — call when building the system prompt
 //     prefix and send the combined text as the system message.
 #pragma once

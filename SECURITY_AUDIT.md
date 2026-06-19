@@ -1,6 +1,6 @@
 # easyai — security audit
 
-A standing static review of `src/` and `examples/` covering memory
+A standing static review of `src/` and `services/` covering memory
 safety, injection, SSRF, regex DoS, TLS, sandboxing, and concurrency.
 Fixes are landed in the same commits as the findings; this file is the
 narrative record.
@@ -212,7 +212,7 @@ production agent without the sandbox firmly set.
 
 ---
 
-## 8. HTTP server — `examples/server.cpp`
+## 8. HTTP server — `services/server.cpp`
 
 * `set_payload_max_length(args.max_body)` caps request bodies at
   8 MiB by default (`--max-body N` to change).  Prevents a malicious
@@ -245,7 +245,7 @@ production agent without the sandbox firmly set.
 
 ---
 
-## 9. WEBUI INJECTION — `examples/server.cpp`
+## 9. WEBUI INJECTION — `services/server.cpp`
 
 The webui is the bundle of llama-server's compiled SvelteKit, served
 verbatim plus our own DOM-injection layer.  All dynamic strings that
@@ -388,7 +388,7 @@ HIGH and seven MEDIUM findings — all fixed in this commit.
 
 ### 18.1 HIGH-1 — `apply_ini_to_args` was dead code (FIXED)
 
-**File:** `examples/server.cpp` — function `apply_ini_to_args`,
+**File:** `services/server.cpp` — function `apply_ini_to_args`,
 defined but **never called**.
 
 **Issue.** The CLI/INI overlay was supposed to merge the INI file
@@ -407,7 +407,7 @@ already-loaded `ini_config` instead of loading a second time.
 
 ### 18.2 HIGH-2 — `--no-mcp-auth` and `[SERVER] mcp_auth` ignored (FIXED)
 
-**File:** `examples/server.cpp` — function `check_mcp_auth`.
+**File:** `services/server.cpp` — function `check_mcp_auth`.
 
 **Issue.** The MCP auth gate consulted only `ctx.mcp_keys` (the
 `[MCP_USER]` table). The `--no-mcp-auth` CLI flag and the `[SERVER]
@@ -470,10 +470,10 @@ factory used `fork()` + `execl("/bin/sh", "-c", cmd)` without:
 | # | File | Issue | Fix |
 | --- | --- | --- | --- |
 | M-1 | `src/builtin_tools.cpp` (`fs_grep`) | `glob_rx` constructed without try/catch — model-supplied `file_glob` with stray metachar throws uncaught `regex_error` | wrap in try/catch, return clean tool-error |
-| M-2 | `examples/server.cpp` (`/props`) | Endpoint exposed `model_path` + capability hints unauthenticated even when `--api-key` was set | gate behind `require_auth` |
-| M-3 | `examples/server.cpp` (`require_auth`, `check_mcp_auth`) | No cap on `Authorization` header size; hostile client could send multi-MB Bearer on every probe | reject any header > 4 KiB before string-comparing |
+| M-2 | `services/server.cpp` (`/props`) | Endpoint exposed `model_path` + capability hints unauthenticated even when `--api-key` was set | gate behind `require_auth` |
+| M-3 | `services/server.cpp` (`require_auth`, `check_mcp_auth`) | No cap on `Authorization` header size; hostile client could send multi-MB Bearer on every probe | reject any header > 4 KiB before string-comparing |
 | M-4 | `src/config.cpp` (`load_ini_file`) | No size/line cap; `--config /dev/zero` (or any pathological file) would parse forever | hard caps: 1 MiB total, 64 KiB / line, 100 000 lines |
-| M-5 | `examples/server.cpp` (`parse_chat_request`) | nlohmann's recursive descent stack-overflows on adversarial JSON like `{"a":{"a":...}}` 100k deep | iterative depth walk, reject anything past 64 levels |
+| M-5 | `services/server.cpp` (`parse_chat_request`) | nlohmann's recursive descent stack-overflows on adversarial JSON like `{"a":{"a":...}}` 100k deep | iterative depth walk, reject anything past 64 levels |
 | M-6 | `src/rag_tools.cpp` (`save_locked`) | Saved entries inherited the process umask (0644 typical → world-readable); RAG content can be sensitive | `fs::permissions(tmp, owner_read|owner_write)` BEFORE rename |
 | M-7 | `src/mcp.cpp` (`handle_request`) | Same JSON depth issue as M-5 on the `/mcp` body | identical iterative depth walk, 64 levels |
 
@@ -679,7 +679,7 @@ spawned.
   binary parses `pattern = "-V"` as a flag. Mitigation is
   manifest-side: insert `"--"` literal before string placeholders.
   Documented in `manual.md` §3.3.4 and demonstrated in
-  `examples/EASYAI-example.tools` (`pgrep` entry uses `["-a", "--",
+  `services/EASYAI-example.tools` (`pgrep` entry uses `["-a", "--",
   "{pattern}"]`).
 - **`kBuiltInNames` hard-coded list duplicates the actual builtin
   registry.** A future builtin added to `src/builtin_tools.cpp` must
@@ -1251,7 +1251,7 @@ Trivial change; defence-in-depth.
 
 ### 20.6 LOW — MCP-client URL scheme not pre-validated
 
-**File:** `examples/server.cpp` (`--mcp <url>`),
+**File:** `services/server.cpp` (`--mcp <url>`),
 `src/mcp_client.cpp` (`fetch_remote_tools`).
 
 **Issue.** The `--mcp <url>` flag (commit `51e4a8f`) passes the URL
@@ -1265,7 +1265,7 @@ forgets to set the option), the agent has no second layer.
 
 **Fix.** Pre-validate the scheme in two places:
 
-1. `examples/server.cpp` — when `--mcp` is set, check the URL
+1. `services/server.cpp` — when `--mcp` is set, check the URL
    starts with `http://` or `https://` before constructing
    `ClientOptions`. Bad scheme: print a clear error and exit
    non-zero.
@@ -1399,7 +1399,7 @@ The fifth pass also examined and found no actionable issues in:
   scanner suggested `--key=value` could bypass; it can't (the
   lambda checks `next[0]=='-' && next[1]=='-'`, which catches
   `--anything` including `--key=value`).
-- **Signal handler in `examples/cli.cpp`** — uses only async-
+- **Signal handler in `services/cli.cpp`** — uses only async-
   signal-safe primitives (`std::atomic<bool>::store`, `::write`
   on `STDERR_FILENO`, a single pointer dereference of a global
   the main thread set before chat began). The `request_cancel()`
@@ -1413,7 +1413,7 @@ The fifth pass also examined and found no actionable issues in:
   before rename.
 - **MCP client tool name shadowing (`fetch_remote_tools`)** —
   the upstream MCP server returns tool names verbatim. The
-  consumer-side filter is in `examples/server.cpp` (collision
+  consumer-side filter is in `services/server.cpp` (collision
   with local tools is logged-and-skipped at registration time);
   embedders using the library directly are documented as
   responsible for their own collision policy. Treat
@@ -1439,7 +1439,7 @@ finding — all closed in this commit.  Public interface unchanged.
 ### 21.1 HIGH — `presence_penalty` (and every other float knob)
         accepts NaN / ±Inf unchecked
 
-**File:** `examples/server.cpp` — `SET_FLOAT(...)` lambda factory.
+**File:** `services/server.cpp` — `SET_FLOAT(...)` lambda factory.
 
 **Issue.** `std::stof("nan")`, `std::stof("inf")`, `std::stof("-inf")`,
 and `std::stof("+inf")` all return the corresponding non-finite IEEE
@@ -1569,7 +1569,7 @@ cancel arrives).
 
 ### 21.5b LOW — server-side keep-alive timeout was 5 s default
 
-**Files:** `examples/server.cpp`, `examples/mcp_server.cpp`.
+**Files:** `services/server.cpp`, `services/mcp_server.cpp`.
 
 **Issue.** Commit `841dd47` made `libeasyai-cli`'s `httplib::Client`
 persistent (single TCP connection across an N-hop agentic session)
@@ -1589,7 +1589,7 @@ on the other end of the wire.
 
 **Fix.**
 
-`examples/server.cpp` now calls `svr.set_keep_alive_timeout(ka)`
+`services/server.cpp` now calls `svr.set_keep_alive_timeout(ka)`
 where `ka = max(http_timeout, 3600)`. The 1-hour floor applies even
 when `http_timeout` is configured shorter (e.g. operators who
 choose aggressive slow-loris hardening on the request payload still
@@ -1598,7 +1598,7 @@ longer than 1 h — including the installer's default of 86400 s
 (24 h) — the keep-alive timeout follows it, so the connection
 lives as long as the agentic session.
 
-`examples/mcp_server.cpp` pins keep-alive timeout to **3600 s
+`services/mcp_server.cpp` pins keep-alive timeout to **3600 s
 (1 hour)** as a constant, decoupled from the per-request slow-loris
 read/write timeouts (30 / 60 s). MCP clients typically dispatch a
 batch of `tools/call` requests, then sit idle waiting on their own
@@ -1640,7 +1640,7 @@ The sixth pass also examined and found no actionable concerns in:
   TIME_WAIT pressure tags are compile-time string literals.  No
   `#define private protected` or `httplib.h` patch remains in tree
   (commit `793ebfb` reverted those experiments).
-- **3-stage Ctrl-C state machine** (`examples/cli.cpp`
+- **3-stage Ctrl-C state machine** (`services/cli.cpp`
   `on_terminating_signal`).  Uses only async-signal-safe primitives
   (atomic load/store, `::write`, `::_exit(130)` not `exit()`).
   `fetch_add(1)` makes the stage transition race-free.
@@ -2328,7 +2328,7 @@ filename hash per request.  Not done today.
 
 ### 23.4 INFO — `cli --url` trusts the remote server fully
 
-**File:** `examples/cli.cpp` — `/v1/tools` fetch path.
+**File:** `services/cli.cpp` — `/v1/tools` fetch path.
 
 **Status:** Documented trust boundary, no patch warranted.
 
@@ -2355,8 +2355,8 @@ DIR` (§16.4 first/second bullets).
 ### 23.5 NEW SURFACE — `easyai::preamble::tools_block` + `build_builtin_system_prompt` (audited at intro)
 
 The two new helpers in `src/preamble.cpp` (libeasyai) replace the
-~180-line duplicates that previously lived in `examples/server.cpp`
-and `examples/local.cpp`.  Trust shape: side-effect-free pure
+~180-line duplicates that previously lived in `services/server.cpp`
+and `services/local.cpp`.  Trust shape: side-effect-free pure
 functions over a `ToolsetView` POD; no I/O, no allocator beyond the
 returned string, no global state.  All inputs are either operator-
 curated booleans (`view.datetime_on` etc.) or a vector of `Tool`

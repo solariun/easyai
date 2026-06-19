@@ -1,4 +1,4 @@
-// examples/chat.cpp — minimal REPL.  Showcases easyai::Agent: the
+// services/chat.cpp — minimal REPL.  Showcases easyai::Agent: the
 // "easy" front door over Engine/Client/Backend.  No spinner, no
 // fancy formatting — just the smallest thing that actually works.
 //

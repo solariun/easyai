@@ -166,7 +166,7 @@ default on the installed unit.
 4. **Open the browser.** `http://<your-box>/` — chat UI is live.
    `journalctl -u easyai-server -f` for the box's running log.
 
-5. **Plug in your tools.** Copy `examples/EASYAI-example.tools` to
+5. **Plug in your tools.** Copy `services/EASYAI-example.tools` to
    `/etc/easyai/external_tools/`, edit, restart — the model now
    knows about your home commands.
 

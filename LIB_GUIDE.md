@@ -295,14 +295,14 @@ target_link_libraries(myapp PRIVATE easyai::easyai)
 
 | Binary | Source | What it demonstrates |
 |--------|--------|---------------------|
-| `easyai-library-demo` | `examples/library_demo.cpp` | Smallest possible Session program. Pair with this guide. |
-| `easyai-chat` | `examples/chat.cpp` | One-shot remote chat. |
-| `easyai-agent` | `examples/agent.cpp` | Custom tool + Engine direct (no Session). |
-| `easyai-recipes` | `examples/recipes.cpp` | Tutorial agent — pairs with `manual.md`. |
-| `easyai-local` | `examples/local.cpp` | Reference REPL on `LocalBackend`. |
-| `easyai-cli` | `examples/cli.cpp` | Reference HTTP agent — REPL + shell mode. |
-| `easyai-server` | `examples/server.cpp` | Reference HTTP server — `/v1/chat/completions`, web UI, MCP, metrics. |
-| `easyai-mcp-server` | `examples/mcp_server.cpp` | Model Context Protocol provider. |
+| `easyai-library-demo` | `services/library_demo.cpp` | Smallest possible Session program. Pair with this guide. |
+| `easyai-chat` | `services/chat.cpp` | One-shot remote chat. |
+| `easyai-agent` | `services/agent.cpp` | Custom tool + Engine direct (no Session). |
+| `easyai-recipes` | `services/recipes.cpp` | Tutorial agent — pairs with `manual.md`. |
+| `easyai-local` | `services/local.cpp` | Reference REPL on `LocalBackend`. |
+| `easyai-cli` | `services/cli.cpp` | Reference HTTP agent — REPL + shell mode. |
+| `easyai-server` | `services/server.cpp` | Reference HTTP server — `/v1/chat/completions`, web UI, MCP, metrics. |
+| `easyai-mcp-server` | `services/mcp_server.cpp` | Model Context Protocol provider. |
 
 The bundled `easyai-cli` and `easyai-server` are intentionally
 non-trivial — they include REPL polish, signal handling, web UI,

@@ -1,4 +1,4 @@
-// examples/cli_remote.cpp — full agentic OpenAI-protocol CLI built on
+// services/cli_remote.cpp — full agentic OpenAI-protocol CLI built on
 // libeasyai-cli.  Talks to any /v1/chat/completions endpoint (our
 // easyai-server, llama-server, OpenAI itself).  Tools execute LOCALLY
 // in this process — the model picks which tool to call, the Client

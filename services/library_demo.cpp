@@ -1,4 +1,4 @@
-// examples/library_demo.cpp
+// services/library_demo.cpp
 //
 // Minimum-viable demo for the OpenAI-Python-SDK-shaped easyai::Session
 // surface.  Two binaries-in-one:
@@ -7,8 +7,8 @@
 //   $ easyai-library-demo --model /path/to/model.gguf
 //
 // The point is to be a SHORT, COPYABLE template — not a feature-rich
-// agent.  If you need a feature-rich agent, look at examples/cli.cpp
-// (HTTP transport) and examples/local.cpp (in-process llama.cpp).
+// agent.  If you need a feature-rich agent, look at services/cli.cpp
+// (HTTP transport) and services/local.cpp (in-process llama.cpp).
 // This file exists to show third-party developers what the smallest
 // "build an agent, register a tool, chat" program looks like.
 //
