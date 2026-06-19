@@ -158,6 +158,7 @@ set(EASYAI_SOURCES
     src/mcp_client.cpp
     src/presets.cpp
     src/plan.cpp
+    src/llmfit.cpp
     src/ui.cpp
     src/tui.cpp
     src/log.cpp
@@ -281,7 +282,7 @@ if (EASYAI_BUILD_EXAMPLES)
     # ----- embed the llama-server-derived webui (xxd-style binary embed) ---
     set(EASYAI_WEBUI_HEADERS "")
     if (EASYAI_BUILD_WEBUI)
-        set(WEBUI_ASSETS index.html bundle.js bundle.css loading.html)
+        set(WEBUI_ASSETS index.html bundle.js bundle.css loading.html llmfit.html)
         foreach(asset ${WEBUI_ASSETS})
             set(_in  "${CMAKE_CURRENT_SOURCE_DIR}/webui/${asset}")
             set(_out "${CMAKE_CURRENT_BINARY_DIR}/webui_${asset}.hpp")

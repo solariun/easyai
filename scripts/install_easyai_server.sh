@@ -55,6 +55,7 @@
 #   ./install_easyai_server.sh --http-timeout 86400   # default 24h, matches cli
 #   ./install_easyai_server.sh --webui-title "AI Box"
 #   ./install_easyai_server.sh --webui-icon /path/to/logo.svg   # ico|png|svg|gif|jpg|webp
+#   ./install_easyai_server.sh --webui-password 's3cret'  # /llmfit gate (default 0000)
 #   ./install_easyai_server.sh --upgrade             # git pull + rebuild
 #   ./install_easyai_server.sh --force               # CLEAN-SLATE rewrite:
 #                                                    #   - easyai.ini backed up
@@ -347,6 +348,9 @@ ngl=99
 webui_title="EasyAi"                          # --webui-title <text>
 webui_icon=""                                 # --webui-icon <path/to/.ico|.png|.svg|.gif|.jpg|.webp>
 webui_icon_dest="$config_dir/favicon"         # final installed path under /etc/easyai
+webui_password="0000"                         # --webui-password <text>; gates the /llmfit
+                                              # dashboard. Default 0000 — CHANGE for
+                                              # anything past a trusted LAN. Empty = open.
 # Threads: 8 (sweet spot for Strix Point / Ryzen AI 9 HX 370 with most
 # layers on iGPU). The production AI box was hardcoded at 16 originally;
 # llama-bench on the 890M with an 80B MoE running ngl=99 reproduced the
@@ -535,6 +539,7 @@ while [[ $# -gt 0 ]]; do
             shift ;;
         --webui-title)      webui_title="$2"; shift 2 ;;
         --webui-icon)       webui_icon="$2";  shift 2 ;;
+        --webui-password)   webui_password="$2"; shift 2 ;;
         --thinking-budget)
             warn "--thinking-budget: not yet supported in easyai (use --thinking on/off + --max-tokens at runtime)"
             shift 2 ;;
@@ -638,6 +643,7 @@ require_numeric "--yarn-orig-ctx"   "$yarn_orig_ctx"
 require_no_injection "--service-host" "$service_host"
 require_no_injection "--alias"        "$service_alias"
 require_no_injection "--webui-title"  "$webui_title"
+require_no_injection "--webui-password" "$webui_password"
 require_no_injection "--cache-type-k" "$cache_type_k"
 require_no_injection "--cache-type-v" "$cache_type_v"
 require_no_injection "--rope-scaling" "$rope_scaling"
@@ -741,6 +747,9 @@ printf '    tdp_unlock       = %s   (Ryzen TDP unlock via ryzenadj+systemd timer
     "$([[ $do_tdp_unlock -eq 1 ]] && echo on || echo off)" "$tdp_watts" "$tdp_tctl"
 printf '    webui_title      = %s\n' "$webui_title"
 printf '    webui_icon       = %s\n' "${webui_icon:-<default — no icon>}"
+printf '    webui_password   = %s   (gates /llmfit dashboard%s)\n' \
+    "${webui_password:-<empty — /llmfit is open>}" \
+    "$([[ "$webui_password" == "0000" ]] && echo " — DEFAULT 0000, change for non-LAN" || echo "")"
 printf '    api_key          = %s\n' "$([[ -n "$api_key" ]] && echo "<set>" || echo "<none — server is open>")"
 printf '    model_src        = %s\n' "${model_src:-<none — pass --model PATH>}"
 printf '    flags            = install:%s build:%s groups:%s limits:%s kernel:%s\n' \
@@ -1490,6 +1499,35 @@ sandbox         = $service_workspace
 external_tools  = $external_tools_dir
 memory          = $rag_dir
 webui_title     = $webui_title
+
+# ---------- LLMFit dashboard (/llmfit) ----------
+# Sober web UI (linked from the chat UI by an injected "LLMFit" pill) for
+# hardware-aware model recommendations + a native GGUF download manager.
+# Full reference: LLMFIT.md and easyai-server.md section 7.
+#
+# webui_password: gates /llmfit and all of its API routes (a session cookie
+#   separate from api_key, which still guards /v1/*). Installed default is
+#   0000 for an out-of-the-box LAN appliance — CHANGE IT before exposing the
+#   box anywhere untrusted. Set empty to leave the dashboard open.
+webui_password  = $webui_password
+# download_dir: where the download manager writes/lists/deletes GGUF weights.
+#   Defaults to this server's models dir so downloads sit beside the model
+#   already in use.
+download_dir    = $service_model_dir
+# llmfit_bin: the llmfit recommendation engine (PATH name or absolute path),
+#   spawned as a child and proxied under /llmfit/api/v1/*. NOTE: the systemd
+#   service runs with the default PATH (/usr/local/bin:/usr/bin:...), so a
+#   bare name resolves only if llmfit is installed there. cargo installs to
+#   ~/.cargo/bin (NOT on the service PATH) — either copy it to /usr/local/bin
+#   or set an absolute path here. If absent, the dashboard still loads and
+#   downloads still work; only the recommendation panels go offline.
+#     Install: cargo install --path llmfit-tui   (from the llmfit repo)
+#              sudo cp ~/.cargo/bin/llmfit /usr/local/bin/
+#          or  brew install AlexsJones/llmfit/llmfit   (macOS/Linuxbrew)
+llmfit_bin      = llmfit
+# llmfit_port: loopback port easyai-server runs \`llmfit serve\` on (127.0.0.1
+#   only; never exposed). Change only if 8788 is taken.
+llmfit_port     = 8788
 metrics         = $([[ "$enable_metrics" -eq 1 ]] && echo on || echo off)
 allow_fs        = off
 allow_bash      = off

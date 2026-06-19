@@ -33,6 +33,9 @@
 // =============================================================================
 
 #include "easyai/easyai.hpp"
+#include "easyai/llmfit.hpp"   // LLMFit bridge: serve + proxy + downloader
+
+#include <random>             // session-token generation for the /llmfit gate
 
 // llama.cpp common — for incremental chat parsing during SSE streaming.
 // Not part of easyai's public API; the server is allowed to reach in.
@@ -49,6 +52,7 @@
 #include "webui_bundle.js.hpp"
 #include "webui_bundle.css.hpp"
 #include "webui_loading.html.hpp"
+#include "webui_llmfit.html.hpp"   // the sober LLMFit dashboard, served at /llmfit
 #endif
 
 // Brand asset — the AI Box favicon, served at /favicon[.ico|.svg]. Kept
@@ -1468,6 +1472,14 @@ struct ServerCtx {
     std::string                webui_bundle_js; // bundle.js with brand strings substituted
     std::string                webui_icon;      // raw icon bytes (empty = none)
     std::string                webui_icon_mime; // "image/x-icon" etc.
+
+    // LLMFit bridge — spawned `llmfit serve` child + native download manager.
+    // null when not constructed (e.g. EASYAI_BUILD_WEBUI off path); handlers
+    // null-check before use. webui_password gates /llmfit; session_token is a
+    // random per-process value handed out as the auth cookie on login.
+    std::unique_ptr<easyai::LlmfitBridge> llmfit;
+    std::string                webui_password;  // empty = /llmfit auth disabled
+    std::string                session_token;   // random; expected cookie value
 
     // INI config (default: /etc/easyai/easyai.ini). Loaded at start-up;
     // empty if the file is missing. The MCP auth lookup table is built
@@ -3869,6 +3881,16 @@ struct ServerArgs {
     std::string webui_mode     = "modern"; // "modern" (embedded llama-server fork) | "minimal" (inline)
     std::string webui_placeholder = "Type a message…";
 
+    // ----- LLMFit integration (the /llmfit web UI + model download manager) ---
+    // The /llmfit dashboard surfaces llmfit's hardware-aware model
+    // recommendations (served by a spawned `llmfit serve` child, proxied)
+    // plus a native GGUF download manager. See include/easyai/llmfit.hpp.
+    std::string download_dir;            // where GGUF weights are downloaded /
+                                         // listed. Default: directory of --model.
+    std::string llmfit_bin   = "llmfit"; // llmfit binary: PATH name or a path.
+    int         llmfit_port  = 8788;     // loopback port for `llmfit serve`.
+    std::string webui_password;          // gates /llmfit + its API; empty = open.
+
     // /mcp auth — by INI's [MCP_USER] when populated, OPEN otherwise.
     // `--no-mcp-auth` forces OPEN even if [MCP_USER] has entries
     // (useful for emergency / dev). Set on the command line ONLY;
@@ -4074,6 +4096,11 @@ static const std::vector<FlagDef> & kFlags() {
         { {"--webui-title"},       "SERVER", "webui_title",    "webui_title",    true,  SET_STR(&ServerArgs::webui_title) },
         { {"--webui-icon"},        "SERVER", "webui_icon",     "webui_icon",     true,  SET_STR(&ServerArgs::webui_icon) },
         { {"--webui-placeholder"}, "SERVER", "webui_placeholder","webui_placeholder",true, SET_STR(&ServerArgs::webui_placeholder) },
+        // ----- LLMFit integration (SERVER) -----
+        { {"--download-dir"},      "SERVER", "download_dir",    "download_dir",   true,  SET_STR(&ServerArgs::download_dir) },
+        { {"--llmfit-bin"},        "SERVER", "llmfit_bin",      "llmfit_bin",     true,  SET_STR(&ServerArgs::llmfit_bin) },
+        { {"--llmfit-port"},       "SERVER", "llmfit_port",     "llmfit_port",    true,  SET_INT(&ServerArgs::llmfit_port) },
+        { {"--webui-password"},    "SERVER", "webui_password",  "webui_password", true,  SET_STR(&ServerArgs::webui_password) },
         { {"--webui"},             "SERVER", "webui_mode",     "webui_mode",     true,  SET_STR(&ServerArgs::webui_mode) },
 
         // ----- ENGINE -----
@@ -4419,6 +4446,76 @@ static const char kWebUIAppendix[] =
     "constraints. Do NOT assume, invent, or guess tool names — "
     "if a tool is not in your AVAILABLE TOOLS list, it does not "
     "exist.\n";
+
+// ============================================================================
+// LLMFit web-UI auth — a session cookie distinct from the Bearer `api_key`
+// that guards /v1/*. The operator sets [SERVER] webui_password (or
+// --webui-password); a correct POST /llmfit/api/login mints the cookie
+// `easyai_llmfit=<session_token>`. Empty password ⇒ the gate is open.
+// ============================================================================
+
+// Random 32-byte hex session token, generated once at startup. The cookie
+// must equal it; it is never derived from (and never reveals) the password.
+static std::string gen_session_token() {
+    std::random_device rd;
+    std::uniform_int_distribution<int> d(0, 255);
+    static const char * hex = "0123456789abcdef";
+    std::string t;
+    t.reserve(64);
+    for (int i = 0; i < 32; ++i) {
+        int b = d(rd);
+        t.push_back(hex[(b >> 4) & 0xF]);
+        t.push_back(hex[b & 0xF]);
+    }
+    return t;
+}
+
+// Constant-time compare (no early-out on first mismatch). Length may leak —
+// both operands here are fixed-length tokens/secrets.
+static bool ct_eq(const std::string & a, const std::string & b) {
+    if (a.size() != b.size()) return false;
+    unsigned char diff = 0;
+    for (size_t i = 0; i < a.size(); ++i)
+        diff |= (unsigned char) (a[i] ^ b[i]);
+    return diff == 0;
+}
+
+// Pull `name=<value>` out of a Cookie header (multi-cookie aware).
+static std::string cookie_value(const std::string & cookie_hdr,
+                                const std::string & name) {
+    const std::string key = name + "=";
+    size_t pos = 0;
+    while (pos < cookie_hdr.size()) {
+        size_t semi = cookie_hdr.find(';', pos);
+        std::string pair = cookie_hdr.substr(
+            pos, semi == std::string::npos ? std::string::npos : semi - pos);
+        size_t s = pair.find_first_not_of(' ');
+        if (s != std::string::npos) pair = pair.substr(s);
+        if (pair.rfind(key, 0) == 0) return pair.substr(key.size());
+        if (semi == std::string::npos) break;
+        pos = semi + 1;
+    }
+    return "";
+}
+
+// True when the request may touch /llmfit. Open when no password is set.
+static bool llmfit_authed(const ServerCtx & ctx, const httplib::Request & req) {
+    if (ctx.webui_password.empty()) return true;
+    std::string cookie = req.get_header_value("Cookie");
+    if (cookie.size() > 8192) return false;   // bound the header we parse
+    return ct_eq(cookie_value(cookie, "easyai_llmfit"), ctx.session_token);
+}
+
+// Route guard: first line of every /llmfit/api/* handler. 401 on failure.
+static bool llmfit_require_auth(const ServerCtx & ctx,
+                               const httplib::Request & req,
+                               httplib::Response & res) {
+    if (llmfit_authed(ctx, req)) return true;
+    res.status = 401;
+    res.set_content(error_json("login required", "authentication_error"),
+                    "application/json");
+    return false;
+}
 
 int main(int argc, char ** argv) {
     ServerArgs args = parse_args(argc, argv);
@@ -6678,6 +6775,39 @@ int main(int argc, char ** argv) {
                 "};"
               "})();</script>";
 
+            // ----- LLMFit nav entry -----------------------------------
+            // A discreet, brand-matched link to the /llmfit dashboard,
+            // appended to <body> and kept alive across Svelte re-renders by
+            // a MutationObserver (the same idiom the blocks above use).
+            inj <<
+              "<style>"
+                "#easyai-llmfit-nav{position:fixed;top:10px;right:14px;z-index:9999;"
+                  "display:inline-flex;align-items:center;gap:7px;padding:6px 12px;"
+                  "font:500 13px/1 system-ui,-apple-system,'Segoe UI',sans-serif;"
+                  "color:#e8e6e3;text-decoration:none;background:rgba(40,44,46,.86);"
+                  "border:1px solid rgba(255,255,255,.10);border-radius:8px;"
+                  "-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);"
+                  "transition:background .15s,border-color .15s,color .15s}"
+                "#easyai-llmfit-nav:hover{background:rgba(255,130,54,.16);"
+                  "border-color:rgba(255,130,54,.55);color:#fff}"
+                "#easyai-llmfit-nav .d{width:7px;height:7px;border-radius:50%;"
+                  "background:#ff8236;flex:0 0 auto}"
+              "</style>"
+              "<script>(()=>{"
+                "function add(){"
+                  "if(document.getElementById('easyai-llmfit-nav')||!document.body)return;"
+                  "const a=document.createElement('a');a.id='easyai-llmfit-nav';"
+                  "a.href='/llmfit';"
+                  "a.title='LLMFit \\u2014 find & download models that fit your hardware';"
+                  "a.innerHTML='<span class=\"d\"></span>LLMFit';"
+                  "document.body.appendChild(a);"
+                "}"
+                "if(document.body)add();"
+                "document.addEventListener('DOMContentLoaded',add);"
+                "new MutationObserver(add).observe(document.documentElement,"
+                  "{childList:true,subtree:true});"
+              "})();</script>";
+
             // Splice immediately after <head>.
             const std::string head_open = "<head>";
             size_t pos = html.find(head_open);
@@ -6890,6 +7020,38 @@ int main(int argc, char ** argv) {
             "HTTP \xe2\x86\x92 arrival / \xe2\x86\x90 completion lines per "
             "request will appear in this stream. (The periodic METRICS line "
             "ships unconditionally — see --metrics-interval.)\n");
+    }
+
+    // -------- LLMFit bridge ----------------------------------------------
+    // Spawn the `llmfit serve` child (the authoritative fit / hardware /
+    // model-catalog engine, proxied under /llmfit/api/v1/*) and stand up the
+    // native GGUF download manager. The download dir defaults to the
+    // directory the loaded model lives in, so weights land next to the model
+    // already in use unless --download-dir / [SERVER] download_dir overrides.
+    {
+        std::string dl_dir = args.download_dir;
+        if (dl_dir.empty()) {
+            std::string mp = ctx->engine.model_path();
+            if (mp.empty()) mp = args.model_path;
+            auto slash = mp.find_last_of("/\\");
+            dl_dir = (slash == std::string::npos) ? std::string(".")
+                                                  : mp.substr(0, slash);
+        }
+        ctx->webui_password = args.webui_password;
+        ctx->session_token  = gen_session_token();
+        ctx->llmfit = std::make_unique<easyai::LlmfitBridge>(
+            args.llmfit_bin, dl_dir, args.llmfit_port);
+        if (ctx->llmfit->start()) {
+            ctx->llmfit->wait_ready();   // non-fatal: UI degrades to 502 if down
+        }
+        std::fprintf(stderr,
+            "[easyai-server] llmfit: %s\n"
+            "                download dir: %s\n"
+            "                /llmfit auth: %s\n",
+            ctx->llmfit->status_message().c_str(),
+            dl_dir.c_str(),
+            ctx->webui_password.empty() ? "OPEN (set webui_password to require login)"
+                                        : "password required");
     }
 
     // -------- http server -------------------------------------------------
@@ -7309,6 +7471,202 @@ int main(int argc, char ** argv) {
             "application/json");
     });
 
+    // ==================================================================
+    // LLMFit dashboard — the /llmfit page, the proxied analysis API
+    // (forwarded to the spawned `llmfit serve` child), and the native
+    // GGUF download manager. The page itself is unguarded (its JS shows a
+    // login overlay when the gate reports unauthenticated); every data
+    // route is guarded by the session cookie via llmfit_require_auth().
+    // ==================================================================
+#if defined(EASYAI_BUILD_WEBUI)
+    svr.Get("/llmfit", [&](const httplib::Request &, httplib::Response & res) {
+        res.set_header("Cross-Origin-Opener-Policy", "same-origin");
+        res.set_content(reinterpret_cast<const char*>(llmfit_html),
+                        llmfit_html_len, "text/html; charset=utf-8");
+    });
+#endif
+
+    // Auth-state probe (unguarded): the page asks this on load to decide
+    // whether to show the login overlay and whether llmfit is reachable.
+    svr.Get("/llmfit/api/auth", [&](const httplib::Request & req, httplib::Response & res) {
+        bool available = ctx_ref.llmfit && ctx_ref.llmfit->available();
+        nlohmann::ordered_json j{
+            {"authed",          llmfit_authed(ctx_ref, req)},
+            {"required",        !ctx_ref.webui_password.empty()},
+            {"llmfit_available", available},
+            {"status",          ctx_ref.llmfit ? ctx_ref.llmfit->status_message()
+                                               : std::string("bridge not initialised")},
+            {"download_dir",    ctx_ref.llmfit ? ctx_ref.llmfit->download_dir()
+                                               : std::string()},
+        };
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // Login: constant-time check vs webui_password; mint the session cookie.
+    svr.Post("/llmfit/api/login", [&](const httplib::Request & req, httplib::Response & res) {
+        std::string pw;
+        try { pw = nlohmann::json::parse(req.body).value("password", ""); }
+        catch (...) {
+            res.status = 400;
+            res.set_content(error_json("invalid JSON"), "application/json");
+            return;
+        }
+        if (ctx_ref.webui_password.empty() || !ct_eq(pw, ctx_ref.webui_password)) {
+            res.status = 401;
+            res.set_content(error_json("invalid password", "authentication_error"),
+                            "application/json");
+            return;
+        }
+        res.set_header("Set-Cookie",
+            "easyai_llmfit=" + ctx_ref.session_token +
+            "; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000");
+        res.set_content("{\"ok\":true}", "application/json");
+    });
+
+    svr.Post("/llmfit/api/logout", [&](const httplib::Request &, httplib::Response & res) {
+        res.set_header("Set-Cookie",
+            "easyai_llmfit=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+        res.set_content("{\"ok\":true}", "application/json");
+    });
+
+    // Small helper: 502 when the bridge isn't there. Returns true if usable.
+    auto llmfit_ready = [&](httplib::Response & res) -> bool {
+        if (ctx_ref.llmfit) return true;
+        res.status = 502;
+        res.set_content(error_json("llmfit bridge unavailable", "bad_gateway"),
+                        "application/json");
+        return false;
+    };
+
+    // ---- native download manager -------------------------------------
+    // List the .gguf files inside a HuggingFace repo (the quant picker).
+    svr.Get("/llmfit/api/hf/files", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!llmfit_require_auth(ctx_ref, req, res)) return;
+        if (!llmfit_ready(res)) return;
+        std::string repo = req.has_param("repo") ? req.get_param_value("repo") : "";
+        std::vector<easyai::LlmfitBridge::RepoFile> files;
+        std::string err;
+        if (!ctx_ref.llmfit->hf_repo_files(repo, files, err)) {
+            res.status = 502;
+            res.set_content(error_json(err, "bad_gateway"), "application/json");
+            return;
+        }
+        nlohmann::ordered_json arr = nlohmann::ordered_json::array();
+        for (const auto & f : files)
+            arr.push_back({{"path", f.path}, {"size_bytes", f.size_bytes}});
+        nlohmann::ordered_json j{{"repo", repo}, {"files", arr}};
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // Start a download. Body: {"repo":"owner/name-GGUF","filename":"<optional>"}.
+    svr.Post("/llmfit/api/download", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!llmfit_require_auth(ctx_ref, req, res)) return;
+        if (!llmfit_ready(res)) return;
+        std::string repo, filename;
+        try {
+            auto b = nlohmann::json::parse(req.body);
+            repo     = b.value("repo", "");
+            filename = b.value("filename", "");
+        } catch (...) {
+            res.status = 400;
+            res.set_content(error_json("invalid JSON"), "application/json");
+            return;
+        }
+        if (repo.empty()) {
+            res.status = 400;
+            res.set_content(error_json("'repo' is required"), "application/json");
+            return;
+        }
+        std::string err;
+        int id = ctx_ref.llmfit->start_download(repo, filename, err);
+        if (id < 0) {
+            res.status = 409;
+            res.set_content(error_json(err), "application/json");
+            return;
+        }
+        nlohmann::ordered_json j{{"id", id}, {"repo", repo}, {"state", "downloading"}};
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Get("/llmfit/api/download/status", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!llmfit_require_auth(ctx_ref, req, res)) return;
+        if (!llmfit_ready(res)) return;
+        auto s = ctx_ref.llmfit->download_status();
+        nlohmann::ordered_json j{
+            {"id", s.id}, {"repo", s.repo}, {"filename", s.filename},
+            {"state", s.state}, {"downloaded_bytes", s.downloaded_bytes},
+            {"total_bytes", s.total_bytes}, {"percent", s.percent},
+            {"error", s.error},
+        };
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Post("/llmfit/api/download/cancel", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!llmfit_require_auth(ctx_ref, req, res)) return;
+        if (!llmfit_ready(res)) return;
+        ctx_ref.llmfit->cancel_download();
+        res.set_content("{\"ok\":true}", "application/json");
+    });
+
+    // ---- local model directory: list + delete ------------------------
+    svr.Get("/llmfit/api/local-models", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!llmfit_require_auth(ctx_ref, req, res)) return;
+        if (!llmfit_ready(res)) return;
+        auto models = ctx_ref.llmfit->list_local();
+        nlohmann::ordered_json arr = nlohmann::ordered_json::array();
+        for (const auto & m : models)
+            arr.push_back({{"name", m.name}, {"size_bytes", m.size_bytes},
+                           {"mtime", m.mtime}});
+        nlohmann::ordered_json j{{"dir", ctx_ref.llmfit->download_dir()},
+                                 {"models", arr}};
+        res.set_content(j.dump(), "application/json");
+    });
+
+    svr.Post("/llmfit/api/local-models/delete", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!llmfit_require_auth(ctx_ref, req, res)) return;
+        if (!llmfit_ready(res)) return;
+        std::string name;
+        try { name = nlohmann::json::parse(req.body).value("name", ""); }
+        catch (...) {
+            res.status = 400;
+            res.set_content(error_json("invalid JSON"), "application/json");
+            return;
+        }
+        std::string err;
+        if (!ctx_ref.llmfit->delete_local(name, err)) {
+            res.status = 400;
+            res.set_content(error_json(err), "application/json");
+            return;
+        }
+        res.set_content("{\"ok\":true}", "application/json");
+    });
+
+    // ---- proxied analysis API -> llmfit child /api/v1/* --------------
+    // POST /api/v1/plan (registered before the GET catch-all).
+    svr.Post("/llmfit/api/v1/plan", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!llmfit_require_auth(ctx_ref, req, res)) return;
+        if (!llmfit_ready(res)) return;
+        auto pr = ctx_ref.llmfit->proxy_post(
+            "/api/v1/plan", req.body,
+            req.get_header_value("Content-Type", "application/json"));
+        res.status = pr.status;
+        res.set_content(pr.body, pr.content_type);
+    });
+
+    // GET catch-all for the read-only analysis endpoints (system, models,
+    // models/top, models/{name}, runtimes, installed). The query string is
+    // re-encoded and forwarded verbatim.
+    svr.Get(R"(/llmfit/api/v1/.*)", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!llmfit_require_auth(ctx_ref, req, res)) return;
+        if (!llmfit_ready(res)) return;
+        std::string upstream = req.path.substr(std::string("/llmfit").size());
+        if (!req.params.empty())
+            upstream += "?" + httplib::detail::params_to_query_str(req.params);
+        auto pr = ctx_ref.llmfit->proxy_get(upstream);
+        res.status = pr.status;
+        res.set_content(pr.body, pr.content_type);
+    });
+
     // Last-chance error handler — never let a thrown exception propagate
     // out of the HTTP layer (httplib would close the socket abruptly).
     svr.set_exception_handler([](const auto & req, auto & res, std::exception_ptr ep) {
@@ -7363,6 +7721,12 @@ int main(int argc, char ** argv) {
 
     bool ok = svr.listen(args.host.c_str(), args.port);
     g_server.store(nullptr);
+
+    // Tear down the llmfit child (SIGTERM -> grace -> SIGKILL -> reap) so it
+    // never outlives easyai-server as an orphan. Done here, after listen()
+    // returns, rather than from the async signal handler (which must stay
+    // async-signal-safe) — mirrors how the metrics thread is joined below.
+    if (ctx->llmfit) ctx->llmfit->stop();
 
     // Wake the metrics ticker so it exits its wait_for promptly, then join.
     g_metrics_stop.store(true, std::memory_order_relaxed);

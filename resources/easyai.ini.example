@@ -174,6 +174,34 @@
 ; (inline single-file fallback). Default modern.
 ;webui_mode        = modern
 
+; ---------- LLMFit dashboard (/llmfit) ----------
+; A sober web UI, linked from the chat UI, that surfaces llmfit's
+; hardware-aware model recommendations (fit / speed / quality scoring)
+; and a native GGUF download manager. The recommendation engine is the
+; external `llmfit` binary, spawned as a child of easyai-server and
+; proxied; downloads are performed natively by easyai-server.
+
+; Password gate for /llmfit and all of its API routes. Empty (default)
+; leaves the dashboard OPEN. Set this to require a login (a session
+; cookie distinct from [SERVER] api_key, which still guards /v1/*).
+;webui_password    = REPLACE-WITH-A-STRONG-PASSPHRASE
+
+; Where GGUF weights are downloaded to and listed/deleted from.
+; Default: the directory the loaded --model lives in, so downloads land
+; next to the models already in use.
+;download_dir      = /var/lib/easyai/models
+
+; The `llmfit` binary: a bare name resolved via PATH, or an absolute
+; path. Install with `cargo install --path .` from the llmfit repo, or
+; `brew install AlexsJones/llmfit/llmfit`. If it can't be found, the
+; dashboard still loads and the download manager still works — only the
+; recommendation panels report the engine as offline.
+;llmfit_bin        = llmfit
+
+; Loopback port easyai-server runs `llmfit serve` on (bound to
+; 127.0.0.1; not exposed). Change only if 8788 is taken.
+;llmfit_port       = 8788
+
 ; ============================================================
 ; [ENGINE] — model loading + inference tunables
 ; ============================================================
