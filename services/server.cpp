@@ -1495,6 +1495,7 @@ struct ServerCtx {
     std::atomic<uint64_t>      n_in_flight{0};   // currently being served
     std::atomic<uint64_t>      n_bytes_in{0};    // total request bodies received
     std::atomic<uint64_t>      n_bytes_out{0};   // total response bodies sent (streamed = 0)
+    std::chrono::steady_clock::time_point started_at{std::chrono::steady_clock::now()};  // for uptime
 
     // sampling defaults that survive across requests (set via /v1/preset)
     float def_temperature = 0.7f;
@@ -7549,6 +7550,110 @@ int main(int argc, char ** argv) {
         if (!models_ready(res)) return;
         res.set_content(ctx_ref.models->system_json(httplib::detail::params_to_query_str(req.params)),
                         "application/json");
+    });
+    // Comprehensive runtime status for the dashboard's Status tab: process,
+    // running model + live execution, active parameters, enabled services +
+    // tool catalogue, request/process metrics, hardware, catalog + download.
+    svr.Get("/models/api/status", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+
+        const long long uptime = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - ctx_ref.started_at).count();
+        const int in_flight = (int) ctx_ref.n_in_flight.load();
+        // Engine reads are lock-free here (same convention as /health): the
+        // model path / context are immutable during generation, and a hot-swap
+        // (the only writer) excludes generation under engine_mu. perf counters
+        // are benignly racy.
+        auto perf = ctx_ref.engine.perf_data();
+        auto tps = [](int n, double ms) { return ms > 0 ? n * 1000.0 / ms : 0.0; };
+
+        ordered_json server = {
+            {"status", in_flight > 0 ? "executing" : "idle"},
+            {"version", "0.1.0"},
+            {"uptime_seconds", uptime},
+            {"backend", ctx_ref.engine.backend_summary()},
+            {"host", args.host}, {"port", args.port},
+            {"pid", (long) ::getpid()},
+        };
+
+        ordered_json model = {
+            {"model_id", ctx_ref.model_id},
+            {"model_path", ctx_ref.engine.model_path()},
+            {"alias", args.alias.empty() ? ctx_ref.model_id : args.alias},
+            {"context_window", ctx_ref.engine.n_ctx()},
+            {"kv_cache_used", perf.n_ctx_used},
+            {"executing", in_flight > 0},
+            {"in_flight", in_flight},
+            {"last_prompt_tokens", perf.n_prompt_tokens},
+            {"last_predicted_tokens", perf.n_predicted_tokens},
+            {"last_prompt_tps", tps(perf.n_prompt_tokens, perf.prompt_ms)},
+            {"last_gen_tps", tps(perf.n_predicted_tokens, perf.predicted_ms)},
+        };
+
+        ordered_json params = {
+            {"context", args.n_ctx}, {"gpu_layers", args.ngl},
+            {"threads", args.n_threads}, {"threads_batch", args.threads_batch},
+            {"batch", args.n_batch}, {"parallel", args.parallel},
+            {"flash_attn", args.flash_attn}, {"mlock", args.mlock}, {"mmap", !args.no_mmap},
+            {"max_tokens", args.max_tokens},
+            {"rope_scaling", args.rope_scaling.empty() ? "auto" : args.rope_scaling},
+            {"temperature", ctx_ref.def_temperature}, {"top_p", ctx_ref.def_top_p},
+            {"top_k", ctx_ref.def_top_k}, {"min_p", ctx_ref.def_min_p},
+            {"preset", ctx_ref.default_preset.name},
+            {"preset_authoritative", ctx_ref.preset_authoritative()},
+            {"reasoning", args.reasoning},
+            {"reasoning_effort", ctx_ref.default_reasoning_effort.empty()
+                                     ? std::string("auto") : ctx_ref.default_reasoning_effort},
+            {"no_think", ctx_ref.no_think},
+        };
+
+        ordered_json tools = ordered_json::array();
+        for (const auto & t : ctx_ref.default_tools)
+            tools.push_back({ {"name", t.name},
+                              {"description", t.short_description.empty() ? t.description
+                                                                         : t.short_description} });
+        ordered_json services = {
+            {"tools_count", (int) ctx_ref.default_tools.size()},
+            {"tools", tools},
+            {"mcp", true},
+            {"mcp_auth", !ctx_ref.mcp_keys.empty() && !args.no_mcp_auth},
+            {"api_auth", !ctx_ref.api_key.empty()},
+            {"models_auth", !ctx_ref.webui_password.empty()},
+            {"memory_rag", !ctx_ref.memory_root.empty()},
+            {"memory_dir", ctx_ref.memory_root},
+            {"allow_fs", args.allow_fs}, {"allow_bash", args.allow_bash},
+            {"sandbox", args.sandbox},
+            {"google_search", args.use_google},
+            {"metrics", args.metrics},
+            {"verbose", ctx_ref.verbose},
+            {"datetime_injection", ctx_ref.inject_datetime},
+            {"knowledge_cutoff", ctx_ref.knowledge_cutoff},
+            {"webui_mode", args.webui_mode},
+        };
+
+        std::uint64_t rss_kb = 0, hwm_kb = 0; metrics::read_proc_self_status(rss_kb, hwm_kb);
+        double load[3] = { -1, -1, -1 }; metrics::load_avg_3(load);
+        ordered_json metrics_j = {
+            {"requests", ctx_ref.n_requests.load()},
+            {"errors", ctx_ref.n_errors.load()},
+            {"tool_calls", ctx_ref.n_tool_calls.load()},
+            {"in_flight", in_flight},
+            {"bytes_in", ctx_ref.n_bytes_in.load()},
+            {"bytes_out", ctx_ref.n_bytes_out.load()},
+            {"rss_bytes", rss_kb << 10}, {"peak_rss_bytes", hwm_kb << 10},
+            {"load_avg", { load[0], load[1], load[2] }},
+            {"open_fds", metrics::open_fd_count()}, {"fd_limit", metrics::fd_soft_limit()},
+        };
+
+        ordered_json models_side;
+        try { models_side = nlohmann::json::parse(ctx_ref.models->status_json()); } catch (...) {}
+
+        ordered_json j = {
+            {"server", server}, {"model", model}, {"parameters", params},
+            {"services", services}, {"metrics", metrics_j}, {"models", models_side},
+        };
+        res.set_content(j.dump(), "application/json");
     });
     svr.Get("/models/api/models", [&](const httplib::Request & req, httplib::Response & res) {
         if (!models_require_auth(ctx_ref, req, res)) return;

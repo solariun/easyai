@@ -85,6 +85,27 @@
   .empty{color:var(--mut2);text-align:center;padding:50px 10px}
   .src{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line2)}
 
+  /* status tab */
+  .stgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px;align-items:start}
+  .stcard h3{margin:0 0 10px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);
+    display:flex;align-items:center;gap:8px}
+  .stcard .kv{margin:0}
+  .stcard .kv .v{word-break:break-word}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+  .feat{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line2);border-radius:999px;
+    padding:3px 9px;font-size:11px;color:var(--mut)}
+  .feat .d{width:7px;height:7px;border-radius:50%;background:var(--mut2)}
+  .feat.on{color:var(--fg);border-color:rgba(94,194,122,.4)}
+  .feat.on .d{background:var(--good)}
+  .feat.warn.on .d{background:var(--marg)}
+  .dot-live{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 0 0 rgba(94,194,122,.5);animation:pulse 1.6s infinite}
+  .dot-live.busy{background:var(--acc)}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,130,54,.45)}70%{box-shadow:0 0 0 7px rgba(255,130,54,0)}100%{box-shadow:0 0 0 0 rgba(255,130,54,0)}}
+  .toollist{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+  .toolrow{border-top:1px solid var(--line2);padding-top:6px}
+  .toolrow:first-child{border-top:none;padding-top:0}
+  .toolrow b{font-family:var(--mono);font-size:12px}
+
   /* login */
   .overlay{position:fixed;inset:0;background:rgba(15,18,19,.86);display:flex;align-items:center;justify-content:center;z-index:50}
   .login{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px;width:330px;text-align:center}
@@ -127,6 +148,7 @@
   <button data-tab="recommend" class="active">Recommend</button>
   <button data-tab="local">Local models</button>
   <button data-tab="downloads">Downloads</button>
+  <button data-tab="status">Status</button>
 </nav>
 
 <main>
@@ -200,6 +222,18 @@
       </div>
       <div id="dlLocalWrap"><div class="empty">Loading…</div></div>
     </div>
+  </section>
+
+  <!-- STATUS -->
+  <section id="tab-status" class="hide">
+    <div class="toolbar" style="margin-bottom:14px">
+      <b style="font-size:15px">Server status</b>
+      <span class="muted small" id="statusMeta"></span>
+      <label style="margin-left:auto;flex-direction:row;align-items:center;gap:6px">
+        <input type="checkbox" id="statusAuto" checked style="width:auto"> <span class="muted small">auto-refresh</span></label>
+      <button class="btn small" onclick="loadStatus()">Refresh</button>
+    </div>
+    <div id="statusWrap"><div class="empty"><span class="spin"></span> Loading…</div></div>
   </section>
 </main>
 
@@ -459,12 +493,110 @@ async function pollDl(){
 }
 async function cancelDl(){try{await api('/models/api/download/cancel',{method:'POST'});}catch(e){}}
 
+/* ---------- status ---------- */
+let STATUS_TIMER=null;
+function f2(x,n){return (x==null||x===''||isNaN(x))?'–':Number(x).toFixed(n==null?2:n);}
+function fmtDur(s){s=Math.max(0,Math.floor(s||0));let d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),sec=s%60;
+  if(d)return d+'d '+h+'h';if(h)return h+'h '+m+'m';if(m)return m+'m '+sec+'s';return sec+'s';}
+function feat(on,label,warn){return `<span class="feat ${on?'on':''} ${warn?'warn':''}"><span class="d"></span>${esch(label)}</span>`;}
+function kvrows(pairs){return pairs.map(([k,v])=>`<span class="k">${esch(k)}</span><span class="v">${v}</span>`).join('');}
+function stcard(title,body){return `<div class="panel stcard"><h3>${title}</h3>${body}</div>`;}
+function scheduleStatus(){clearTimeout(STATUS_TIMER);
+  const onTab=$('#tab-status')&&!$('#tab-status').classList.contains('hide');
+  const auto=$('#statusAuto')&&$('#statusAuto').checked;
+  if(onTab&&auto)STATUS_TIMER=setTimeout(loadStatus,3000);}
+async function loadStatus(){
+  let d;
+  try{d=await api('/models/api/status');}
+  catch(e){$('#statusWrap').innerHTML='<div class="empty">'+esch(e.message)+'</div>';scheduleStatus();return;}
+  const sv=d.server||{},m=d.model||{},p=d.parameters||{},sc=d.services||{},mt=d.metrics||{},mo=d.models||{};
+  const sys=mo.system||{},cat=mo.catalog||{},dl=mo.download||{};
+  const busy=!!m.executing;
+  $('#statusMeta').textContent='updated '+new Date().toLocaleTimeString();
+
+  const serverCard=stcard('Server',`<div class="kv">${kvrows([
+    ['State',`<span class="dot-live ${busy?'busy':''}"></span> ${busy?'executing ('+m.in_flight+')':'idle'}`],
+    ['Uptime',fmtDur(sv.uptime_seconds)],['Backend',esch(sv.backend||'–')],
+    ['Listen',esch((sv.host||'')+':'+(sv.port||''))],['PID',sv.pid],['Version',esch(sv.version||'–')],
+  ])}</div>`);
+
+  const kvpct=m.context_window?Math.round(100*(m.kv_cache_used||0)/m.context_window):0;
+  const modelCard=stcard('Running model',`<div class="kv">${kvrows([
+    ['Model',esch(m.model_id||'–')],['Alias',esch(m.alias||'–')],
+    ['File',`<span class="mono small">${esch(m.model_path||'–')}</span>`],
+    ['Context',fmtNum(m.context_window)],
+    ['KV cache',`${fmtNum(m.kv_cache_used)} / ${fmtNum(m.context_window)} (${kvpct}%)`],
+    ['Last gen',`${f2(m.last_gen_tps,1)} tok/s`],
+    ['Last tokens',`${fmtNum(m.last_prompt_tokens)} in / ${fmtNum(m.last_predicted_tokens)} out`],
+  ])}</div>`);
+
+  const paramsCard=stcard('Active parameters',`<div class="kv">${kvrows([
+    ['Context',fmtNum(p.context)],['GPU layers',p.gpu_layers],
+    ['Threads',`${p.threads} / ${p.threads_batch} batch`],['Batch',p.batch],['Parallel',p.parallel],
+    ['Max tokens',p.max_tokens],['RoPE',esch(p.rope_scaling||'auto')],
+    ['Temp / top-p',`${f2(p.temperature)} / ${f2(p.top_p)}`],['top-k / min-p',`${p.top_k} / ${f2(p.min_p)}`],
+    ['Preset',esch(p.preset||'auto')+(p.preset_authoritative?' (forced)':'')],
+    ['Reasoning',esch(p.reasoning_effort||'auto')],
+  ])}</div><div class="chips" style="margin-top:8px">
+    ${feat(p.flash_attn,'flash-attn')}${feat(p.mlock,'mlock')}${feat(p.mmap,'mmap')}
+    ${feat(p.reasoning,'thinking')}${feat(p.no_think,'strip-think',true)}</div>`);
+
+  const services=`<div class="chips">
+    ${feat(true,'MCP')}${feat(sc.mcp_auth,'MCP auth',true)}${feat(sc.api_auth,'API auth')}${feat(sc.models_auth,'/models gate')}
+    ${feat(sc.memory_rag,'RAG')}${feat(sc.allow_fs,'fs',true)}${feat(sc.allow_bash,'bash',true)}${feat(sc.google_search,'google')}
+    ${feat(sc.metrics,'metrics')}${feat(sc.datetime_injection,'datetime')}${feat(sc.verbose,'verbose')}</div>
+    <div class="kv" style="margin-top:8px">${kvrows([
+      ['WebUI',esch(sc.webui_mode||'–')],['Knowledge cutoff',esch(sc.knowledge_cutoff||'–')],
+      ['Sandbox',esch(sc.sandbox||'—')],['Memory dir',esch(sc.memory_dir||'—')],
+    ])}</div>`;
+  const toolrows=(sc.tools||[]).map(t=>`<div class="toolrow"><b>${esch(t.name)}</b><div class="muted small">${esch(t.description||'')}</div></div>`).join('')||'<div class="muted small">none</div>';
+  const servicesCard=stcard(`Services &amp; tools <span class="muted">(${sc.tools_count||0})</span>`,services+`<div class="toollist" style="margin-top:10px">${toolrows}</div>`);
+
+  const gpu=sys.has_gpu?`${esch(sys.gpu_name||'GPU')} ${sys.gpu_vram_gb?sys.gpu_vram_gb+' GB':''}`:'none';
+  const hwCard=stcard('Hardware',`<div class="kv">${kvrows([
+    ['CPU',`${sys.cpu_cores||'–'} cores`],['RAM',`${sys.total_ram_gb||'–'} GB (${sys.available_ram_gb||'–'} free)`],
+    ['GPU',gpu],['Backend',esch(sys.backend||'–')],
+  ])}</div>`);
+
+  const catCard=stcard('Catalog',`<div class="kv">${kvrows([
+    ['Models',fmtNum(cat.models)+' / '+fmtNum(cat.catalog_size)],
+    ['Updated',cat.refreshing?'<span class="spin"></span> refreshing…':fmtAgo(cat.last_refresh)],
+    ['Local models',fmtNum(mo.local_models)],
+    ['Data dir',`<span class="mono small">${esch(cat.data_dir||'–')}</span>`],
+    ['Cache file',`<span class="mono small">${esch((cat.cache_file||'').split('/').pop()||'–')}</span>`],
+  ])}${cat.error?`<span class="k">Error</span><span class="v" style="color:var(--bad)">${esch(cat.error)}</span>`:''}</div>`);
+
+  let dlBody;
+  if(dl.state==='downloading'){let pct=f2(dl.percent,1);
+    dlBody=`<div class="small"><span class="spin"></span> ${esch(dl.filename||dl.repo)}</div>
+      <div class="bar" style="margin-top:8px"><i style="width:${pct}%"></i></div>
+      <div class="muted small" style="margin-top:6px">${fmtBytes(dl.downloaded_bytes)} / ${fmtBytes(dl.total_bytes)} · ${pct}%</div>`;}
+  else if(dl.state==='error')dlBody=`<div class="small" style="color:var(--bad)">error: ${esch(dl.error)}</div>`;
+  else if(dl.state==='done')dlBody=`<div class="muted small">last: ${esch(dl.filename||dl.repo)} — completed</div>`;
+  else dlBody='<div class="muted small">idle — no active download</div>';
+  const dlCard=stcard('Download',dlBody);
+
+  const la=mt.load_avg||[];
+  const metricsCard=stcard('Request metrics',`<div class="kv">${kvrows([
+    ['Requests',fmtNum(mt.requests)],['Errors',fmtNum(mt.errors)],['Tool calls',fmtNum(mt.tool_calls)],
+    ['In flight',mt.in_flight],['Traffic',`${fmtBytes(mt.bytes_in)} in / ${fmtBytes(mt.bytes_out)} out`],
+    ['RSS',mt.rss_bytes?fmtBytes(mt.rss_bytes):'–'],
+    ['Load avg',(la[0]!=null&&la[0]>=0)?la.map(x=>f2(x)).join(' '):'–'],
+    ['Open FDs',mt.open_fds?`${fmtNum(mt.open_fds)} / ${fmtNum(mt.fd_limit)}`:'–'],
+  ])}</div>`);
+
+  $('#statusWrap').innerHTML=`<div class="stgrid">${serverCard}${modelCard}${paramsCard}${servicesCard}${hwCard}${catCard}${dlCard}${metricsCard}</div>`;
+  scheduleStatus();
+}
+
 /* ---------- tabs / boot ---------- */
 function switchTab(t){$$('nav.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));
   $$('main > section').forEach(s=>s.classList.toggle('hide',s.id!=='tab-'+t));
   if(t==='local'||t==='downloads')loadLocal();
-  if(t==='downloads')pollDl();}
+  if(t==='downloads')pollDl();
+  if(t==='status')loadStatus(); else clearTimeout(STATUS_TIMER);}
 $$('nav.tabs button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
+$('#statusAuto').addEventListener('change',()=>{if($('#statusAuto').checked)loadStatus();else clearTimeout(STATUS_TIMER);});
 ['#f-search','#f-minfit','#f-usecase','#f-quant','#f-sort','#f-limit'].forEach(s=>{
   $(s).addEventListener('input',s==='#f-search'?debounceModels:loadModels);});
 ['#s-ram','#s-vram','#s-cores'].forEach(s=>$(s).addEventListener('change',()=>{

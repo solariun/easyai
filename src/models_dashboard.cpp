@@ -950,6 +950,42 @@ std::string ModelsEngine::system_json(const std::string & query) {
     return system_to_json(s).dump();
 }
 
+std::string ModelsEngine::status_json() {
+    // detected hardware
+    ordered_json sys;
+    try { sys = system_to_json(detect_system())["system"]; } catch (...) {}
+
+    // catalog snapshot meta
+    ordered_json catalog;
+    {
+        std::lock_guard<std::mutex> lk(hf_cache_mu_);
+        catalog["models"]       = (std::uint64_t) hf_cache_->snapshot.size();
+        catalog["last_refresh"] = hf_cache_->last_refresh;
+        catalog["error"]        = hf_cache_->error;
+    }
+    catalog["refreshing"]   = refreshing_.load();
+    catalog["catalog_size"] = catalog_size_;
+    catalog["data_dir"]     = data_dir_;
+    catalog["cache_file"]   = (fs::path(data_dir_.empty() ? std::string(".") : data_dir_)
+                               / "easyai_hf_catalog.json").string();
+    catalog["source"]       = status_;
+
+    // active / last download
+    DownloadStatus d = download_status();
+    ordered_json dl = {
+        {"id", d.id}, {"state", d.state}, {"repo", d.repo}, {"filename", d.filename},
+        {"downloaded_bytes", d.downloaded_bytes}, {"total_bytes", d.total_bytes},
+        {"percent", d.percent}, {"error", d.error},
+    };
+
+    ordered_json out = {
+        {"system", sys}, {"catalog", catalog}, {"download", dl},
+        {"download_dir", download_dir_}, {"data_dir", data_dir_},
+        {"local_models", (std::uint64_t) list_local().size()},
+    };
+    return out.dump();
+}
+
 // models_json (live HuggingFace search) and plan_json (live HF, by repo id)
 // are defined at the BOTTOM of this file — after the curl + GGUF + HF helpers
 // they depend on.

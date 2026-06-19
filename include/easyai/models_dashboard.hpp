@@ -108,6 +108,10 @@ public:
     // ---- JSON endpoints (raw query string / body in, JSON out) ----
     // `query` is the request's URL query (e.g. "search=qwen&min_fit=good&ram_gb=64").
     std::string system_json(const std::string & query);
+    // Compact models-side status for the dashboard's Status tab: detected
+    // hardware, catalog meta (size / last refresh / cache file / refreshing),
+    // the active download, and local-model count. No request params.
+    std::string status_json();
     std::string models_json(const std::string & query);       // static HF snapshot
     std::string plan_json(const std::string & body);          // POST body
     std::string local_models_json();                          // list
