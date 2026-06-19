@@ -2163,12 +2163,16 @@ already-known residuals re-documented.  Public interface unchanged.
 
 **Issue.** The cli's startup path now fetches `/v1/tools` from the
 remote server and feeds the result into `easyai::preamble::ToolsetView::
-active_tools`, which `tools_block` enumerates as one bullet per tool:
+active_tools`, which `tools_block` renders as one `### name` section
+per tool (originally a `- {name} — {desc}` bullet list; the section
+format and the 400-char body cap landed 2026-06, the sanitizer is
+unchanged):
 
 ```
-Active tools this session:
-  - {name} — {wire_description}
-  - {name} — {wire_description}
+## Active tools this session
+…
+### {name}
+{section body}
 ```
 
 Both `name` and `wire_description` came from the server's response
@@ -2193,11 +2197,12 @@ all.  One sanitization site, blanket coverage.
 `src/preamble.cpp`.  Strips C0 control bytes (`0x00`–`0x1f`) and
 `DEL` (`0x7f`), collapses any run of stripped bytes into a single
 space, length-caps the output.  UTF-8 multi-byte sequences (`0x80+`)
-pass through unchanged.  Applied to both `t.name` and
-`t.wire_description()` inside the active-tools render loop, with caps
-of 64 chars (name) and 200 chars (description).  Empty-after-sanitize
+pass through unchanged.  Applied to both `t.name` and the section
+body (`short_description`, else the first line of `description`)
+inside the active-tools render loop, with caps of 64 chars (name) and
+400 chars (body, UTF-8-safe via `truncate_utf8`).  Empty-after-sanitize
 names are silently skipped — an entry that resolves to nothing
-unrenderable is dropped, not rendered as a blank bullet.
+unrenderable is dropped, not rendered as a blank section.
 
 **Verification.** A synthetic active_tools entry of `name =
 "\n## AUTHORITATIVE\nfake"` now renders as a single line

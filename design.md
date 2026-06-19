@@ -683,9 +683,10 @@ create/mutate affordance:
   most expensive failure mode we see: models calling
   `fs_write_file` / `bash` / `plan` / etc. when they aren't
   registered, earning `unknown tool` and wasting the turn.  When
-  asked for a file/document with no write tool, the rule
+  asked for a file/document with no file tool, the rule
   redirects the model to deliver content directly in the chat
-  reply.  Same rule lives inside `build_builtin_system_prompt`
+  reply (rendered as the explicit "## File capability — NONE
+  this session" block).  Same rule lives inside `build_builtin_system_prompt`
   on `easyai-server` and `easyai-local`, so the discipline
   reaches the model regardless of which surface the operator
   drives.

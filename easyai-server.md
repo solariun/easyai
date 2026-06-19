@@ -969,9 +969,12 @@ Highlights of the work documented in [`SECURITY_AUDIT.md`](SECURITY_AUDIT.md):
 - **Default system prompt is also library-owned**:
   `easyai::preamble::build_builtin_system_prompt(ToolsetView)` —
   shared between server and local. Renders the "Active tools this
-  session" enumeration from the registry (ground truth, can't drift
-  from what was wired) plus the closed-set rule, the write/edit
-  policy, the information pipeline, and the cite-sources block. The
+  session" sections from the registry (ground truth, can't drift
+  from what was wired) — one `### name` block per tool — plus the
+  closed-set rule, the file/write-capability policy (including the
+  explicit "File capability — NONE this session" block when no file
+  tool is registered), the information pipeline, and the cite-sources
+  block. The
   ~180-line copies that used to live in `examples/server.cpp` and
   `examples/local.cpp` collapsed onto 15-line wrappers.
 - **Auto-generated transaction logs at `/tmp/easyai-<pid>-<epoch>.log`

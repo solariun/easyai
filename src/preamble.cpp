@@ -418,63 +418,77 @@ std::string first_description_line(const std::string & d) {
     return r;
 }
 
+// The one-line body shown for a tool in the section catalogues. Prefer
+// the purpose-built `short_description`; fall back to the first line of
+// the long-form `description` for tools that only set that (e.g. the
+// knowledge tools). Single source so tools_block and build_session_info
+// render the SAME text for a given tool.
+std::string section_body(const easyai::Tool & t) {
+    return t.short_description.empty() ? first_description_line(t.description)
+                                       : t.short_description;
+}
+
+// Truncate `s` to at most `cap` bytes WITHOUT splitting a UTF-8
+// codepoint, appending "…" when truncation actually happened. Used for
+// the per-tool section bodies: each tool owns a paragraph, so we allow a
+// generous cap (the full trigger sentence) but still stop short of
+// dumping the whole manual — that's what `tool_lookup` is for. A naive
+// byte cut could split a multi-byte codepoint and produce invalid UTF-8,
+// which later aborts JSON serialisation (json.exception.type_error.316);
+// a UTF-8 continuation byte has top bits 10xxxxxx, lead bytes do not.
+std::string truncate_utf8(const std::string & s, std::size_t cap) {
+    if (s.size() <= cap) return s;
+    std::size_t cut = cap;
+    while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80) --cut;
+    std::string out = s.substr(0, cut);
+    while (!out.empty() && (out.back() == ' ' || out.back() == '\t')) out.pop_back();
+    out += "…";
+    return out;
+}
+
 }  // anonymous
 
 std::string build_session_info(const std::vector<easyai::Tool> & tools) {
     if (tools.empty()) return std::string();
 
     std::ostringstream out;
-    out << "\n\n# FILE OUTPUT — AUTHORITATIVE RULE\n"
-           "Only use file-write or file-read operations if a filesystem "
-           "or file tool (e.g. `fs`, `bash`, or any tool whose name "
-           "contains \"file\") is present in the AVAILABLE TOOLS list "
-           "below. If NO such tool is available, write the file content "
-           "directly in your answer instead.\n";
+    out << "\n\n# FILE CAPABILITY — AUTHORITATIVE RULE\n"
+           "You can create, read, write, or edit a file on disk ONLY if a "
+           "filesystem or file tool (for example `fs`, `bash`, or any tool "
+           "whose name contains \"file\") appears in the AVAILABLE TOOLS "
+           "list below. If NO such tool is listed you have NO file "
+           "capability: do not call any tool to touch a file, and never "
+           "claim a file was created or saved — instead put the full file "
+           "content directly in your reply inside a fenced code block. "
+           "Writing text and code in your reply is always allowed; this "
+           "rule is ONLY about files on disk.\n";
 
     out << "\n\n# AVAILABLE TOOLS — call ONLY these names this session\n"
-           "These are the EXACT tools registered in your session. The "
-           "names are case-sensitive. Calling a name NOT in this list "
-           "returns `unknown tool` and wastes the turn.\n\n";
+           "These are the EXACT tools registered in your session. Each "
+           "section below is one tool: the SECTION TITLE is the exact, "
+           "case-sensitive name to put in a tool call, and the text under "
+           "it says what the tool does. Calling a name that is NOT a "
+           "section title here returns `unknown tool` and wastes the "
+           "turn.\n";
 
     for (const auto & t : tools) {
-        out << "  - " << t.name;
+        out << "\n### " << t.name << '\n';
         const auto actions = extract_action_enum(t.parameters_json);
         if (!actions.empty()) {
-            out << "(action=";
+            out << "Actions (pass via the `action` parameter): ";
             for (size_t i = 0; i < actions.size(); ++i) {
-                if (i) out << '|';
+                if (i) out << " | ";
                 out << '"' << actions[i] << '"';
             }
-            out << ")";
+            out << '\n';
         }
-        const std::string fl = first_description_line(t.description);
-        if (!fl.empty()) {
-            // Cap the one-liner so a verbose first line doesn't blow up
-            // the catalogue (some descriptions cram a whole sentence in
-            // line 1; 140 bytes is enough to convey purpose without
-            // turning the block into a wall).
-            //
-            // UTF-8 safety: substr() works on bytes, so a naive cut can
-            // split a multi-byte codepoint and produce invalid UTF-8.
-            // The eventual JSON serialisation
-            // (client.cpp / build_chat_body via nlohmann) then aborts
-            // with json.exception.type_error.316. Walk back from the
-            // cut point to the previous codepoint boundary — a UTF-8
-            // continuation byte has top bits 10xxxxxx, lead bytes do
-            // not. Worst case we lose a few extra bytes from the
-            // one-liner; the catalogue stays valid.
-            if (fl.size() > 140) {
-                size_t cut = 137;
-                while (cut > 0
-                       && (static_cast<unsigned char>(fl[cut]) & 0xC0) == 0x80) {
-                    --cut;
-                }
-                out << ": " << fl.substr(0, cut) << "...";
-            } else {
-                out << ": " << fl;
-            }
-        }
-        out << '\n';
+        // Body = short_description (preferred) or the first description
+        // line, capped at 400 bytes. Sanitize control bytes first: the
+        // cli --url path populates this list from an untrusted /v1/tools
+        // payload (same boundary as tools_block; SECURITY_AUDIT §23.1).
+        const std::string body =
+            truncate_utf8(sanitize_for_prompt(section_body(t), 4096), 400);
+        if (!body.empty()) out << body << '\n';
     }
 
     out << "\n# VERIFY BEFORE YOU CALL — UNBREAKABLE RULE\n"
@@ -486,7 +500,7 @@ std::string build_session_info(const std::vector<easyai::Tool> & tools) {
            "Two failure modes that waste the turn:\n"
            "\n"
            "1. Calling a SUB-ACTION as if it were a tool. Composite "
-           "tools (those shown above with `action=\"…\"`) dispatch "
+           "tools (the ones whose section above lists `Actions`) dispatch "
            "via the `action` parameter; the sub-action is NEVER "
            "callable on its own. Example:\n"
            "  WRONG: update(items=[…])\n"
@@ -533,7 +547,7 @@ std::string tools_block(const ToolsetView & view) {
          "\n"
          "If a request needs a capability with no matching tool, do the "
          "work in your visible reply. Asked to write a file and have no "
-         "write tool? Put the content DIRECTLY in the chat reply — never "
+         "file tool? Put the content DIRECTLY in the chat reply — never "
          "paste it into a non-existent tool call.\n"
          "\n";
 
@@ -543,12 +557,12 @@ std::string tools_block(const ToolsetView & view) {
     // hardcoded trigger lines so a partially-populated view still
     // renders something useful (mostly relevant to easyai-cli before
     // it has its server-fetched catalogue).
-    // Write/edit policy is emitted BEFORE the active-tools list on
-    // purpose: a model reading the catalogue must see the rule first
-    // so the rule frames the trigger lines that follow. Putting the
-    // policy AFTER the bullet list left the model picking the compute
-    // tool for file writes (strong training prior on "python = write
-    // files") before it ever read the "compute is read-only" rule.
+    // The write/file-capability policy is emitted BEFORE the active-tools
+    // sections on purpose: a model reading the catalogue must see the rule
+    // first so it frames the tool sections that follow. Putting the policy
+    // AFTER the tool list left the model picking the compute tool for file
+    // writes (strong training prior on "python = write files") before it
+    // ever read the "compute is read-only" rule.
     if (view.python_on) {
         s << "## Write/edit policy (AUTHORITATIVE)\n"
              "`evaluate` is for COMPUTE and ALGORITHM PROTOTYPING ONLY "
@@ -582,65 +596,99 @@ std::string tools_block(const ToolsetView & view) {
         }
         s << " Only call tools listed in AVAILABLE TOOLS below.\n\n";
     } else {
-        s << "## Write/edit policy — NO WRITE TOOLS\n"
-             "You have NO write capability this session. When asked to "
-             "write code or create a file, put the FULL content DIRECTLY "
-             "in your chat reply using a fenced code block. Only call "
-             "tools listed in AVAILABLE TOOLS below.\n\n";
+        s << "## File capability — NONE this session\n"
+             "You have NO way to touch files this session. You CANNOT "
+             "create, write, edit, append, read, open, or save any file on "
+             "disk — there is no tool here that does that.\n"
+             "\n"
+             "So when the user asks you to \"write a file\", \"save this\", "
+             "\"create a script\", or \"edit a file\":\n"
+             "  - Put the ENTIRE content directly in your chat reply, "
+             "inside a fenced code block, and tell the user what filename "
+             "to save it as.\n"
+             "  - Do NOT call any tool to do it. Do NOT say a file was "
+             "created, saved, or edited — you have no file tool, so "
+             "claiming you used one is false.\n"
+             "\n"
+             "This limit is ONLY about files on disk. Writing normally in "
+             "your reply (code, text, explanations) is NOT a \"file\" and "
+             "is always allowed.\n"
+             "\n"
+             "Call only the tools listed under \"Active tools this "
+             "session\" below.\n\n";
     }
 
     if (!view.active_tools.empty()) {
-        s << "Active tools this session:\n";
-        std::size_t n = 0;
+        s << "## Active tools this session\n"
+             "Below is every tool you can call — one section each. The "
+             "SECTION TITLE is the exact tool name to put in a tool call "
+             "(case-sensitive, nothing added). The text under it says what "
+             "the tool does and when to use it. A name not listed here is "
+             "not callable.\n";
         // Tool names are validated upstream (regex-bounded for external
         // tools, hardcoded for builtins) but the cli's --url flow
         // populates `active_tools` from /v1/tools — a malicious server
         // could return a tool with embedded control bytes that would
-        // break the bullet structure.  Sanitize both fields at the
-        // render boundary; see SECURITY_AUDIT §23.1.
+        // break the section structure.  Sanitize both fields at the
+        // render boundary; see SECURITY_AUDIT §23.1.  kDescCap is 400 (not
+        // 200): each tool now owns its own paragraph, so a longer trigger
+        // reads clearly instead of being clipped mid-word.
         constexpr std::size_t kNameCap = 64;
-        constexpr std::size_t kDescCap = 200;
+        constexpr std::size_t kDescCap = 400;
         for (const auto & t : view.active_tools) {
-            ++n;
             const std::string name = sanitize_for_prompt(t.name, kNameCap);
-            const std::string wd   = sanitize_for_prompt(t.wire_description(), kDescCap);
             if (name.empty()) continue;       // unrenderable entry
-            s << "  " << n << ". " << name;
-            if (!wd.empty()) s << " — " << wd;
-            s << '\n';
+            // Use section_body (short_description, else first description
+            // line) rather than wire_description(): the latter pre-caps the
+            // description fallback at 120 bytes, which would clip a tool
+            // that sets only `description` (e.g. the knowledge tools)
+            // before kDescCap could ever apply. Sanitize control bytes
+            // (untrusted /v1/tools) then cap UTF-8-safely at kDescCap.
+            const std::string body =
+                truncate_utf8(sanitize_for_prompt(section_body(t), 4096), kDescCap);
+            s << "\n### " << name << '\n';
+            if (!body.empty()) s << body << '\n';
         }
         s << '\n';
     } else if (view.any()) {
-        s << "Active tools this session:\n";
+        s << "## Active tools this session\n"
+             "Below is every tool you can call — one section each. The "
+             "SECTION TITLE is the exact tool name. A name not listed here "
+             "is not callable.\n";
         if (view.datetime_on)
-            s << "  - datetime — return the current UTC and local "
-                 "date/time. Call for 'now'/'today'/'latest' or before "
-                 "date math.\n";
+            s << "\n### datetime\n"
+                 "Return the current UTC and local date/time. Call for "
+                 "'now'/'today'/'latest' or before date math.\n";
         if (view.web_on)
-            s << "  - web — search the web and fetch URLs "
-                 "(action=search|fetch). Reply MUST end with a "
-                 "`Sources:` block listing URLs used.\n";
+            s << "\n### web\n"
+                 "Search the web and fetch URLs (action=search|fetch). "
+                 "Reply MUST end with a `Sources:` block listing URLs "
+                 "used.\n";
         if (view.memory_on)
-            s << "  - knowledge — your persistent memory "
-                 "(learning_knowledge, learning_more_knowledge, "
-                 "search_knowledge, recall_knowledge, browse_knowledge, "
-                 "forget_knowledge, keywords_knowledge). Search BEFORE "
-                 "answering.\n";
+            s << "\n### knowledge\n"
+                 "Your persistent memory (learning_knowledge, "
+                 "learning_more_knowledge, search_knowledge, "
+                 "recall_knowledge, browse_knowledge, forget_knowledge, "
+                 "keywords_knowledge). Search BEFORE answering.\n";
         if (view.fs_on)
-            s << "  - fs — filesystem: read/write/edit/list/glob/grep/"
-                 "cwd/sandbox in sandbox. Batch with action=\"ops\" "
-                 "(50 ops / 20 files per call).\n";
+            s << "\n### fs\n"
+                 "Filesystem: read/write/edit/list/glob/grep/cwd/sandbox "
+                 "in sandbox. Batch with action=\"ops\" (50 ops / 20 files "
+                 "per call).\n";
         if (view.bash_on)
-            s << "  - bash — run a shell command (`/bin/sh -c`). "
-                 "Allowed to write files (redirects, sed -i, mkdir). "
-                 "Use for pipes/build/git/sed/awk.\n";
+            s << "\n### bash\n"
+                 "Run a shell command (`/bin/sh -c`). Allowed to write "
+                 "files (redirects, sed -i, mkdir). Use for "
+                 "pipes/build/git/sed/awk.\n";
         if (view.python_on)
-            s << "  - evaluate — evaluate Python 3 code for compute / "
-                 "algorithm prototyping. FORBIDDEN: filesystem, "
-                 "subprocess, network, ctypes. Stdlib compute only.\n";
+            s << "\n### evaluate\n"
+                 "Evaluate Python 3 code for compute / algorithm "
+                 "prototyping. FORBIDDEN: filesystem, subprocess, network, "
+                 "ctypes. Stdlib compute only.\n";
         if (view.tool_lookup_on)
-            s << "  - tool_lookup — list or inspect registered tools. "
-                 "Call when in doubt about a name or its full manual.\n";
+            s << "\n### tool_lookup\n"
+                 "List or inspect registered tools. Call when in doubt "
+                 "about a name or its full manual.\n";
         s << '\n';
     } else {
         s << "NO TOOLS ARE REGISTERED THIS SESSION. Do not call any "

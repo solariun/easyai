@@ -327,7 +327,7 @@ runs through one of two sanitizers in `easyai::preamble`:
 
 | Source | Sanitizer | Cap | Why |
 |--------|-----------|-----|-----|
-| Single-line tool name / wire_description in `tools_block` | `sanitize_for_prompt` (anonymous, src/preamble.cpp) — strips ALL C0 incl. `\n` | 64 / 200 | Structural — must stay one bullet item per tool. (§23.1) |
+| Tool name + section body in `tools_block` / `build_session_info` | `sanitize_for_prompt` (anonymous, src/preamble.cpp) — strips ALL C0 incl. `\n` | 64 / 400 | Structural — each tool renders as one `### name` section; an embedded `\n` would forge a new section heading. (§23.1) |
 | Multi-paragraph `Tool::system_addendum` | `preamble::sanitize_addendum` | 8 KiB / tool | Paragraph block — keeps `\n` / `\t`, strips ESC / DEL / bell / other C0. (§25.1) |
 | Operator's `Config::system_appendix` / `Session::system_append(...)` | `preamble::sanitize_addendum` | 16 KiB | Same. (§25.1) |
 
@@ -693,7 +693,7 @@ Three independent channels the model sees per turn — these MUST stay in sync.
 | Channel | Contains | Producer | Source field |
 |---|---|---|---|
 | `<tools>` block in system message (Jinja template) | `name + short trigger + JSON schema` | `Engine::Pimpl::chat_tools()` / `Client::tool_to_json()` | `Tool::wire_description()` |
-| Inline "Active tools" enumeration in system prompt | `name — short trigger` per tool | `easyai::preamble::tools_block(view)` | `Tool::wire_description()` |
+| Inline "Active tools" sections in system prompt | `### name` + trigger body per tool | `easyai::preamble::tools_block(view)` | `Tool::short_description` (else first line of `description`), capped 400 |
 | MCP `tools/list` response | `name + full description + inputSchema` | `easyai::mcp::tool_descriptor(t)` | `Tool::description` (full) |
 
 Authoring rule: every tool sets both `.short_describe(...)` and `.describe(...)`. `wire_description()` falls back to the first line of `.describe(...)` if `.short_describe(...)` was omitted (pre-Shape-C tools keep working).
@@ -736,7 +736,7 @@ The model's short trigger is now: `"Evaluate Python 3 code for compute / algorit
 
 ### Prompt-render sanitization
 
-`easyai::preamble::tools_block` runs `t.name` and `t.wire_description()` through `sanitize_for_prompt(s, cap)` before emitting the active-tools bullet list. C0 control bytes (`0x00`–`0x1f`) and `DEL` (`0x7f`) collapse to a single space; UTF-8 multi-byte (`0x80+`) passes through. Caps: 64 chars (name), 200 chars (description). Closes the structural-corruption prompt-injection vector when `active_tools` is populated from a less-trusted source (e.g. cli's `/v1/tools` runtime fetch). See SECURITY_AUDIT §23.1.
+`easyai::preamble::tools_block` runs `t.name` and each tool's section body (`short_description`, else the first line of `description`) through `sanitize_for_prompt(s, cap)` before emitting the per-tool `### name` sections. C0 control bytes (`0x00`–`0x1f`) and `DEL` (`0x7f`) collapse to a single space; UTF-8 multi-byte (`0x80+`) passes through. Caps: 64 chars (name), 400 chars (body, then UTF-8-safe `truncate_utf8`). Closes the structural-corruption prompt-injection vector when `active_tools` is populated from a less-trusted source (e.g. cli's `/v1/tools` runtime fetch). See SECURITY_AUDIT §23.1.
 
 ### `evaluate` disk enforcement (Python 3 sandbox preamble)
 

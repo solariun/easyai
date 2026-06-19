@@ -177,9 +177,10 @@ std::string agent_style_block(bool has_fs_or_bash,
 // tool's sub-action as if it were a standalone tool
 // (e.g. `update(...)` instead of `plan(action="update", ...)`). The
 // block:
-//   1. Lists every registered tool by canonical name, with the action
-//      enum spelled out for composite tools, so the model sees the
-//      exact dispatch shape.
+//   1. Renders each registered tool as its own titled section (the
+//      section title is the canonical name), with the action enum
+//      spelled out for composite tools, so the model sees the exact
+//      dispatch shape.
 //   2. Carries an UNBREAKABLE rule pointing at the most common
 //      mistakes and instructing the model to call `tool_lookup` first
 //      whenever a name was not previously confirmed.
@@ -190,12 +191,14 @@ std::string agent_style_block(bool has_fs_or_bash,
 // catalogue every turn just burns tokens for no behavioural gain.
 std::string build_session_info(const std::vector<easyai::Tool> & tools);
 
-// Render the "Tools available this session" section.  Always emits the
+// Render the "Active tools this session" section.  Always emits the
 // closed-set rule (the model must call only tools advertised this turn)
-// and the python3 read-only / fs-and-bash-only-write policy.  The body
-// enumerates the active tools by name + short_description (one line
-// each) so the model has a stable, readable index alongside the
-// machine-readable `<tools>` schema the chat template emits.
+// and the file/write-capability policy — including the explicit "NO file
+// capability this session" block when no fs/bash/file tool is registered.
+// The body then renders each active tool as its own titled section (the
+// section title is the exact callable name, the body is its
+// short_description) so the model has a stable, readable index alongside
+// the machine-readable `<tools>` schema the chat template emits.
 //
 // Side-effect-free; safe to call per-request.
 std::string tools_block(const ToolsetView & view);
