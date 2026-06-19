@@ -23,7 +23,12 @@ else()
 endif()
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
-option(EASYAI_BUILD_EXAMPLES "Build easyai example agents"             ON)
+option(EASYAI_BUILD_SERVICES "Build the easyai service apps (server, cli, mcp-server, local, …)" ON)
+# Back-compat: the apps directory + this flag were renamed from "examples".
+# Honour a legacy -DEASYAI_BUILD_EXAMPLES=ON/OFF if a caller still passes it.
+if (DEFINED EASYAI_BUILD_EXAMPLES)
+    set(EASYAI_BUILD_SERVICES "${EASYAI_BUILD_EXAMPLES}")
+endif()
 option(EASYAI_WITH_CURL      "Build fetch_web / search_web"            ON)
 option(EASYAI_BUILD_WEBUI    "Embed the llama-server-style webui"      ON)
 option(EASYAI_INSTALL        "Generate install + find_package targets" ON)
@@ -34,7 +39,7 @@ option(EASYAI_INSTALL        "Generate install + find_package targets" ON)
 option(EASYAI_BUILD_LLAMA_TOOLS "Also build llama.cpp tool binaries"   OFF)
 
 # ----- 64-bit std::atomic probe ---------------------------------------------
-# Some example binaries declare `std::atomic<int64_t>` /
+# Some service binaries declare `std::atomic<int64_t>` /
 # `std::atomic<uint64_t>` (server.cpp's /metrics counters,
 # local.cpp's signal-debounce timestamp). On aarch64 / x86_64 those
 # compile to native instructions and need no extra link; on 32-bit
@@ -255,7 +260,7 @@ endif()
 # ============================================================================
 # examples (binaries)
 # ============================================================================
-if (EASYAI_BUILD_EXAMPLES)
+if (EASYAI_BUILD_SERVICES)
     add_executable(easyai-chat services/chat.cpp)
     target_link_libraries(easyai-chat PRIVATE easyai)
 
@@ -386,12 +391,12 @@ if (EASYAI_INSTALL)
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-    # The example binaries are installed too when EASYAI_BUILD_EXAMPLES
+    # The service binaries are installed too when EASYAI_BUILD_SERVICES
     # is on (default).  This is what makes `cmake --install` give you a
     # ready-to-run easyai-server / easyai-cli / easyai-local on the PATH
     # instead of leaving them under build/.  Skip this block when
     # consumers only want the libs.
-    if (EASYAI_BUILD_EXAMPLES)
+    if (EASYAI_BUILD_SERVICES)
         set(_easyai_install_bins
             easyai-local
             easyai-cli

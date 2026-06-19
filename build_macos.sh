@@ -162,7 +162,7 @@ echo "==> Configuring (Metal/AMX, $BUILD_TYPE, $BUILD_DIR)"
 cmake -S "$script_dir" -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DOPENSSL_ROOT_DIR="$openssl_root" \
-    -DEASYAI_BUILD_EXAMPLES=ON \
+    -DEASYAI_BUILD_SERVICES=ON \
     -DEASYAI_WITH_CURL=ON \
     -DEASYAI_BUILD_WEBUI=ON \
     -DEASYAI_INSTALL=ON

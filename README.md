@@ -2348,8 +2348,8 @@ cmake --build build -j --target easyai-local
 # Just the server:
 cmake --build build -j --target easyai-server
 
-# Drop the examples entirely (lib-only consumers):
-cmake -S . -B build -DEASYAI_BUILD_EXAMPLES=OFF
+# Drop the service apps entirely (lib-only consumers):
+cmake -S . -B build -DEASYAI_BUILD_SERVICES=OFF
 cmake --build build -j
 
 # Drop the embedded webui from easyai-server (smaller binary):

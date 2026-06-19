@@ -980,7 +980,7 @@ fi
 # ---------- build easyai ----------------------------------------------------
 if [[ $do_build -eq 1 ]]; then
     log "configuring easyai build (backend=$backend_resolved)"
-    cmake_flags=( -DCMAKE_BUILD_TYPE=Release -DEASYAI_BUILD_EXAMPLES=ON )
+    cmake_flags=( -DCMAKE_BUILD_TYPE=Release -DEASYAI_BUILD_SERVICES=ON )
     if [[ $do_llama_tools -eq 1 ]]; then
         cmake_flags+=( -DEASYAI_BUILD_LLAMA_TOOLS=ON )
     fi

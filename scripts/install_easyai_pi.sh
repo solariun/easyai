@@ -268,7 +268,7 @@ if [[ "$DO_BUILD" == "1" ]]; then
     cmake -S "$easyai_dir" -B "$BUILD_DIR" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-        -DEASYAI_BUILD_EXAMPLES=ON \
+        -DEASYAI_BUILD_SERVICES=ON \
         -DEASYAI_WITH_CURL=ON \
         -DEASYAI_BUILD_WEBUI=ON \
         -DEASYAI_INSTALL=ON | tail -20
