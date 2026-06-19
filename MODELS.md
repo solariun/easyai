@@ -1,0 +1,261 @@
+# MODELS dashboard (`/models`)
+
+A sober, dependency-free web UI built into **easyai-server** for picking, running,
+and downloading local models. Everything is **native C++** — there is no external
+binary and no network service to babysit. Reachable at
+`http://<server>:<port>/models`, and linked from the chat web UI by a small
+**"MODELS"** pill at the top-right.
+
+It does four things:
+
+1. **Recommend** — detects this machine's hardware (RAM / CPU / GPU + VRAM, via
+   ggml) and scores a bundled catalogue of ~5,000 models for **fit / speed /
+   quality / context** against that hardware (or a *simulated* one). A native
+   re-implementation of [LLMFit](https://github.com/AlexsJones/llmfit)'s scoring.
+2. **Local models** — lists the `.gguf` files in your model directory; click one
+   to open a panel with **all of its parameters** (read straight from the GGUF
+   header — architecture, params, layers, heads, quant, context…), whether it
+   **fits** this hardware, and the matching **`[MODEL_*]` INI profile** with its
+   values.
+3. **Run (hot-swap)** — one click **releases the running model and loads the
+   chosen one in place**, with no server restart, updating the `ai.gguf` symlink
+   so the choice survives reboots.
+4. **Download manager** — fetches GGUF weights from HuggingFace into the model
+   directory with progress / cancel, and lists / deletes what's already there.
+
+> TL;DR: the installer ships it on with password **`0000`**. Open `/models`, log
+> in, browse the **Recommend** table, or go to **Local models**, click a model,
+> and hit **Run**. **Change the password** (`webui_password` in
+> `/etc/easyai/easyai.ini`) before the box leaves your LAN.
+
+---
+
+## 1. How it works
+
+```
+Browser ──/models (page) ────────────► embedded webui/models.html (vanilla JS)
+        ──/models/api/login,/auth ────► cookie-session gate (examples/server.cpp)
+        ──/models/api/system,/models ─► ModelsEngine: ggml hardware + catalog scoring
+        ──/models/api/local{,/detail} ► ModelsEngine: GGUF header introspection + [MODEL_*]
+        ──/models/api/run ────────────► Engine::reload() in-process + ai.gguf symlink
+        ──/models/api/download* ──────► ModelsEngine: libcurl → HuggingFace
+chat webui ──(injected "MODELS" pill)─► /models
+```
+
+- **No external dependency.** Hardware is detected through ggml
+  (`ggml_backend_dev_memory` for VRAM) + the OS (RAM/CPU). The catalogue is the
+  bundled `data/hf_models.json`. Fit/speed/quality scoring, the hardware plan,
+  and GGUF metadata reading are all native C++.
+- **Hot-swap is in-process.** `Engine::reload()` tears down the current model
+  (model, context, sampler, chat templates) and loads the new one under the
+  engine lock — in-flight chats finish first, then the swap happens; the HTTP
+  server and the dashboard you're looking at stay up.
+- **Graceful catalogue degradation.** If `hf_models.json` can't be found, the
+  page still loads and **Local models** + **Downloads** work fully; only the
+  Recommend tab is limited.
+
+Implementation: [`src/models_dashboard.cpp`](src/models_dashboard.cpp) +
+[`include/easyai/models_dashboard.hpp`](include/easyai/models_dashboard.hpp) (the
+`ModelsEngine`, in `libeasyai`), `Engine::reload()` in
+[`src/engine.cpp`](src/engine.cpp), the routes / cookie auth / nav-injection in
+[`examples/server.cpp`](examples/server.cpp), and the page in
+[`webui/models.html`](webui/models.html) (xxd-embedded at build time).
+
+---
+
+## 2. Quick start
+
+### Installed via `install_easyai_server.sh`
+
+The Linux installer writes the keys below into `/etc/easyai/easyai.ini` with
+`webui_password = 0000` by default, points `download_dir` at the models
+directory, and copies the catalogue to `/etc/easyai/hf_models.json`. Override the
+password at install time:
+
+```sh
+./install_easyai_server.sh --webui-password 's3cret'
+```
+
+### Running by hand
+
+```sh
+easyai-server -m models/your-model.gguf \
+  --download-dir ./models \
+  --webui-password 's3cret'
+# (run from the repo so data/hf_models.json auto-resolves, or pass --models-catalog)
+```
+
+Then open `/models` (or click the MODELS pill in the chat UI).
+
+---
+
+## 3. Configuration reference
+
+All keys live in `[SERVER]`; each has a matching CLI flag. Precedence is
+**CLI flag > INI value > built-in default**.
+
+| INI key | CLI flag | Default | Meaning |
+| --- | --- | --- | --- |
+| `webui_password` | `--webui-password` | (empty — open) | Password for `/models` and **all** its API routes. A session cookie, separate from `api_key` (which still guards `/v1/*`). The installer sets it to `0000`. |
+| `download_dir` | `--download-dir` | directory of `--model` | Where GGUF weights are downloaded / listed / deleted, and the directory the dashboard introspects + hot-swaps from. |
+| `models_catalog` | `--models-catalog` | auto-resolved | Path to `hf_models.json`. Empty searches `data/hf_models.json` (dev), then `/etc/easyai`, `/usr/share/easyai`, `/usr/local/share/easyai`. |
+
+---
+
+## 4. The password gate
+
+The dashboard can download multi-gigabyte files, delete model files, and **swap
+the model the whole server is serving** — so it has its own gate, distinct from
+the server's `api_key` Bearer auth on `/v1/*`.
+
+- **Default from the installer: `0000`.** Trivial on purpose so a freshly-flashed
+  LAN appliance is usable out of the box. **Change it** before exposing the box.
+- **How it works.** A correct `POST /models/api/login {"password":"…"}` sets an
+  `HttpOnly`, `SameSite=Strict` cookie `easyai_models=<random-token>` (a token
+  generated once per server start; restarting logs everyone out). The password
+  is compared in constant time and never stored in the cookie. Empty
+  `webui_password` disables the gate.
+- **Change it:** edit `webui_password` in `/etc/easyai/easyai.ini`, then
+  `sudo systemctl restart easyai-server` (or re-run the installer with
+  `--webui-password '…'`).
+
+> The dashboard is plain HTTP like the rest of easyai-server. On an untrusted
+> network, front it with TLS — the cookie is `SameSite=Strict` but not `Secure`.
+
+---
+
+## 5. Using the dashboard
+
+### Recommend tab
+
+- **Detected hardware** chips (CPU / RAM / GPU / backend) up top.
+- **Hardware simulation** — enter RAM / VRAM / CPU-core values to re-score every
+  model *as if* the box had that hardware (handy before you buy or upgrade).
+  **Reset sim** clears it.
+- **Filters** — search, minimum fit, runtime, use case, sort, limit.
+- **Table** — params, **fit** (colour-coded), run mode, score, est. tok/s, memory
+  utilisation, context. Click a row for the detail drawer: score breakdown,
+  notes, a **hardware plan** (context/quant → minimum & recommended hardware +
+  KV-cache alternatives), and the model's **GGUF sources** (each jumps to the
+  Downloads tab pre-filled).
+
+### Local models tab
+
+- A table of every `.gguf` in `download_dir`, with size, date, and a **running**
+  badge on the active model.
+- Click one to open the **parameter panel**: architecture, parameters,
+  quantization, context length, layers, heads (q/kv), embedding, vocab, experts
+  (for MoE), file size — read directly from the GGUF header — plus the computed
+  **fit** on this hardware and the matching **`[MODEL_*]` INI profile** (the
+  exact keys/values that will apply), or a note that engine defaults apply.
+- **Run** hot-swaps to it (see §6); **Delete** removes it from disk (with
+  confirmation; the running model can't be deleted).
+
+### Downloads tab
+
+- Paste a HuggingFace GGUF repo → **List quants** to see every `.gguf` with its
+  size → **Download** the one you want (or **Download best quant**). Picking one
+  shard of a sharded model fetches the whole set. A live progress bar with
+  **Cancel**. Below, the same **Downloaded models** list with Run / Delete.
+
+---
+
+## 6. Run / hot-swap mechanics
+
+Clicking **Run** on a local model:
+
+1. Validates the filename and resolves it inside `download_dir`.
+2. If the server's configured `--model` path is a **symlink** (the `ai.gguf`
+   convention from the installer), re-points it at the chosen file so the choice
+   **persists across restarts**.
+3. Calls `Engine::reload(<file>)` **under the engine lock** — any in-flight chat
+   finishes first, then the current model/context/sampler/templates are freed and
+   the new model is loaded with the same context/ngl/sampling settings.
+4. Re-applies the server's default system prompt + tools and updates the model id
+   advertised by `/v1/models`.
+
+No process restart; the dashboard stays live and reflects the new running model.
+
+---
+
+## 7. Download manager details
+
+- **Destination:** `download_dir`. A download streams to `<name>.gguf.part` and
+  is atomically renamed on success; partials are removed on cancel/error.
+- **Quant auto-select** (Download best quant) follows the preference order
+  `Q8_0 > Q6_K > Q5_K_M > Q4_K_M > … > IQ*`.
+- **Sharded models** (`*-NNNNN-of-MMMMM.gguf`) are detected and all members
+  fetched in order.
+- **Single active download** (GGUF files are large); a second request returns 409.
+- **Path safety:** download/delete targets must be a bare `.gguf` filename that
+  resolves inside `download_dir`; delete refuses anything that isn't a regular
+  file (no symlinks/dirs), and the currently-running model.
+
+---
+
+## 8. REST API reference
+
+All routes are under `/models`. The page is unguarded (its JS shows a login
+overlay); every **data** route requires the session cookie when `webui_password`
+is set.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/models` | The dashboard HTML. |
+| GET | `/models/api/auth` | `{authed, required, catalog_loaded, catalog_size, status, download_dir}` (open). |
+| POST | `/models/api/login` / `logout` | `{"password":"…"}` → sets / clears the cookie. |
+| GET | `/models/api/system` | Detected/simulated hardware. Query: `ram_gb`, `vram_gb`, `cpu_cores`. |
+| GET | `/models/api/models` | Scored catalog. Query: `search`, `min_fit`, `runtime`, `use_case`, `sort`, `limit`, `include_too_tight`, `max_context`, + the sim params. |
+| POST | `/models/api/plan` | `{model, context, quant?, kv_quant?, ram_gb?, vram_gb?, cpu_cores?}` → min/recommended hardware + KV alternatives. |
+| GET | `/models/api/local` | `{dir, models:[{name, size_bytes, mtime, is_current}]}`. |
+| GET | `/models/api/local/detail?file=<name>` | GGUF params + fit + `[MODEL_*]` profile for one local model. |
+| POST | `/models/api/local/delete` | `{"name":"…"}` → delete one `.gguf`. |
+| POST | `/models/api/run` | `{"name":"…"}` → hot-swap to that local model. |
+| GET | `/models/api/hf/files?repo=<repo>` | List `.gguf` files (`{path, size_bytes}`) in a HF repo. |
+| POST | `/models/api/download` | `{"repo":"…","filename":"…"?}` → start a download (409 if one is running). |
+| GET | `/models/api/download/status` | `{id, repo, filename, state, downloaded_bytes, total_bytes, percent, error}`. |
+| POST | `/models/api/download/cancel` | Cancel the active download. |
+
+Example:
+
+```sh
+B=http://127.0.0.1:8080
+curl -s -c cj -X POST $B/models/api/login -H 'Content-Type: application/json' -d '{"password":"0000"}'
+curl -s -b cj "$B/models/api/models?limit=10&min_fit=good&sort=score" | jq '.models[].name'
+curl -s -b cj "$B/models/api/local" | jq .
+curl -s -b cj -X POST $B/models/api/run -H 'Content-Type: application/json' -d '{"name":"qwen2.5-0.5b-instruct-q4_k_m.gguf"}'
+```
+
+---
+
+## 9. The catalogue & scoring fidelity
+
+- **Catalogue:** `data/hf_models.json` (~5,000 models; schema follows llmfit's).
+  Regenerate it from upstream llmfit if you want a fresher list and drop it at one
+  of the resolved paths (or set `models_catalog`).
+- **Scoring** is a faithful native port of llmfit's memory model, fit levels,
+  quant selection, tok/s estimation and the four score components (quality /
+  speed / fit / context), with llmfit's constants. A few exotic branches (full
+  MoE bandwidth decomposition, the complete GPU bandwidth table) are
+  approximated — numbers may differ from llmfit at the margins, which is expected.
+
+---
+
+## 10. Troubleshooting
+
+| Symptom | Cause / fix |
+| --- | --- |
+| Toast "Model catalog not found" / Recommend limited | `hf_models.json` not on a resolved path. Set `models_catalog`, or copy it to `/etc/easyai/hf_models.json` (the installer does this). Local models + downloads still work. |
+| GPU shows as CPU / wrong VRAM | ggml didn't detect a GPU backend (driver / build). On Apple Silicon VRAM == system RAM (unified). Use the simulation inputs to model target hardware. |
+| Run fails | The new GGUF couldn't load (corrupt / incompatible). The error is returned; the previous model stays unloaded — re-run a known-good model. |
+| Download 409 | One download at a time; wait or cancel. |
+| Downloaded file not appearing | Confirm `download_dir` is writable by the service user. |
+
+---
+
+## 11. Cross-references
+
+- [`easyai-server.md`](easyai-server.md) §7 — server-side reference.
+- [`resources/easyai.ini.example`](resources/easyai.ini.example) — the `[SERVER]` keys.
+- [`scripts/install_easyai_server.sh`](scripts/install_easyai_server.sh) — `--webui-password` (default `0000`), `download_dir`, catalogue copy.
+- [LLMFit upstream](https://github.com/AlexsJones/llmfit) — the original scoring tool this is ported from.

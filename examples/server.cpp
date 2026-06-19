@@ -33,9 +33,10 @@
 // =============================================================================
 
 #include "easyai/easyai.hpp"
-#include "easyai/llmfit.hpp"   // LLMFit bridge: serve + proxy + downloader
+#include "easyai/models_dashboard.hpp"   // native MODELS dashboard engine
 
-#include <random>             // session-token generation for the /llmfit gate
+#include <random>             // session-token generation for the /models gate
+#include <filesystem>         // ai.gguf symlink re-point on model hot-swap
 
 // llama.cpp common — for incremental chat parsing during SSE streaming.
 // Not part of easyai's public API; the server is allowed to reach in.
@@ -52,7 +53,7 @@
 #include "webui_bundle.js.hpp"
 #include "webui_bundle.css.hpp"
 #include "webui_loading.html.hpp"
-#include "webui_llmfit.html.hpp"   // the sober LLMFit dashboard, served at /llmfit
+#include "webui_models.html.hpp"   // the sober MODELS dashboard, served at /models
 #endif
 
 // Brand asset — the AI Box favicon, served at /favicon[.ico|.svg]. Kept
@@ -1473,12 +1474,11 @@ struct ServerCtx {
     std::string                webui_icon;      // raw icon bytes (empty = none)
     std::string                webui_icon_mime; // "image/x-icon" etc.
 
-    // LLMFit bridge — spawned `llmfit serve` child + native download manager.
-    // null when not constructed (e.g. EASYAI_BUILD_WEBUI off path); handlers
-    // null-check before use. webui_password gates /llmfit; session_token is a
-    // random per-process value handed out as the auth cookie on login.
-    std::unique_ptr<easyai::LlmfitBridge> llmfit;
-    std::string                webui_password;  // empty = /llmfit auth disabled
+    // MODELS dashboard engine — native catalog scoring + GGUF introspection +
+    // download manager. null-checked by handlers. webui_password gates /models;
+    // session_token is a random per-process value handed out as the auth cookie.
+    std::unique_ptr<easyai::ModelsEngine> models;
+    std::string                webui_password;  // empty = /models auth disabled
     std::string                session_token;   // random; expected cookie value
 
     // INI config (default: /etc/easyai/easyai.ini). Loaded at start-up;
@@ -3881,15 +3881,14 @@ struct ServerArgs {
     std::string webui_mode     = "modern"; // "modern" (embedded llama-server fork) | "minimal" (inline)
     std::string webui_placeholder = "Type a message…";
 
-    // ----- LLMFit integration (the /llmfit web UI + model download manager) ---
-    // The /llmfit dashboard surfaces llmfit's hardware-aware model
-    // recommendations (served by a spawned `llmfit serve` child, proxied)
-    // plus a native GGUF download manager. See include/easyai/llmfit.hpp.
+    // ----- MODELS dashboard (the /models web UI + native model engine) -----
+    // The /models dashboard scores a bundled catalog against detected hardware,
+    // introspects local GGUF models, hot-swaps the running model, and downloads
+    // weights — all native (no external binary). See models_dashboard.hpp.
     std::string download_dir;            // where GGUF weights are downloaded /
-                                         // listed. Default: directory of --model.
-    std::string llmfit_bin   = "llmfit"; // llmfit binary: PATH name or a path.
-    int         llmfit_port  = 8788;     // loopback port for `llmfit serve`.
-    std::string webui_password;          // gates /llmfit + its API; empty = open.
+                                         // listed / deleted. Default: dir of --model.
+    std::string models_catalog;          // path to hf_models.json; empty = auto-resolve.
+    std::string webui_password;          // gates /models + its API; empty = open.
 
     // /mcp auth — by INI's [MCP_USER] when populated, OPEN otherwise.
     // `--no-mcp-auth` forces OPEN even if [MCP_USER] has entries
@@ -4096,10 +4095,9 @@ static const std::vector<FlagDef> & kFlags() {
         { {"--webui-title"},       "SERVER", "webui_title",    "webui_title",    true,  SET_STR(&ServerArgs::webui_title) },
         { {"--webui-icon"},        "SERVER", "webui_icon",     "webui_icon",     true,  SET_STR(&ServerArgs::webui_icon) },
         { {"--webui-placeholder"}, "SERVER", "webui_placeholder","webui_placeholder",true, SET_STR(&ServerArgs::webui_placeholder) },
-        // ----- LLMFit integration (SERVER) -----
+        // ----- MODELS dashboard (SERVER) -----
         { {"--download-dir"},      "SERVER", "download_dir",    "download_dir",   true,  SET_STR(&ServerArgs::download_dir) },
-        { {"--llmfit-bin"},        "SERVER", "llmfit_bin",      "llmfit_bin",     true,  SET_STR(&ServerArgs::llmfit_bin) },
-        { {"--llmfit-port"},       "SERVER", "llmfit_port",     "llmfit_port",    true,  SET_INT(&ServerArgs::llmfit_port) },
+        { {"--models-catalog"},    "SERVER", "models_catalog",  "models_catalog", true,  SET_STR(&ServerArgs::models_catalog) },
         { {"--webui-password"},    "SERVER", "webui_password",  "webui_password", true,  SET_STR(&ServerArgs::webui_password) },
         { {"--webui"},             "SERVER", "webui_mode",     "webui_mode",     true,  SET_STR(&ServerArgs::webui_mode) },
 
@@ -4448,10 +4446,10 @@ static const char kWebUIAppendix[] =
     "exist.\n";
 
 // ============================================================================
-// LLMFit web-UI auth — a session cookie distinct from the Bearer `api_key`
+// MODELS dashboard auth — a session cookie distinct from the Bearer `api_key`
 // that guards /v1/*. The operator sets [SERVER] webui_password (or
-// --webui-password); a correct POST /llmfit/api/login mints the cookie
-// `easyai_llmfit=<session_token>`. Empty password ⇒ the gate is open.
+// --webui-password); a correct POST /models/api/login mints the cookie
+// `easyai_models=<session_token>`. Empty password ⇒ the gate is open.
 // ============================================================================
 
 // Random 32-byte hex session token, generated once at startup. The cookie
@@ -4498,19 +4496,19 @@ static std::string cookie_value(const std::string & cookie_hdr,
     return "";
 }
 
-// True when the request may touch /llmfit. Open when no password is set.
-static bool llmfit_authed(const ServerCtx & ctx, const httplib::Request & req) {
+// True when the request may touch /models. Open when no password is set.
+static bool models_authed(const ServerCtx & ctx, const httplib::Request & req) {
     if (ctx.webui_password.empty()) return true;
     std::string cookie = req.get_header_value("Cookie");
     if (cookie.size() > 8192) return false;   // bound the header we parse
-    return ct_eq(cookie_value(cookie, "easyai_llmfit"), ctx.session_token);
+    return ct_eq(cookie_value(cookie, "easyai_models"), ctx.session_token);
 }
 
-// Route guard: first line of every /llmfit/api/* handler. 401 on failure.
-static bool llmfit_require_auth(const ServerCtx & ctx,
+// Route guard: first line of every /models/api/* handler. 401 on failure.
+static bool models_require_auth(const ServerCtx & ctx,
                                const httplib::Request & req,
                                httplib::Response & res) {
-    if (llmfit_authed(ctx, req)) return true;
+    if (models_authed(ctx, req)) return true;
     res.status = 401;
     res.set_content(error_json("login required", "authentication_error"),
                     "application/json");
@@ -6775,31 +6773,31 @@ int main(int argc, char ** argv) {
                 "};"
               "})();</script>";
 
-            // ----- LLMFit nav entry -----------------------------------
-            // A discreet, brand-matched link to the /llmfit dashboard,
+            // ----- MODELS nav entry -----------------------------------
+            // A discreet, brand-matched link to the /models dashboard,
             // appended to <body> and kept alive across Svelte re-renders by
             // a MutationObserver (the same idiom the blocks above use).
             inj <<
               "<style>"
-                "#easyai-llmfit-nav{position:fixed;top:10px;right:14px;z-index:9999;"
+                "#easyai-models-nav{position:fixed;top:10px;right:14px;z-index:9999;"
                   "display:inline-flex;align-items:center;gap:7px;padding:6px 12px;"
                   "font:500 13px/1 system-ui,-apple-system,'Segoe UI',sans-serif;"
                   "color:#e8e6e3;text-decoration:none;background:rgba(40,44,46,.86);"
                   "border:1px solid rgba(255,255,255,.10);border-radius:8px;"
                   "-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);"
                   "transition:background .15s,border-color .15s,color .15s}"
-                "#easyai-llmfit-nav:hover{background:rgba(255,130,54,.16);"
+                "#easyai-models-nav:hover{background:rgba(255,130,54,.16);"
                   "border-color:rgba(255,130,54,.55);color:#fff}"
-                "#easyai-llmfit-nav .d{width:7px;height:7px;border-radius:50%;"
+                "#easyai-models-nav .d{width:7px;height:7px;border-radius:50%;"
                   "background:#ff8236;flex:0 0 auto}"
               "</style>"
               "<script>(()=>{"
                 "function add(){"
-                  "if(document.getElementById('easyai-llmfit-nav')||!document.body)return;"
-                  "const a=document.createElement('a');a.id='easyai-llmfit-nav';"
-                  "a.href='/llmfit';"
-                  "a.title='LLMFit \\u2014 find & download models that fit your hardware';"
-                  "a.innerHTML='<span class=\"d\"></span>LLMFit';"
+                  "if(document.getElementById('easyai-models-nav')||!document.body)return;"
+                  "const a=document.createElement('a');a.id='easyai-models-nav';"
+                  "a.href='/models';"
+                  "a.title='MODELS \\u2014 fit, run & download models for your hardware';"
+                  "a.innerHTML='<span class=\"d\"></span>MODELS';"
                   "document.body.appendChild(a);"
                 "}"
                 "if(document.body)add();"
@@ -7022,12 +7020,13 @@ int main(int argc, char ** argv) {
             "ships unconditionally — see --metrics-interval.)\n");
     }
 
-    // -------- LLMFit bridge ----------------------------------------------
-    // Spawn the `llmfit serve` child (the authoritative fit / hardware /
-    // model-catalog engine, proxied under /llmfit/api/v1/*) and stand up the
-    // native GGUF download manager. The download dir defaults to the
-    // directory the loaded model lives in, so weights land next to the model
-    // already in use unless --download-dir / [SERVER] download_dir overrides.
+    // -------- MODELS dashboard engine ------------------------------------
+    // Native: scores a bundled catalog against detected hardware, introspects
+    // local GGUF files, downloads weights, and backs the in-process model
+    // hot-swap. The download dir defaults to the directory the loaded model
+    // lives in (weights land beside the model in use) unless --download-dir
+    // overrides. The catalog (hf_models.json) is resolved from --models-catalog
+    // or a set of conventional install/dev locations.
     {
         std::string dl_dir = args.download_dir;
         if (dl_dir.empty()) {
@@ -7037,18 +7036,30 @@ int main(int argc, char ** argv) {
             dl_dir = (slash == std::string::npos) ? std::string(".")
                                                   : mp.substr(0, slash);
         }
+        std::string cat = args.models_catalog;
+        if (cat.empty()) {
+            const char * cands[] = {
+                "data/hf_models.json",
+                "/etc/easyai/hf_models.json",
+                "/usr/share/easyai/hf_models.json",
+                "/usr/local/share/easyai/hf_models.json",
+            };
+            for (const char * p : cands) {
+                std::FILE * f = std::fopen(p, "rb");
+                if (f) { std::fclose(f); cat = p; break; }
+            }
+        }
         ctx->webui_password = args.webui_password;
         ctx->session_token  = gen_session_token();
-        ctx->llmfit = std::make_unique<easyai::LlmfitBridge>(
-            args.llmfit_bin, dl_dir, args.llmfit_port);
-        if (ctx->llmfit->start()) {
-            ctx->llmfit->wait_ready();   // non-fatal: UI degrades to 502 if down
-        }
+        ServerCtx * ctxp = ctx.get();
+        ctx->models = std::make_unique<easyai::ModelsEngine>(
+            dl_dir, cat, &ini_config,
+            [ctxp]() -> std::string { return ctxp->engine.model_path(); });
         std::fprintf(stderr,
-            "[easyai-server] llmfit: %s\n"
+            "[easyai-server] models: %s\n"
             "                download dir: %s\n"
-            "                /llmfit auth: %s\n",
-            ctx->llmfit->status_message().c_str(),
+            "                /models auth: %s\n",
+            ctx->models->status_message().c_str(),
             dl_dir.c_str(),
             ctx->webui_password.empty() ? "OPEN (set webui_password to require login)"
                                         : "password required");
@@ -7472,199 +7483,193 @@ int main(int argc, char ** argv) {
     });
 
     // ==================================================================
-    // LLMFit dashboard — the /llmfit page, the proxied analysis API
-    // (forwarded to the spawned `llmfit serve` child), and the native
-    // GGUF download manager. The page itself is unguarded (its JS shows a
-    // login overlay when the gate reports unauthenticated); every data
-    // route is guarded by the session cookie via llmfit_require_auth().
+    // MODELS dashboard — the /models page + native model engine API
+    // (hardware-aware catalog scoring, local GGUF introspection, the model
+    // hot-swap, and the GGUF download manager). The page is unguarded (its
+    // JS shows a login overlay when the gate reports unauthenticated); every
+    // data route is guarded by the session cookie via models_require_auth().
     // ==================================================================
 #if defined(EASYAI_BUILD_WEBUI)
-    svr.Get("/llmfit", [&](const httplib::Request &, httplib::Response & res) {
+    svr.Get("/models", [&](const httplib::Request &, httplib::Response & res) {
         res.set_header("Cross-Origin-Opener-Policy", "same-origin");
-        res.set_content(reinterpret_cast<const char*>(llmfit_html),
-                        llmfit_html_len, "text/html; charset=utf-8");
+        res.set_content(reinterpret_cast<const char*>(models_html),
+                        models_html_len, "text/html; charset=utf-8");
     });
 #endif
 
-    // Auth-state probe (unguarded): the page asks this on load to decide
-    // whether to show the login overlay and whether llmfit is reachable.
-    svr.Get("/llmfit/api/auth", [&](const httplib::Request & req, httplib::Response & res) {
-        bool available = ctx_ref.llmfit && ctx_ref.llmfit->available();
+    // Auth-state probe (unguarded): the page asks this on load.
+    svr.Get("/models/api/auth", [&](const httplib::Request & req, httplib::Response & res) {
+        bool have = ctx_ref.models != nullptr;
         nlohmann::ordered_json j{
-            {"authed",          llmfit_authed(ctx_ref, req)},
-            {"required",        !ctx_ref.webui_password.empty()},
-            {"llmfit_available", available},
-            {"status",          ctx_ref.llmfit ? ctx_ref.llmfit->status_message()
-                                               : std::string("bridge not initialised")},
-            {"download_dir",    ctx_ref.llmfit ? ctx_ref.llmfit->download_dir()
-                                               : std::string()},
+            {"authed",         models_authed(ctx_ref, req)},
+            {"required",       !ctx_ref.webui_password.empty()},
+            {"catalog_loaded", have && ctx_ref.models->catalog_loaded()},
+            {"catalog_size",   have ? (int) ctx_ref.models->catalog_size() : 0},
+            {"status",         have ? ctx_ref.models->status_message()
+                                    : std::string("engine not initialised")},
+            {"download_dir",   have ? ctx_ref.models->download_dir() : std::string()},
         };
         res.set_content(j.dump(), "application/json");
     });
 
     // Login: constant-time check vs webui_password; mint the session cookie.
-    svr.Post("/llmfit/api/login", [&](const httplib::Request & req, httplib::Response & res) {
+    svr.Post("/models/api/login", [&](const httplib::Request & req, httplib::Response & res) {
         std::string pw;
         try { pw = nlohmann::json::parse(req.body).value("password", ""); }
-        catch (...) {
-            res.status = 400;
-            res.set_content(error_json("invalid JSON"), "application/json");
-            return;
-        }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
         if (ctx_ref.webui_password.empty() || !ct_eq(pw, ctx_ref.webui_password)) {
             res.status = 401;
-            res.set_content(error_json("invalid password", "authentication_error"),
-                            "application/json");
+            res.set_content(error_json("invalid password", "authentication_error"), "application/json");
             return;
         }
         res.set_header("Set-Cookie",
-            "easyai_llmfit=" + ctx_ref.session_token +
+            "easyai_models=" + ctx_ref.session_token +
             "; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000");
         res.set_content("{\"ok\":true}", "application/json");
     });
-
-    svr.Post("/llmfit/api/logout", [&](const httplib::Request &, httplib::Response & res) {
-        res.set_header("Set-Cookie",
-            "easyai_llmfit=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+    svr.Post("/models/api/logout", [&](const httplib::Request &, httplib::Response & res) {
+        res.set_header("Set-Cookie", "easyai_models=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
         res.set_content("{\"ok\":true}", "application/json");
     });
 
-    // Small helper: 502 when the bridge isn't there. Returns true if usable.
-    auto llmfit_ready = [&](httplib::Response & res) -> bool {
-        if (ctx_ref.llmfit) return true;
-        res.status = 502;
-        res.set_content(error_json("llmfit bridge unavailable", "bad_gateway"),
-                        "application/json");
+    // 503 when the engine isn't constructed. Returns true if usable.
+    auto models_ready = [&](httplib::Response & res) -> bool {
+        if (ctx_ref.models) return true;
+        res.status = 503;
+        res.set_content(error_json("models engine unavailable", "unavailable"), "application/json");
         return false;
     };
 
-    // ---- native download manager -------------------------------------
-    // List the .gguf files inside a HuggingFace repo (the quant picker).
-    svr.Get("/llmfit/api/hf/files", [&](const httplib::Request & req, httplib::Response & res) {
-        if (!llmfit_require_auth(ctx_ref, req, res)) return;
-        if (!llmfit_ready(res)) return;
-        std::string repo = req.has_param("repo") ? req.get_param_value("repo") : "";
-        std::vector<easyai::LlmfitBridge::RepoFile> files;
+    // ---- recommendations: native hardware detection + catalog scoring ----
+    svr.Get("/models/api/system", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        res.set_content(ctx_ref.models->system_json(httplib::detail::params_to_query_str(req.params)),
+                        "application/json");
+    });
+    svr.Get("/models/api/models", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        res.set_content(ctx_ref.models->models_json(httplib::detail::params_to_query_str(req.params)),
+                        "application/json");
+    });
+    svr.Post("/models/api/plan", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        res.set_content(ctx_ref.models->plan_json(req.body), "application/json");
+    });
+
+    // ---- local model directory: list / detail / delete ----
+    svr.Get("/models/api/local", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        res.set_content(ctx_ref.models->local_models_json(), "application/json");
+    });
+    svr.Get("/models/api/local/detail", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        std::string file = req.has_param("file") ? req.get_param_value("file") : "";
+        res.set_content(ctx_ref.models->local_model_json(file, httplib::detail::params_to_query_str(req.params)),
+                        "application/json");
+    });
+    svr.Post("/models/api/local/delete", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        std::string name;
+        try { name = nlohmann::json::parse(req.body).value("name", ""); }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
         std::string err;
-        if (!ctx_ref.llmfit->hf_repo_files(repo, files, err)) {
-            res.status = 502;
-            res.set_content(error_json(err, "bad_gateway"), "application/json");
+        if (!ctx_ref.models->delete_local(name, err)) {
+            res.status = 400; res.set_content(error_json(err), "application/json"); return;
+        }
+        res.set_content("{\"ok\":true}", "application/json");
+    });
+
+    // ---- RUN: hot-swap the live model + re-point the ai.gguf symlink ----
+    svr.Post("/models/api/run", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        std::string name;
+        try { name = nlohmann::json::parse(req.body).value("name", ""); }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
+        std::string target, err;
+        if (!ctx_ref.models->resolve_local(name, target, err)) {
+            res.status = 400; res.set_content(error_json(err), "application/json"); return;
+        }
+        // Re-point the configured model path if it is a symlink (the ai.gguf
+        // convention) so the choice survives restarts; the engine loads the
+        // real file below either way.
+        {
+            std::error_code ec;
+            std::filesystem::path link = args.model_path;
+            if (!link.empty() && std::filesystem::is_symlink(link, ec)) {
+                std::filesystem::remove(link, ec);
+                std::filesystem::create_symlink(target, link, ec);
+            }
+        }
+        // Hot-swap under the engine lock (serialised against in-flight chats).
+        bool ok; std::string load_err;
+        {
+            std::lock_guard<std::mutex> lk(ctx_ref.engine_mu);
+            ok = ctx_ref.engine.reload(target);
+            if (ok) {
+                ctx_ref.reset_engine_defaults();
+                std::string p = ctx_ref.engine.model_path();
+                auto slash = p.find_last_of("/\\"); if (slash != std::string::npos) p = p.substr(slash + 1);
+                auto dot = p.find_last_of('.');     if (dot != std::string::npos) p = p.substr(0, dot);
+                if (!p.empty()) ctx_ref.model_id = p;
+            } else load_err = ctx_ref.engine.last_error();
+        }
+        if (!ok) {
+            res.status = 500;
+            res.set_content(error_json("failed to load model: " + load_err, "internal_error"), "application/json");
             return;
+        }
+        std::fprintf(stderr, "[easyai-server] hot-swapped model -> %s\n", name.c_str());
+        nlohmann::ordered_json j{{"ok", true}, {"model", name}, {"model_id", ctx_ref.model_id}};
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // ---- download manager (native libcurl → HuggingFace) ----
+    svr.Get("/models/api/hf/files", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        std::string repo = req.has_param("repo") ? req.get_param_value("repo") : "";
+        std::vector<easyai::ModelsEngine::RepoFile> files; std::string err;
+        if (!ctx_ref.models->hf_repo_files(repo, files, err)) {
+            res.status = 502; res.set_content(error_json(err, "bad_gateway"), "application/json"); return;
         }
         nlohmann::ordered_json arr = nlohmann::ordered_json::array();
-        for (const auto & f : files)
-            arr.push_back({{"path", f.path}, {"size_bytes", f.size_bytes}});
-        nlohmann::ordered_json j{{"repo", repo}, {"files", arr}};
-        res.set_content(j.dump(), "application/json");
+        for (const auto & f : files) arr.push_back({{"path", f.path}, {"size_bytes", f.size_bytes}});
+        res.set_content(nlohmann::ordered_json({{"repo", repo}, {"files", arr}}).dump(), "application/json");
     });
-
-    // Start a download. Body: {"repo":"owner/name-GGUF","filename":"<optional>"}.
-    svr.Post("/llmfit/api/download", [&](const httplib::Request & req, httplib::Response & res) {
-        if (!llmfit_require_auth(ctx_ref, req, res)) return;
-        if (!llmfit_ready(res)) return;
+    svr.Post("/models/api/download", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
         std::string repo, filename;
-        try {
-            auto b = nlohmann::json::parse(req.body);
-            repo     = b.value("repo", "");
-            filename = b.value("filename", "");
-        } catch (...) {
-            res.status = 400;
-            res.set_content(error_json("invalid JSON"), "application/json");
-            return;
-        }
-        if (repo.empty()) {
-            res.status = 400;
-            res.set_content(error_json("'repo' is required"), "application/json");
-            return;
-        }
-        std::string err;
-        int id = ctx_ref.llmfit->start_download(repo, filename, err);
-        if (id < 0) {
-            res.status = 409;
-            res.set_content(error_json(err), "application/json");
-            return;
-        }
-        nlohmann::ordered_json j{{"id", id}, {"repo", repo}, {"state", "downloading"}};
-        res.set_content(j.dump(), "application/json");
+        try { auto b = nlohmann::json::parse(req.body); repo = b.value("repo", ""); filename = b.value("filename", ""); }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
+        if (repo.empty()) { res.status = 400; res.set_content(error_json("'repo' is required"), "application/json"); return; }
+        std::string err; int id = ctx_ref.models->start_download(repo, filename, err);
+        if (id < 0) { res.status = 409; res.set_content(error_json(err), "application/json"); return; }
+        res.set_content(nlohmann::ordered_json({{"id", id}, {"repo", repo}, {"state", "downloading"}}).dump(), "application/json");
     });
-
-    svr.Get("/llmfit/api/download/status", [&](const httplib::Request & req, httplib::Response & res) {
-        if (!llmfit_require_auth(ctx_ref, req, res)) return;
-        if (!llmfit_ready(res)) return;
-        auto s = ctx_ref.llmfit->download_status();
+    svr.Get("/models/api/download/status", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        auto s = ctx_ref.models->download_status();
         nlohmann::ordered_json j{
-            {"id", s.id}, {"repo", s.repo}, {"filename", s.filename},
-            {"state", s.state}, {"downloaded_bytes", s.downloaded_bytes},
-            {"total_bytes", s.total_bytes}, {"percent", s.percent},
-            {"error", s.error},
+            {"id", s.id}, {"repo", s.repo}, {"filename", s.filename}, {"state", s.state},
+            {"downloaded_bytes", s.downloaded_bytes}, {"total_bytes", s.total_bytes},
+            {"percent", s.percent}, {"error", s.error},
         };
         res.set_content(j.dump(), "application/json");
     });
-
-    svr.Post("/llmfit/api/download/cancel", [&](const httplib::Request & req, httplib::Response & res) {
-        if (!llmfit_require_auth(ctx_ref, req, res)) return;
-        if (!llmfit_ready(res)) return;
-        ctx_ref.llmfit->cancel_download();
+    svr.Post("/models/api/download/cancel", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        ctx_ref.models->cancel_download();
         res.set_content("{\"ok\":true}", "application/json");
-    });
-
-    // ---- local model directory: list + delete ------------------------
-    svr.Get("/llmfit/api/local-models", [&](const httplib::Request & req, httplib::Response & res) {
-        if (!llmfit_require_auth(ctx_ref, req, res)) return;
-        if (!llmfit_ready(res)) return;
-        auto models = ctx_ref.llmfit->list_local();
-        nlohmann::ordered_json arr = nlohmann::ordered_json::array();
-        for (const auto & m : models)
-            arr.push_back({{"name", m.name}, {"size_bytes", m.size_bytes},
-                           {"mtime", m.mtime}});
-        nlohmann::ordered_json j{{"dir", ctx_ref.llmfit->download_dir()},
-                                 {"models", arr}};
-        res.set_content(j.dump(), "application/json");
-    });
-
-    svr.Post("/llmfit/api/local-models/delete", [&](const httplib::Request & req, httplib::Response & res) {
-        if (!llmfit_require_auth(ctx_ref, req, res)) return;
-        if (!llmfit_ready(res)) return;
-        std::string name;
-        try { name = nlohmann::json::parse(req.body).value("name", ""); }
-        catch (...) {
-            res.status = 400;
-            res.set_content(error_json("invalid JSON"), "application/json");
-            return;
-        }
-        std::string err;
-        if (!ctx_ref.llmfit->delete_local(name, err)) {
-            res.status = 400;
-            res.set_content(error_json(err), "application/json");
-            return;
-        }
-        res.set_content("{\"ok\":true}", "application/json");
-    });
-
-    // ---- proxied analysis API -> llmfit child /api/v1/* --------------
-    // POST /api/v1/plan (registered before the GET catch-all).
-    svr.Post("/llmfit/api/v1/plan", [&](const httplib::Request & req, httplib::Response & res) {
-        if (!llmfit_require_auth(ctx_ref, req, res)) return;
-        if (!llmfit_ready(res)) return;
-        auto pr = ctx_ref.llmfit->proxy_post(
-            "/api/v1/plan", req.body,
-            req.get_header_value("Content-Type", "application/json"));
-        res.status = pr.status;
-        res.set_content(pr.body, pr.content_type);
-    });
-
-    // GET catch-all for the read-only analysis endpoints (system, models,
-    // models/top, models/{name}, runtimes, installed). The query string is
-    // re-encoded and forwarded verbatim.
-    svr.Get(R"(/llmfit/api/v1/.*)", [&](const httplib::Request & req, httplib::Response & res) {
-        if (!llmfit_require_auth(ctx_ref, req, res)) return;
-        if (!llmfit_ready(res)) return;
-        std::string upstream = req.path.substr(std::string("/llmfit").size());
-        if (!req.params.empty())
-            upstream += "?" + httplib::detail::params_to_query_str(req.params);
-        auto pr = ctx_ref.llmfit->proxy_get(upstream);
-        res.status = pr.status;
-        res.set_content(pr.body, pr.content_type);
     });
 
     // Last-chance error handler — never let a thrown exception propagate
@@ -7722,11 +7727,8 @@ int main(int argc, char ** argv) {
     bool ok = svr.listen(args.host.c_str(), args.port);
     g_server.store(nullptr);
 
-    // Tear down the llmfit child (SIGTERM -> grace -> SIGKILL -> reap) so it
-    // never outlives easyai-server as an orphan. Done here, after listen()
-    // returns, rather than from the async signal handler (which must stay
-    // async-signal-safe) — mirrors how the metrics thread is joined below.
-    if (ctx->llmfit) ctx->llmfit->stop();
+    // The MODELS engine is owned by `ctx` (unique_ptr); its destructor joins
+    // any in-flight download worker when ctx unwinds at the end of main().
 
     // Wake the metrics ticker so it exits its wait_for promptly, then join.
     g_metrics_stop.store(true, std::memory_order_relaxed);

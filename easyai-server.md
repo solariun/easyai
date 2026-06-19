@@ -17,7 +17,7 @@
 4. [Tool gating + sandbox](#4-tool-gating--sandbox)
 5. [Authentication](#5-authentication)
 6. [The default persona — Deep](#6-the-default-persona--deep)
-7. [Webui customisation](#7-webui-customisation) · [LLMFit dashboard](#llmfit-dashboard-llmfit)
+7. [Webui customisation](#7-webui-customisation) · [MODELS dashboard](#models-dashboard-models)
 8. [Performance tuning](#8-performance-tuning)
 9. [Verbose observability](#9-verbose-observability)
 10. [Hardening / security](#10-hardening--security)
@@ -107,10 +107,9 @@ The HTTP layer, paths, tool gating, MCP auth.
 | `webui_icon` | path | `--webui-icon` | (none) | `.ico` / `.png` / `.svg` / `.gif` / `.jpg` / `.webp`. |
 | `webui_mode` | enum | `--webui` | `modern` | `modern` (embedded llama-server bundle) or `minimal` (inline). |
 | `webui_placeholder` | string | `--webui-placeholder` | `Type a message…` | Input box hint. |
-| `webui_password` | string | `--webui-password` | (none — open) | Password gate for the `/llmfit` dashboard and its API. Empty leaves it open. A session cookie, separate from `api_key` (which still guards `/v1/*`). See §7 "LLMFit dashboard". |
-| `download_dir` | path | `--download-dir` | (directory of `--model`) | Where the LLMFit download manager writes GGUF weights and lists/deletes them. Defaults to the folder the loaded model lives in. |
-| `llmfit_bin` | string | `--llmfit-bin` | `llmfit` | The `llmfit` binary (PATH name or path) spawned as the recommendation engine. If missing, the dashboard still loads and downloads still work — only the recommendation panels report the engine offline. |
-| `llmfit_port` | int | `--llmfit-port` | `8788` | Loopback port `llmfit serve` is run on (bound to 127.0.0.1; not exposed). |
+| `webui_password` | string | `--webui-password` | (none — open) | Password gate for the `/models` dashboard and its API. Empty leaves it open. A session cookie, separate from `api_key` (which still guards `/v1/*`). See §7 "MODELS dashboard". |
+| `download_dir` | path | `--download-dir` | (directory of `--model`) | Where the MODELS download manager writes / lists / deletes GGUF weights, and the directory the dashboard introspects + hot-swaps from. Defaults to the folder the loaded model lives in. |
+| `models_catalog` | path | `--models-catalog` | (auto-resolved) | Path to the model catalog `hf_models.json` backing the Recommend tab. Empty searches `data/hf_models.json`, `/etc/easyai`, `/usr/share/easyai`, `/usr/local/share/easyai`. |
 | `metrics` | bool | `--metrics` | `off` | Expose Prometheus `/metrics`. |
 | `verbose` | bool | `-v`, `--verbose` | `off` | Noisy logs. Enables HTTP-level `→` / `←` lines per request (with status, duration, bytes, running totals). The periodic `METRICS` line is **independent of verbose** — see `metrics_interval` below. |
 | `metrics_interval` | int | `--metrics-interval` | `300` | Periodic METRICS log line every N seconds, **ALWAYS ON regardless of `verbose`** since 2026-05-09. Reports CPU%, iowait%, load avg, process RSS + peak, system mem, GPU GTT (Linux/AMD), HTTP in-flight + cumulative reqs / err / bytes, fd usage, AND TCP state breakdown with **explicit `TIME_WAIT N/M ephemeral ports (X.X% [elevated\|HIGH\|CRITICAL])`** so socket exhaustion shows up before connections fail. `0` disables. Default `300` (5 min) — low-overhead enough to leave on permanently; bump down (60, 30, 5) when actively troubleshooting. Lives outside Prometheus `/metrics` so you can tail it from journalctl. |
@@ -741,63 +740,61 @@ Browser cache caveat: after any change to served HTML/JS, hit
 **Cmd+Shift+R** (Linux: Ctrl+Shift+R) to force-reload. The bundle is
 hashed so a stale CSS file is the usual culprit.
 
-### LLMFit dashboard (`/llmfit`)
+### MODELS dashboard (`/models`)
 
-> **Full reference: [`LLMFIT.md`](LLMFIT.md)** — install, config, the password
-> gate (installer default `0000`), the download manager, REST API, and
-> troubleshooting. This is the condensed version.
+> **Full reference: [`MODELS.md`](MODELS.md)** — install, config, the password
+> gate (installer default `0000`), local-model parameters, the in-process
+> hot-swap, the download manager, REST API, and troubleshooting. This is the
+> condensed version.
 
-A sober, self-contained dashboard — linked from the chat UI by a small
-"LLMFit" pill (injected top-right) — that brings
-[LLMFit](https://github.com/AlexsJones/llmfit)'s hardware-aware model
-recommendations and a native GGUF download manager into easyai-server.
+A sober, self-contained, **fully native** dashboard — linked from the chat UI by
+a small "MODELS" pill (injected top-right) — for picking, running, and
+downloading local models. No external binary.
 
-**How it works.** easyai-server spawns the external `llmfit` binary in
-its REST mode (`llmfit serve --host 127.0.0.1 --port <llmfit_port>`,
-with `LLMFIT_MODELS_DIR=<download_dir>`) as a child process and proxies
-the read-only analysis API to it — so the fit / hardware / catalogue
-data is real llmfit output, never a mock. The child is reaped on
-shutdown. Downloads are performed natively by easyai-server (libcurl →
-HuggingFace) so the operator controls exactly where weights land. If the
-`llmfit` binary can't be found, the dashboard still loads and the
-download manager still works; only the recommendation panels report the
-engine offline.
+**What it does.**
+- **Recommend** — detects this machine's hardware (RAM / CPU / GPU+VRAM via ggml)
+  and scores a bundled catalogue (`data/hf_models.json`, ~5,000 models) for fit /
+  speed / quality / context against it, or a *simulated* machine. A native C++
+  port of [LLMFit](https://github.com/AlexsJones/llmfit)'s scoring.
+- **Local models** — lists the `.gguf` files in `download_dir`; click one for a
+  panel of all its parameters (read from the GGUF header), its fit on this
+  hardware, and the matching `[MODEL_*]` INI profile.
+- **Run (hot-swap)** — `Engine::reload()` releases the running model and loads the
+  chosen one **in place** (no restart; in-flight chats finish first), re-pointing
+  the `ai.gguf` symlink so the choice survives reboots.
+- **Downloads** — native libcurl → HuggingFace, into `download_dir`, with
+  progress / cancel / list / delete.
 
-**Getting `llmfit`.** Install it once so `llmfit_bin = llmfit` resolves
-on `PATH`, or point `llmfit_bin` at a path:
+If the catalogue can't be found the page still loads and Local models + Downloads
+work fully; only the Recommend tab is limited.
 
-```sh
-brew install AlexsJones/llmfit/llmfit          # prebuilt
-# or build from source:
-git clone https://github.com/AlexsJones/llmfit && cd llmfit
-cargo install --path llmfit-tui                # installs `llmfit` to ~/.cargo/bin
-```
-
-**Routes** (page is open so its JS can show a login overlay; every data
-route requires the session cookie when `webui_password` is set):
+**Routes** (page is open so its JS can show a login overlay; every data route
+requires the session cookie when `webui_password` is set):
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/llmfit` | The dashboard page. |
-| GET | `/llmfit/api/auth` | `{authed, required, llmfit_available, status, download_dir}` (open). |
-| POST | `/llmfit/api/login` | `{password}` → sets the `easyai_llmfit` cookie (HttpOnly, SameSite=Strict). |
-| POST | `/llmfit/api/logout` | Clears the cookie. |
-| GET | `/llmfit/api/v1/*` | Proxied to the `llmfit` child: `system`, `models`, `models/top`, `models/{name}`, `runtimes`, `installed`. |
-| POST | `/llmfit/api/v1/plan` | Proxied hardware-plan estimate. |
-| GET | `/llmfit/api/hf/files?repo=<repo>` | List the `.gguf` files in a HuggingFace repo (quant picker). |
-| POST | `/llmfit/api/download` | `{repo, filename?}` → start a download (auto-selects the best quant if `filename` is omitted; fetches the whole shard set for a sharded pick). |
-| GET | `/llmfit/api/download/status` | Progress of the single active download. |
-| POST | `/llmfit/api/download/cancel` | Cancel it. |
-| GET | `/llmfit/api/local-models` | List `.gguf` files in `download_dir`. |
-| POST | `/llmfit/api/local-models/delete` | `{name}` → delete one (path-traversal-guarded; regular files only). |
+| GET | `/models` | The dashboard page. |
+| GET | `/models/api/auth` | `{authed, required, catalog_loaded, catalog_size, status, download_dir}` (open). |
+| POST | `/models/api/login` / `logout` | `{password}` → sets / clears the `easyai_models` cookie (HttpOnly, SameSite=Strict). |
+| GET | `/models/api/system` | Detected/simulated hardware (`ram_gb`, `vram_gb`, `cpu_cores` to simulate). |
+| GET | `/models/api/models` | Scored catalog (`search`, `min_fit`, `runtime`, `use_case`, `sort`, `limit`, + sim params). |
+| POST | `/models/api/plan` | `{model, context, quant?, kv_quant?, …}` → hardware plan + KV alternatives. |
+| GET | `/models/api/local` | List `.gguf` in `download_dir` (`name, size, mtime, is_current`). |
+| GET | `/models/api/local/detail?file=<name>` | GGUF params + fit + `[MODEL_*]` profile for one local model. |
+| POST | `/models/api/local/delete` | `{name}` → delete one (path-guarded; regular files only; not the running one). |
+| POST | `/models/api/run` | `{name}` → hot-swap to that local model in-process. |
+| GET | `/models/api/hf/files?repo=<repo>` | List `.gguf` files in a HuggingFace repo (quant picker). |
+| POST | `/models/api/download` | `{repo, filename?}` → start a download (best quant if omitted; whole shard set for a sharded pick). |
+| GET | `/models/api/download/status` · POST `/models/api/download/cancel` | Progress / cancel of the single active download. |
 
 **Example.**
 
 ```sh
 easyai-server -m /var/lib/easyai/models/ai.gguf \
   --download-dir /var/lib/easyai/models \
-  --webui-password 's3cret' \
-  --llmfit-bin llmfit --llmfit-port 8788
+  --webui-password 's3cret'
+# data/hf_models.json auto-resolves from /etc/easyai when installed, or pass
+# --models-catalog /path/to/hf_models.json
 ```
 
 ---

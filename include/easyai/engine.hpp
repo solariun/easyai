@@ -306,6 +306,15 @@ class Engine {
     // ---------------- lifecycle --------------------------------------------
     bool load();              // loads gguf + builds context. returns true on success.
     bool is_loaded() const;
+    // Hot-swap the loaded model in place: tears down the current model,
+    // context, sampler, chat templates and any speculative-decoding state,
+    // then points at `new_model_path` and load()s it. Conversation history is
+    // cleared (new model ⇒ fresh context); all other configuration (context
+    // size, ngl, sampling, kv overrides, …) is preserved and re-applied by
+    // load(). Returns true on success; on failure the engine is left unloaded
+    // with last_error() set. The CALLER must serialise this against every
+    // other engine_* call (no request may be in flight).
+    bool reload(const std::string & new_model_path);
     void reset();             // wipes conversation history + KV cache.
     void clear_kv();          // wipes ONLY the KV cache (history kept intact).
                               // useful between retry attempts so the next

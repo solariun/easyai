@@ -1944,6 +1944,29 @@ bool Engine::load() {
 
 bool Engine::is_loaded() const { return p_->loaded; }
 
+bool Engine::reload(const std::string & new_model_path) {
+    // Tear down the current model exactly as ~Impl() does, in the same order
+    // (sampler → spec → ctx_dft → model_dft → init/templates) so the previous
+    // model's resources are fully released before the new one loads.
+    if (p_->sampler) { common_sampler_free(p_->sampler); p_->sampler = nullptr; }
+    p_->spec.reset();
+    if (p_->ctx_dft)   { llama_free(p_->ctx_dft);         p_->ctx_dft   = nullptr; }
+    if (p_->model_dft) { llama_model_free(p_->model_dft); p_->model_dft = nullptr; }
+    p_->templates.reset();
+    p_->init.reset();                 // frees the model + its context
+
+    p_->spec_active = false;
+    p_->spec_mtp    = false;
+    p_->history.clear();              // new model ⇒ fresh conversation
+    p_->loaded      = false;
+    p_->params.model.path = new_model_path;
+    p_->last_error.clear();
+
+    // load() re-runs common_init_from_params with the preserved params (ctx,
+    // ngl, sampling, kv overrides, spec config) against the new path.
+    return load();
+}
+
 void Engine::reset() {
     p_->history.clear();
     if (!p_->system_prompt.empty()) {

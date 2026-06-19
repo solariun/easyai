@@ -174,33 +174,31 @@
 ; (inline single-file fallback). Default modern.
 ;webui_mode        = modern
 
-; ---------- LLMFit dashboard (/llmfit) ----------
-; A sober web UI, linked from the chat UI, that surfaces llmfit's
-; hardware-aware model recommendations (fit / speed / quality scoring)
-; and a native GGUF download manager. The recommendation engine is the
-; external `llmfit` binary, spawned as a child of easyai-server and
-; proxied; downloads are performed natively by easyai-server.
+; ---------- MODELS dashboard (/models) ----------
+; A sober web UI, linked from the chat UI, that scores a bundled catalog
+; of models against this machine's detected (or simulated) hardware
+; (fit / speed / quality / context), introspects the local .gguf files,
+; hot-swaps the running model, and downloads weights. Everything is
+; native to easyai-server — there is no external binary. Full reference:
+; MODELS.md and easyai-server.md section 7.
 
-; Password gate for /llmfit and all of its API routes. Empty (default)
+; Password gate for /models and all of its API routes. Empty (default)
 ; leaves the dashboard OPEN. Set this to require a login (a session
 ; cookie distinct from [SERVER] api_key, which still guards /v1/*).
 ;webui_password    = REPLACE-WITH-A-STRONG-PASSPHRASE
 
-; Where GGUF weights are downloaded to and listed/deleted from.
-; Default: the directory the loaded --model lives in, so downloads land
-; next to the models already in use.
+; Where GGUF weights are downloaded to and listed / deleted from, and the
+; directory the dashboard introspects + hot-swaps from. Default: the
+; directory the loaded --model lives in, so downloads land next to the
+; models already in use.
 ;download_dir      = /var/lib/easyai/models
 
-; The `llmfit` binary: a bare name resolved via PATH, or an absolute
-; path. Install with `cargo install --path .` from the llmfit repo, or
-; `brew install AlexsJones/llmfit/llmfit`. If it can't be found, the
-; dashboard still loads and the download manager still works — only the
-; recommendation panels report the engine as offline.
-;llmfit_bin        = llmfit
-
-; Loopback port easyai-server runs `llmfit serve` on (bound to
-; 127.0.0.1; not exposed). Change only if 8788 is taken.
-;llmfit_port       = 8788
+; Path to the model catalog (hf_models.json) that backs the Recommend
+; tab. Empty = auto-resolve from data/hf_models.json (dev) or
+; /etc/easyai, /usr/share/easyai, /usr/local/share/easyai (installed).
+; The local-models + download features work even when the catalog is
+; absent; only the recommendation panels need it.
+;models_catalog    = /etc/easyai/hf_models.json
 
 ; ============================================================
 ; [ENGINE] — model loading + inference tunables

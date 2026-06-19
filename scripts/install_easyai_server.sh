@@ -55,7 +55,7 @@
 #   ./install_easyai_server.sh --http-timeout 86400   # default 24h, matches cli
 #   ./install_easyai_server.sh --webui-title "AI Box"
 #   ./install_easyai_server.sh --webui-icon /path/to/logo.svg   # ico|png|svg|gif|jpg|webp
-#   ./install_easyai_server.sh --webui-password 's3cret'  # /llmfit gate (default 0000)
+#   ./install_easyai_server.sh --webui-password 's3cret'  # /models gate (default 0000)
 #   ./install_easyai_server.sh --upgrade             # git pull + rebuild
 #   ./install_easyai_server.sh --force               # CLEAN-SLATE rewrite:
 #                                                    #   - easyai.ini backed up
@@ -348,7 +348,7 @@ ngl=99
 webui_title="EasyAi"                          # --webui-title <text>
 webui_icon=""                                 # --webui-icon <path/to/.ico|.png|.svg|.gif|.jpg|.webp>
 webui_icon_dest="$config_dir/favicon"         # final installed path under /etc/easyai
-webui_password="0000"                         # --webui-password <text>; gates the /llmfit
+webui_password="0000"                         # --webui-password <text>; gates the /models
                                               # dashboard. Default 0000 — CHANGE for
                                               # anything past a trusted LAN. Empty = open.
 # Threads: 8 (sweet spot for Strix Point / Ryzen AI 9 HX 370 with most
@@ -747,8 +747,8 @@ printf '    tdp_unlock       = %s   (Ryzen TDP unlock via ryzenadj+systemd timer
     "$([[ $do_tdp_unlock -eq 1 ]] && echo on || echo off)" "$tdp_watts" "$tdp_tctl"
 printf '    webui_title      = %s\n' "$webui_title"
 printf '    webui_icon       = %s\n' "${webui_icon:-<default — no icon>}"
-printf '    webui_password   = %s   (gates /llmfit dashboard%s)\n' \
-    "${webui_password:-<empty — /llmfit is open>}" \
+printf '    webui_password   = %s   (gates /models dashboard%s)\n' \
+    "${webui_password:-<empty — /models is open>}" \
     "$([[ "$webui_password" == "0000" ]] && echo " — DEFAULT 0000, change for non-LAN" || echo "")"
 printf '    api_key          = %s\n' "$([[ -n "$api_key" ]] && echo "<set>" || echo "<none — server is open>")"
 printf '    model_src        = %s\n' "${model_src:-<none — pass --model PATH>}"
@@ -1500,34 +1500,27 @@ external_tools  = $external_tools_dir
 memory          = $rag_dir
 webui_title     = $webui_title
 
-# ---------- LLMFit dashboard (/llmfit) ----------
-# Sober web UI (linked from the chat UI by an injected "LLMFit" pill) for
-# hardware-aware model recommendations + a native GGUF download manager.
-# Full reference: LLMFIT.md and easyai-server.md section 7.
+# ---------- MODELS dashboard (/models) ----------
+# Sober web UI (linked from the chat UI by an injected "MODELS" pill) that
+# scores a bundled catalog against this machine's hardware, introspects the
+# local .gguf files, hot-swaps the running model, and downloads weights — all
+# native to easyai-server (no external binary). Full reference: MODELS.md and
+# easyai-server.md section 7.
 #
-# webui_password: gates /llmfit and all of its API routes (a session cookie
+# webui_password: gates /models and all of its API routes (a session cookie
 #   separate from api_key, which still guards /v1/*). Installed default is
 #   0000 for an out-of-the-box LAN appliance — CHANGE IT before exposing the
 #   box anywhere untrusted. Set empty to leave the dashboard open.
 webui_password  = $webui_password
-# download_dir: where the download manager writes/lists/deletes GGUF weights.
-#   Defaults to this server's models dir so downloads sit beside the model
-#   already in use.
+# download_dir: where the download manager writes/lists/deletes GGUF weights,
+#   and the directory the dashboard introspects + hot-swaps from. Defaults to
+#   this server's models dir so downloads sit beside the model in use.
 download_dir    = $service_model_dir
-# llmfit_bin: the llmfit recommendation engine (PATH name or absolute path),
-#   spawned as a child and proxied under /llmfit/api/v1/*. NOTE: the systemd
-#   service runs with the default PATH (/usr/local/bin:/usr/bin:...), so a
-#   bare name resolves only if llmfit is installed there. cargo installs to
-#   ~/.cargo/bin (NOT on the service PATH) — either copy it to /usr/local/bin
-#   or set an absolute path here. If absent, the dashboard still loads and
-#   downloads still work; only the recommendation panels go offline.
-#     Install: cargo install --path llmfit-tui   (from the llmfit repo)
-#              sudo cp ~/.cargo/bin/llmfit /usr/local/bin/
-#          or  brew install AlexsJones/llmfit/llmfit   (macOS/Linuxbrew)
-llmfit_bin      = llmfit
-# llmfit_port: loopback port easyai-server runs \`llmfit serve\` on (127.0.0.1
-#   only; never exposed). Change only if 8788 is taken.
-llmfit_port     = 8788
+# models_catalog: the model catalog (hf_models.json) that backs the Recommend
+#   tab. The installer copies it to /etc/easyai/hf_models.json, which is one of
+#   the auto-resolved locations, so this is normally left commented out. The
+#   local-models + download features work even without it.
+#models_catalog  = /etc/easyai/hf_models.json
 metrics         = $([[ "$enable_metrics" -eq 1 ]] && echo on || echo off)
 allow_fs        = off
 allow_bash      = off
@@ -2022,6 +2015,16 @@ INI_FILE
         sudo chown root:"$service_group" "$ini_file"
     else
         log "$ini_file exists — leaving operator edits in place (pass --force to overwrite)"
+    fi
+
+    # ---- model catalog: copy hf_models.json to /etc/easyai so the MODELS
+    #      dashboard's Recommend tab can score the bundled catalog. This is
+    #      one of the locations easyai-server auto-resolves. ---------------
+    if [[ -f "$easyai_dir/data/hf_models.json" ]]; then
+        log "installing model catalog → $config_dir/hf_models.json"
+        sudo install -m 0644 "$easyai_dir/data/hf_models.json" "$config_dir/hf_models.json"
+    else
+        warn "$easyai_dir/data/hf_models.json not found — the MODELS Recommend tab will be limited until you set models_catalog"
     fi
 
     # ---- favicon: copy operator-supplied icon to /etc/easyai/favicon

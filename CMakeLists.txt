@@ -158,7 +158,7 @@ set(EASYAI_SOURCES
     src/mcp_client.cpp
     src/presets.cpp
     src/plan.cpp
-    src/llmfit.cpp
+    src/models_dashboard.cpp
     src/ui.cpp
     src/tui.cpp
     src/log.cpp
@@ -282,7 +282,7 @@ if (EASYAI_BUILD_EXAMPLES)
     # ----- embed the llama-server-derived webui (xxd-style binary embed) ---
     set(EASYAI_WEBUI_HEADERS "")
     if (EASYAI_BUILD_WEBUI)
-        set(WEBUI_ASSETS index.html bundle.js bundle.css loading.html llmfit.html)
+        set(WEBUI_ASSETS index.html bundle.js bundle.css loading.html models.html)
         foreach(asset ${WEBUI_ASSETS})
             set(_in  "${CMAKE_CURRENT_SOURCE_DIR}/webui/${asset}")
             set(_out "${CMAKE_CURRENT_BINARY_DIR}/webui_${asset}.hpp")
@@ -451,4 +451,9 @@ if (EASYAI_INSTALL)
         ${CMAKE_CURRENT_BINARY_DIR}/easyaiConfig.cmake
         ${CMAKE_CURRENT_BINARY_DIR}/easyaiConfigVersion.cmake
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/easyai)
+
+    # Model catalog for the MODELS dashboard's Recommend tab. easyai-server
+    # auto-resolves <prefix>/share/easyai/hf_models.json at runtime.
+    install(FILES data/hf_models.json
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/easyai OPTIONAL)
 endif()

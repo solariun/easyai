@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MODELS · easyai</title>
+<style>
+  :root{
+    --bg:#1b1f20; --bg2:#23292b; --panel:#20262800; --card:#23292b; --line:#33393b;
+    --line2:#2a3032; --fg:#e8e6e3; --mut:#9aa3a5; --mut2:#727b7d; --acc:#ff8236;
+    --good:#5ec27a; --perfect:#49b7ff; --marg:#e8c45a; --bad:#e0685f;
+    --radius:10px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--fg);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased}
+  a{color:var(--acc);text-decoration:none}
+  button{font:inherit;cursor:pointer}
+  input,select{font:inherit;color:var(--fg);background:var(--bg2);border:1px solid var(--line);
+    border-radius:8px;padding:7px 9px;outline:none}
+  input:focus,select:focus{border-color:var(--acc)}
+  .btn{background:var(--bg2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:7px 12px;
+    transition:background .15s,border-color .15s}
+  .btn:hover{border-color:#4a5254;background:#272e30}
+  .btn.acc{background:rgba(255,130,54,.14);border-color:rgba(255,130,54,.5);color:#ffd9bf}
+  .btn.acc:hover{background:rgba(255,130,54,.24)}
+  .btn.danger:hover{border-color:var(--bad);color:#ffc7c2}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .muted{color:var(--mut)}
+  .small{font-size:12px}
+  .mono{font-family:var(--mono)}
+
+  header.top{display:flex;align-items:center;gap:16px;padding:14px 22px;border-bottom:1px solid var(--line);
+    position:sticky;top:0;background:rgba(27,31,32,.92);backdrop-filter:blur(8px);z-index:5}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:600;letter-spacing:.04em}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--acc)}
+  .brand .sub{color:var(--mut2);font-weight:400;letter-spacing:0}
+  .sys{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto;align-items:center}
+  .chip{background:var(--bg2);border:1px solid var(--line2);border-radius:999px;padding:4px 11px;font-size:12px;color:var(--mut)}
+  .chip b{color:var(--fg);font-weight:600}
+  .chip a{margin-left:8px}
+
+  nav.tabs{display:flex;gap:2px;padding:0 22px;border-bottom:1px solid var(--line)}
+  nav.tabs button{background:none;border:none;color:var(--mut);padding:12px 14px;border-bottom:2px solid transparent}
+  nav.tabs button.active{color:var(--fg);border-bottom-color:var(--acc)}
+  nav.tabs button:hover{color:var(--fg)}
+
+  main{padding:20px 22px;max-width:1320px;margin:0 auto}
+  .row{display:flex;gap:18px;align-items:flex-start}
+  .grow{flex:1;min-width:0}
+
+  .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+  .toolbar .sep{width:1px;align-self:stretch;background:var(--line);margin:2px 4px}
+  .toolbar label{font-size:11px;color:var(--mut2);display:flex;flex-direction:column;gap:3px}
+
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  thead th{text-align:left;color:var(--mut2);font-weight:500;font-size:11px;text-transform:uppercase;
+    letter-spacing:.04em;padding:8px 10px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg)}
+  tbody td{padding:9px 10px;border-bottom:1px solid var(--line2)}
+  tbody tr{cursor:pointer}
+  tbody tr:hover{background:#23292b}
+  tbody tr.sel{background:#262d2f;box-shadow:inset 2px 0 0 var(--acc)}
+  td.num,th.num{text-align:right;font-family:var(--mono)}
+  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;border:1px solid}
+  .pill.perfect{color:var(--perfect);border-color:rgba(73,183,255,.4);background:rgba(73,183,255,.1)}
+  .pill.good{color:var(--good);border-color:rgba(94,194,122,.4);background:rgba(94,194,122,.1)}
+  .pill.marginal{color:var(--marg);border-color:rgba(232,196,90,.4);background:rgba(232,196,90,.1)}
+  .pill.too_tight{color:var(--bad);border-color:rgba(224,104,95,.4);background:rgba(224,104,95,.1)}
+  .pill.ghost{color:var(--mut);border-color:var(--line)}
+  .bar{height:5px;border-radius:3px;background:var(--line);overflow:hidden}
+  .bar>i{display:block;height:100%;background:var(--acc)}
+
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px}
+  .drawer{width:430px;flex:0 0 430px;position:sticky;top:74px;max-height:calc(100vh - 96px);overflow:auto}
+  .drawer h2{margin:0 0 2px;font-size:16px}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:13px;margin:10px 0}
+  .kv .k{color:var(--mut2)}
+  .kv .v{text-align:right;font-family:var(--mono)}
+  .sect{margin-top:16px;border-top:1px solid var(--line2);padding-top:12px}
+  .sect h3{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2)}
+  .scores .s{display:grid;grid-template-columns:64px 1fr 38px;gap:8px;align-items:center;margin:5px 0;font-size:12px}
+  .empty{color:var(--mut2);text-align:center;padding:50px 10px}
+  .src{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--line2)}
+
+  /* login */
+  .overlay{position:fixed;inset:0;background:rgba(15,18,19,.86);display:flex;align-items:center;justify-content:center;z-index:50}
+  .login{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px;width:330px;text-align:center}
+  .login h1{font-size:17px;margin:0 0 4px;letter-spacing:.04em}
+  .login input{width:100%;margin:14px 0 10px;text-align:center}
+  .login .err{color:var(--bad);font-size:12px;min-height:16px}
+  .hide{display:none!important}
+
+  .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#2c3335;border:1px solid var(--line);
+    border-radius:10px;padding:11px 16px;z-index:40;box-shadow:0 8px 30px rgba(0,0,0,.4);max-width:90vw}
+  .toast.err{border-color:var(--bad)}
+  .dl{display:flex;align-items:center;gap:12px;margin-top:10px}
+  .dl .bar{flex:1}
+  .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line);border-top-color:var(--acc);
+    border-radius:50%;animation:sp 0.7s linear infinite;vertical-align:-2px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div id="login" class="overlay hide">
+  <form class="login" onsubmit="doLogin(event)">
+    <div class="brand" style="justify-content:center"><span class="dot"></span>MODELS</div>
+    <h1>Sign in</h1>
+    <div class="muted small">This dashboard is password-protected.</div>
+    <input id="pw" type="password" placeholder="Password" autocomplete="current-password" autofocus>
+    <div class="err" id="loginErr"></div>
+    <button class="btn acc" style="width:100%" type="submit">Unlock</button>
+  </form>
+</div>
+
+<header class="top">
+  <div class="brand"><span class="dot"></span>MODELS<span class="sub small">&nbsp;· easyai</span></div>
+  <div class="sys" id="sysChips"><span class="muted small">detecting hardware…</span></div>
+</header>
+<nav class="tabs">
+  <button data-tab="recommend" class="active">Recommend</button>
+  <button data-tab="local">Local models</button>
+  <button data-tab="downloads">Downloads</button>
+</nav>
+
+<main>
+  <!-- RECOMMEND -->
+  <section id="tab-recommend">
+    <div class="toolbar">
+      <label>Search<input id="f-search" placeholder="name / provider" style="width:190px"></label>
+      <label>Min fit<select id="f-minfit">
+        <option value="marginal">Marginal+</option><option value="good">Good+</option>
+        <option value="perfect">Perfect</option><option value="too_tight">Show all</option></select></label>
+      <label>Runtime<select id="f-runtime">
+        <option value="any">Any</option><option value="llamacpp">llama.cpp</option>
+        <option value="mlx">MLX</option><option value="vllm">vLLM</option></select></label>
+      <label>Use case<select id="f-usecase">
+        <option value="all">All</option><option value="general">General</option><option value="coding">Coding</option>
+        <option value="reasoning">Reasoning</option><option value="chat">Chat</option>
+        <option value="multimodal">Multimodal</option><option value="embedding">Embedding</option></select></label>
+      <label>Sort<select id="f-sort">
+        <option value="score">Score</option><option value="tps">tok/s</option><option value="params">Params</option>
+        <option value="mem">Memory</option><option value="ctx">Context</option><option value="date">Release</option></select></label>
+      <label>Limit<select id="f-limit"><option>25</option><option selected>50</option><option>100</option><option>200</option></select></label>
+      <div class="sep"></div>
+      <label>Sim RAM GB<input id="s-ram" type="number" min="0" placeholder="auto" style="width:80px"></label>
+      <label>Sim VRAM GB<input id="s-vram" type="number" min="0" placeholder="auto" style="width:80px"></label>
+      <label>Sim cores<input id="s-cores" type="number" min="0" placeholder="auto" style="width:70px"></label>
+      <label>&nbsp;<button class="btn" onclick="resetSim()">Reset sim</button></label>
+    </div>
+    <div class="row">
+      <div class="grow panel" style="padding:0;overflow:hidden">
+        <div id="modelsWrap"><div class="empty">Loading catalog…</div></div>
+      </div>
+      <div class="drawer panel" id="detail"><div class="empty">Select a model to see its fit &amp; plan.</div></div>
+    </div>
+  </section>
+
+  <!-- LOCAL -->
+  <section id="tab-local" class="hide">
+    <div class="row">
+      <div class="grow panel" style="padding:0;overflow:hidden">
+        <div style="padding:12px 14px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px">
+          <b>Local models</b><span class="muted small" id="localDir"></span>
+          <button class="btn small" style="margin-left:auto" onclick="loadLocal()">Refresh</button>
+        </div>
+        <div id="localWrap"><div class="empty">Loading…</div></div>
+      </div>
+      <div class="drawer panel" id="localDetail"><div class="empty">Select a local model to inspect its parameters and run it.</div></div>
+    </div>
+  </section>
+
+  <!-- DOWNLOADS -->
+  <section id="tab-downloads" class="hide">
+    <div class="panel" style="margin-bottom:16px">
+      <b>Download a GGUF model</b>
+      <div class="muted small" style="margin:4px 0 12px">Paste a HuggingFace GGUF repo, list its quants, and download into the model directory.</div>
+      <div class="toolbar" style="margin:0">
+        <input id="dl-repo" placeholder="e.g. bartowski/Qwen2.5-7B-Instruct-GGUF" style="flex:1;min-width:280px">
+        <button class="btn" onclick="listQuants()">List quants</button>
+        <button class="btn acc" onclick="downloadBest()">Download best quant</button>
+      </div>
+      <div id="quants"></div>
+      <div id="activeDl"></div>
+    </div>
+    <div class="panel" style="padding:0;overflow:hidden">
+      <div style="padding:12px 14px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center">
+        <b>Downloaded models</b><button class="btn small" style="margin-left:auto" onclick="loadLocal()">Refresh</button>
+      </div>
+      <div id="dlLocalWrap"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+let SIM={}, SEL=null, DLPOLL=null;
+
+function toast(msg,err){let t=document.createElement('div');t.className='toast'+(err?' err':'');t.textContent=msg;
+  document.body.appendChild(t);setTimeout(()=>t.remove(),3200);}
+function fmtBytes(b){if(!b)return '–';const u=['B','KB','MB','GB','TB'];let i=0,v=b;while(v>=1024&&i<4){v/=1024;i++;}return v.toFixed(v<10&&i>0?1:0)+' '+u[i];}
+function fmtNum(n){return n==null?'–':Number(n).toLocaleString();}
+async function api(path,opts){const r=await fetch(path,opts);let j=null;try{j=await r.json();}catch(e){}
+  if(r.status===401){showLogin(true);throw new Error('login required');}
+  if(!r.ok)throw new Error((j&&j.error)||('HTTP '+r.status));return j;}
+
+function simQS(){let p=new URLSearchParams();if(SIM.ram)p.set('ram_gb',SIM.ram);if(SIM.vram!=null&&SIM.vram!=='')p.set('vram_gb',SIM.vram);
+  if(SIM.cores)p.set('cpu_cores',SIM.cores);return p;}
+
+/* ---------- auth ---------- */
+function showLogin(s){$('#login').classList.toggle('hide',!s);}
+async function doLogin(e){e.preventDefault();$('#loginErr').textContent='';
+  try{await api('/models/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:$('#pw').value})});
+    showLogin(false);boot();}catch(err){$('#loginErr').textContent='Incorrect password';}}
+
+/* ---------- system ---------- */
+async function loadSystem(){
+  let q=simQS();
+  let d=await api('/models/api/system'+(q.toString()?'?'+q:''));
+  let s=d.system;
+  let simOn=Object.keys(SIM).some(k=>SIM[k]!==''&&SIM[k]!=null);
+  let gpu=s.has_gpu?`<b>${s.gpu_name||'GPU'}</b> ${s.gpu_vram_gb?s.gpu_vram_gb+' GB':''}`:'no GPU';
+  $('#sysChips').innerHTML=
+    `<span class="chip">CPU <b>${s.cpu_cores}c</b></span>`+
+    `<span class="chip">RAM <b>${s.total_ram_gb} GB</b> · ${s.available_ram_gb} free</span>`+
+    `<span class="chip">GPU ${gpu}</span>`+
+    `<span class="chip">${s.backend}</span>`+
+    (simOn?`<span class="chip" style="border-color:var(--acc);color:var(--acc)">simulated</span>`:'');
+}
+
+/* ---------- recommend ---------- */
+let modelsTimer=null;
+function debounceModels(){clearTimeout(modelsTimer);modelsTimer=setTimeout(loadModels,250);}
+async function loadModels(){
+  let p=simQS();
+  p.set('search',$('#f-search').value);p.set('min_fit',$('#f-minfit').value);
+  p.set('runtime',$('#f-runtime').value);p.set('use_case',$('#f-usecase').value);
+  p.set('sort',$('#f-sort').value);p.set('limit',$('#f-limit').value);
+  $('#modelsWrap').innerHTML='<div class="empty"><span class="spin"></span> Scoring…</div>';
+  try{
+    let d=await api('/models/api/models?'+p);
+    if(!d.models.length){$('#modelsWrap').innerHTML='<div class="empty">No models match.</div>';return;}
+    let rows=d.models.map(m=>`<tr data-name="${enc(m.name)}" onclick='selModel(${esc(JSON.stringify(m))},this)'>
+      <td><div>${esch(m.name)}</div><div class="muted small">${esch(m.provider||'')}</div></td>
+      <td class="num">${m.params_b}B</td>
+      <td><span class="pill ${m.fit_level}">${m.fit_label}</span></td>
+      <td class="small">${m.run_mode_label}</td>
+      <td class="num">${m.score}</td>
+      <td class="num">${m.estimated_tps}</td>
+      <td class="num">${Math.round(m.utilization_pct)}%</td>
+      <td class="num small">${fmtNum(m.context_length)}</td></tr>`).join('');
+    $('#modelsWrap').innerHTML=`<table><thead><tr><th>Model</th><th class="num">Params</th><th>Fit</th>
+      <th>Mode</th><th class="num">Score</th><th class="num">tok/s</th><th class="num">Mem</th><th class="num">Ctx</th>
+      </tr></thead><tbody>${rows}</tbody></table>
+      <div class="muted small" style="padding:8px 12px">${d.returned_models} of ${d.total_models} models</div>`;
+  }catch(e){$('#modelsWrap').innerHTML='<div class="empty">'+esch(e.message)+'</div>';}
+}
+function enc(s){return encodeURIComponent(s);}
+function esch(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function esc(s){return s.replace(/'/g,"\\'").replace(/&/g,'&amp;').replace(/</g,'&lt;');}
+
+function scoreBar(label,v){return `<div class="s"><span class="muted">${label}</span><div class="bar"><i style="width:${v}%"></i></div><span class="mono">${v}</span></div>`;}
+function selModel(m,tr){
+  $$('#modelsWrap tr.sel').forEach(x=>x.classList.remove('sel'));if(tr)tr.classList.add('sel');
+  SEL=m;let sc=m.score_components;
+  let srcs=(m.gguf_sources||[]).map(g=>`<div class="src"><span class="mono small">${esch(g.repo)}</span>
+    <button class="btn small acc" onclick="goDownload('${esch(g.repo)}')">Download…</button></div>`).join('')
+    ||'<div class="muted small">No GGUF sources listed — paste a repo in the Downloads tab.</div>';
+  $('#detail').innerHTML=`
+    <h2>${esch(m.name)}</h2><div class="muted small">${esch(m.provider||'')} · ${esch(m.category)}</div>
+    <div style="margin-top:8px"><span class="pill ${m.fit_level}">${m.fit_label}</span>
+      <span class="pill ghost">${m.run_mode_label}</span>
+      <span class="pill ghost">${m.runtime_label}</span></div>
+    <div class="kv">
+      <span class="k">Best quant</span><span class="v">${m.best_quant||'–'}</span>
+      <span class="k">Memory required</span><span class="v">${m.memory_required_gb} GB</span>
+      <span class="k">Memory available</span><span class="v">${m.memory_available_gb} GB</span>
+      <span class="k">Est. speed</span><span class="v">${m.estimated_tps} tok/s</span>
+      <span class="k">Context</span><span class="v">${fmtNum(m.context_length)}</span>
+      <span class="k">License</span><span class="v">${esch(m.license||'–')}</span>
+    </div>
+    <div class="sect scores"><h3>Score breakdown · ${m.score}</h3>
+      ${scoreBar('Quality',sc.quality)}${scoreBar('Speed',sc.speed)}${scoreBar('Fit',sc.fit)}${scoreBar('Context',sc.context)}</div>
+    ${m.notes&&m.notes.length?`<div class="sect"><h3>Notes</h3><ul class="muted small" style="margin:0;padding-left:18px">${m.notes.map(n=>'<li>'+esch(n)+'</li>').join('')}</ul></div>`:''}
+    <div class="sect"><h3>Hardware plan</h3>
+      <div class="toolbar" style="margin:0 0 8px">
+        <label>Context<input id="pl-ctx" type="number" value="${Math.min(m.context_length||8192,8192)}" style="width:90px"></label>
+        <label>Quant<input id="pl-quant" value="${m.best_quant||''}" style="width:90px"></label>
+        <label>&nbsp;<button class="btn" onclick="runPlan()">Estimate</button></label>
+      </div><div id="planOut"></div></div>
+    <div class="sect"><h3>GGUF sources</h3>${srcs}</div>`;
+}
+async function runPlan(){
+  let body={model:SEL.name,context:+$('#pl-ctx').value||8192,quant:$('#pl-quant').value||undefined};
+  if(SIM.ram)body.ram_gb=+SIM.ram;if(SIM.vram!=null&&SIM.vram!=='')body.vram_gb=+SIM.vram;if(SIM.cores)body.cpu_cores=+SIM.cores;
+  $('#planOut').innerHTML='<span class="spin"></span>';
+  try{let p=await api('/models/api/plan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(p.error){$('#planOut').innerHTML='<div class="muted small">'+esch(p.error)+'</div>';return;}
+    let kv=(p.kv_alternatives||[]).map(k=>`<tr><td>${k.kv_quant}</td><td class="num">${k.memory_required_gb} GB</td>
+      <td class="num">${Math.round(k.savings_fraction*100)}%</td></tr>`).join('');
+    $('#planOut').innerHTML=`<div class="kv">
+      <span class="k">Current fit</span><span class="v"><span class="pill ${p.current.fit_level}">${p.current.fit_level}</span></span>
+      <span class="k">Minimum</span><span class="v">${p.minimum.ram_gb} GB RAM${p.minimum.vram_gb?(' / '+p.minimum.vram_gb+' VRAM'):''}</span>
+      <span class="k">Recommended</span><span class="v">${p.recommended.ram_gb} GB RAM / ${p.recommended.vram_gb} VRAM</span>
+      </div><div class="muted small" style="margin-top:6px">KV cache options</div>
+      <table class="small"><thead><tr><th>KV</th><th class="num">Mem</th><th class="num">Saves</th></tr></thead><tbody>${kv}</tbody></table>`;
+  }catch(e){$('#planOut').innerHTML='<div class="muted small">'+esch(e.message)+'</div>';}
+}
+function goDownload(repo){switchTab('downloads');$('#dl-repo').value=repo;listQuants();}
+
+/* ---------- local ---------- */
+async function loadLocal(){
+  for(const w of ['#localWrap','#dlLocalWrap'])if($(w))$(w).innerHTML='<div class="empty"><span class="spin"></span></div>';
+  try{
+    let d=await api('/models/api/local');
+    $('#localDir').textContent=d.dir;
+    if(!d.models.length){let e='<div class="empty">No .gguf files in the model directory yet.</div>';
+      $('#localWrap').innerHTML=e;$('#dlLocalWrap').innerHTML=e;return;}
+    let rows=d.models.map(m=>`<tr data-f="${enc(m.name)}">
+      <td onclick="localDetail('${esch(m.name)}',this.parentNode)">
+        <div>${esch(m.name)} ${m.is_current?'<span class="pill good">running</span>':''}</div>
+        <div class="muted small">${new Date(m.mtime*1000).toLocaleDateString()}</div></td>
+      <td class="num" onclick="localDetail('${esch(m.name)}',this.parentNode)">${fmtBytes(m.size_bytes)}</td>
+      <td class="num" style="white-space:nowrap">
+        <button class="btn small acc" onclick="runModel('${esch(m.name)}')" ${m.is_current?'disabled':''}>Run</button>
+        <button class="btn small danger" onclick="delModel('${esch(m.name)}')" ${m.is_current?'disabled':''}>Delete</button></td></tr>`).join('');
+    let html=`<table><thead><tr><th>File</th><th class="num">Size</th><th class="num">Actions</th></tr></thead><tbody>${rows}</tbody></table>`;
+    $('#localWrap').innerHTML=html;$('#dlLocalWrap').innerHTML=html;
+  }catch(e){$('#localWrap').innerHTML='<div class="empty">'+esch(e.message)+'</div>';}
+}
+async function localDetail(file,tr){
+  $$('#localWrap tr.sel').forEach(x=>x.classList.remove('sel'));if(tr)tr.classList.add('sel');
+  $('#localDetail').innerHTML='<div class="empty"><span class="spin"></span></div>';
+  let q=simQS();q.set('file',file);
+  try{
+    let d=await api('/models/api/local/detail?'+q);
+    let p=d.params,f=d.fit,sc=f.score_components;
+    let prof=d.ini_profile?`<div class="sect"><h3>INI profile · [${esch(d.ini_profile.section)}]</h3><div class="kv">
+      ${Object.entries(d.ini_profile.values).map(([k,v])=>`<span class="k">${esch(k)}</span><span class="v">${esch(String(v))}</span>`).join('')}
+      </div></div>`:'<div class="sect"><h3>INI profile</h3><div class="muted small">No matching [MODEL_*] section — engine defaults apply.</div></div>';
+    $('#localDetail').innerHTML=`
+      <h2>${esch(d.display_name||file)} ${d.is_current?'<span class="pill good">running</span>':''}</h2>
+      <div class="muted small mono">${esch(file)}</div>
+      <div style="margin-top:8px"><span class="pill ${f.fit_level}">${f.fit_label}</span>
+        <span class="pill ghost">${f.run_mode_label}</span></div>
+      <div class="kv">
+        <span class="k">Architecture</span><span class="v">${esch(p.architecture||'–')}</span>
+        <span class="k">Parameters</span><span class="v">${p.parameter_count} (${p.params_b}B)</span>
+        <span class="k">Quantization</span><span class="v">${esch(p.quantization||'–')}</span>
+        <span class="k">Context length</span><span class="v">${fmtNum(p.context_length)}</span>
+        <span class="k">Layers</span><span class="v">${fmtNum(p.num_hidden_layers)}</span>
+        <span class="k">Heads (q/kv)</span><span class="v">${p.num_attention_heads}/${p.num_key_value_heads}</span>
+        <span class="k">Embedding</span><span class="v">${fmtNum(p.embedding_length)}</span>
+        <span class="k">Vocab</span><span class="v">${fmtNum(p.vocab_size)}</span>
+        ${p.is_moe?`<span class="k">Experts</span><span class="v">${p.expert_used}/${p.expert_count}</span>`:''}
+        <span class="k">File size</span><span class="v">${fmtBytes(p.file_size_bytes)}</span>
+        <span class="k">Memory required</span><span class="v">${f.memory_required_gb} GB</span>
+        <span class="k">Est. speed</span><span class="v">${f.estimated_tps} tok/s</span>
+      </div>
+      <div class="sect scores"><h3>Fit on this hardware · ${f.score}</h3>
+        ${scoreBar('Quality',sc.quality)}${scoreBar('Speed',sc.speed)}${scoreBar('Fit',sc.fit)}${scoreBar('Context',sc.context)}</div>
+      ${prof}
+      <div class="sect" style="display:flex;gap:8px">
+        <button class="btn acc grow" onclick="runModel('${esch(file)}')" ${d.is_current?'disabled':''}>${d.is_current?'Currently running':'Run this model'}</button>
+        <button class="btn danger" onclick="delModel('${esch(file)}')" ${d.is_current?'disabled':''}>Delete</button></div>
+      ${d.gguf_readable?'':'<div class="muted small" style="margin-top:8px">GGUF header could not be fully read; values estimated from file size.</div>'}`;
+  }catch(e){$('#localDetail').innerHTML='<div class="empty">'+esch(e.message)+'</div>';}
+}
+async function runModel(name){
+  if(!confirm('Release the current model and run "'+name+'"? In-flight requests finish first.'))return;
+  toast('Loading '+name+' …');
+  try{await api('/models/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    toast('Now running '+name);loadLocal();}catch(e){toast(e.message,true);}
+}
+async function delModel(name){
+  if(!confirm('Delete "'+name+'" from disk? This cannot be undone.'))return;
+  try{await api('/models/api/local/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    toast('Deleted '+name);loadLocal();$('#localDetail').innerHTML='<div class="empty">Select a local model.</div>';}catch(e){toast(e.message,true);}
+}
+
+/* ---------- downloads ---------- */
+async function listQuants(){
+  let repo=$('#dl-repo').value.trim();if(!repo){toast('Enter a repo',true);return;}
+  $('#quants').innerHTML='<div class="muted small" style="margin-top:10px"><span class="spin"></span> Listing…</div>';
+  try{let d=await api('/models/api/hf/files?repo='+enc(repo));
+    $('#quants').innerHTML='<table style="margin-top:10px"><thead><tr><th>File</th><th class="num">Size</th><th></th></tr></thead><tbody>'+
+      d.files.map(f=>`<tr><td class="mono small">${esch(f.path)}</td><td class="num">${fmtBytes(f.size_bytes)}</td>
+        <td class="num"><button class="btn small acc" onclick="startDl('${esch(repo)}','${esch(f.path)}')">Download</button></td></tr>`).join('')+
+      '</tbody></table>';
+  }catch(e){$('#quants').innerHTML='<div class="muted small" style="margin-top:10px">'+esch(e.message)+'</div>';}
+}
+async function downloadBest(){let repo=$('#dl-repo').value.trim();if(!repo){toast('Enter a repo',true);return;}startDl(repo,'');}
+async function startDl(repo,filename){
+  try{await api('/models/api/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({repo,filename})});
+    pollDl();}catch(e){toast(e.message,true);}
+}
+async function pollDl(){
+  clearInterval(DLPOLL);
+  const tick=async()=>{try{let s=await api('/models/api/download/status');render(s);
+    if(s.state!=='downloading'){clearInterval(DLPOLL);loadLocal();}}catch(e){clearInterval(DLPOLL);}};
+  function render(s){
+    if(s.state==='idle'&&!s.repo){$('#activeDl').innerHTML='';return;}
+    let pct=s.percent?s.percent.toFixed(1):0;
+    let info=s.state==='downloading'?`${fmtBytes(s.downloaded_bytes)} / ${fmtBytes(s.total_bytes)} · ${pct}%`:
+      s.state==='done'?'completed':s.state==='error'?('error: '+esch(s.error)):'';
+    $('#activeDl').innerHTML=`<div class="dl"><div style="min-width:0;flex:1">
+      <div class="small">${s.state==='downloading'?'<span class="spin"></span> ':''}${esch(s.filename||s.repo)} <span class="muted">${info}</span></div>
+      <div class="bar" style="margin-top:6px"><i style="width:${pct}%;background:${s.state==='error'?'var(--bad)':'var(--acc)'}"></i></div></div>
+      ${s.state==='downloading'?'<button class="btn small danger" onclick="cancelDl()">Cancel</button>':''}</div>`;
+  }
+  tick();DLPOLL=setInterval(tick,800);
+}
+async function cancelDl(){try{await api('/models/api/download/cancel',{method:'POST'});}catch(e){}}
+
+/* ---------- tabs / boot ---------- */
+function switchTab(t){$$('nav.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));
+  $$('main > section').forEach(s=>s.classList.toggle('hide',s.id!=='tab-'+t));
+  if(t==='local'||t==='downloads')loadLocal();
+  if(t==='downloads')pollDl();}
+$$('nav.tabs button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
+['#f-search','#f-minfit','#f-runtime','#f-usecase','#f-sort','#f-limit'].forEach(s=>{
+  $(s).addEventListener('input',s==='#f-search'?debounceModels:loadModels);});
+['#s-ram','#s-vram','#s-cores'].forEach(s=>$(s).addEventListener('change',()=>{
+  SIM={ram:$('#s-ram').value,vram:$('#s-vram').value,cores:$('#s-cores').value};loadSystem();loadModels();}));
+function resetSim(){SIM={};$('#s-ram').value=$('#s-vram').value=$('#s-cores').value='';loadSystem();loadModels();}
+
+async function boot(){try{await loadSystem();await loadModels();}catch(e){}}
+async function init(){
+  try{let a=await api('/models/api/auth');
+    if(a.required&&!a.authed){showLogin(true);return;}
+    if(!a.catalog_loaded)toast('Model catalog not found — recommendations limited. '+(a.status||''),true);
+    boot();
+  }catch(e){/* 401 handled in api() */}
+}
+init();
+</script>
+</body>
+</html>
