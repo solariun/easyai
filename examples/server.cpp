@@ -120,8 +120,10 @@ using nlohmann::ordered_json;
 // ----------------------------------------------------------------------------
 // A self-contained <500-line single-file chat UI. Talks to /v1/chat/completions
 // via the OpenAI shape (no streaming for simplicity — it polls one full reply
-// per submit).  The preset bar dispatches to /v1/preset which sets server-wide
-// defaults for *this UI session only*.
+// per submit).  The preset bar applies its values CLIENT-SIDE — it sets the
+// slider numbers and sends them as temperature/top_p/top_k in each request
+// body; it does NOT POST /v1/preset. So if the server was launched with a
+// concrete (authoritative) preset, these sliders are ignored server-side.
 // ============================================================================
 constexpr char kWebUI[] = R"HTML(<!doctype html>
 <html lang="en"><head>
@@ -1510,6 +1512,14 @@ struct ServerCtx {
         def_min_p       = p.min_p;
         default_preset  = p;
     }
+
+    // True when the operator has pinned a CONCRETE sampling preset — anything
+    // other than `auto` (--preset / [ENGINE] preset / POST /v1/preset). Such a
+    // preset is AUTHORITATIVE: it overrides a request's temperature/top_p/top_k
+    // and any inline preset peeled from the message. `auto` (model_default) is
+    // non-authoritative — clients drive sampling, as before. This switch never
+    // governs reasoning_effort (a preset carries no effort level).
+    bool preset_authoritative() const { return !default_preset.model_default; }
 };
 
 // ============================================================================
@@ -1850,22 +1860,44 @@ static void prepare_engine_for_request(ServerCtx & ctx, const ChatRequest & req)
             ctx.engine.add_tool(make_stub_tool(name, description, params_json));
         }
     }
-    ctx.engine.set_sampling(
-        req.temp_override  >= 0 ? (float) req.temp_override  : -1.0f,
-        req.top_p_override >= 0 ? (float) req.top_p_override : -1.0f,
-        req.top_k_override >= 0 ? (int)   req.top_k_override : -1,
-        -1.0f);
-    if (!req.preset_inline.applied.empty()) {
-        ctx.engine.set_sampling(req.preset_inline.temperature,
-                                 req.preset_inline.top_p,
-                                 req.preset_inline.top_k,
-                                 req.preset_inline.min_p);
+    // Sampling precedence.
+    //
+    //   auto preset (default)  → the CLIENT drives. reset_engine_defaults()
+    //       laid down the auto baseline; here we overlay the request body's
+    //       temperature/top_p/top_k, then an inline preset ("creative 0.9 …")
+    //       on top of that. Standard OpenAI behaviour, unchanged.
+    //
+    //   concrete preset        → the SERVER decides. When the operator pins a
+    //       preset other than `auto` it is authoritative: reset_engine_defaults()
+    //       already applied its numbers, so we skip BOTH overlays and the
+    //       request's sampling knobs are ignored. (An inline preset is still
+    //       peeled from the message text in parse_chat_request — it just has no
+    //       sampling effect here.)
+    //
+    // reasoning_effort is deliberately NOT part of this switch — see below.
+    if (!ctx.preset_authoritative()) {
+        ctx.engine.set_sampling(
+            req.temp_override  >= 0 ? (float) req.temp_override  : -1.0f,
+            req.top_p_override >= 0 ? (float) req.top_p_override : -1.0f,
+            req.top_k_override >= 0 ? (int)   req.top_k_override : -1,
+            -1.0f);
+        if (!req.preset_inline.applied.empty()) {
+            ctx.engine.set_sampling(req.preset_inline.temperature,
+                                     req.preset_inline.top_p,
+                                     req.preset_inline.top_k,
+                                     req.preset_inline.min_p);
+        }
     }
 
     // Reasoning effort: per-request body field wins; otherwise re-apply the
     // server's ambient default (reset_engine_defaults doesn't touch it, and
     // a prior request may have changed it). The Engine maps "auto"/"" to
     // "model default" (no injection).
+    //
+    // NON-DESTRUCTIVE BY DESIGN: an authoritative sampling preset must never
+    // silently change or suppress a client's reasoning_effort, so this line is
+    // intentionally OUTSIDE the preset_authoritative() guard above — the
+    // per-request field always wins regardless of which preset is pinned.
     ctx.engine.reasoning_effort(req.reasoning_effort_set ? req.reasoning_effort
                                                          : ctx.default_reasoning_effort);
 
@@ -3354,6 +3386,10 @@ static void route_health(ServerCtx & ctx, const httplib::Request &,
     j["backend"] = ctx.engine.backend_summary();
     j["tools"]   = ctx.default_tools.size();
     j["preset"]  = ctx.default_preset.name;
+    // When true, this preset overrides a request's temperature/top_p/top_k
+    // and any inline preset; clients can't tune sampling. Always false for
+    // the default `auto` preset. Does not affect reasoning_effort.
+    j["preset_authoritative"] = ctx.preset_authoritative();
     j["reasoning_effort"] = ctx.default_reasoning_effort.empty()
                                 ? "auto" : ctx.default_reasoning_effort;
 
@@ -6810,7 +6846,7 @@ int main(int argc, char ** argv) {
 
     std::fprintf(stderr,
         "[easyai-server] %s loaded\n"
-        "                backend=%s  ctx=%d  tools=%zu  preset=%s\n"
+        "                backend=%s  ctx=%d  tools=%zu  preset=%s%s\n"
         "                profile=%s\n"
         "                sampling: temp=%.2f  top_p=%.2f  top_k=%d  min_p=%.2f\n"
         "                penalties: repeat=%.2f  presence=%.2f  frequency=%.2f\n"
@@ -6825,6 +6861,7 @@ int main(int argc, char ** argv) {
         ctx->model_id.c_str(), ctx->engine.backend_summary().c_str(),
         ctx->engine.n_ctx(), ctx->default_tools.size(),
         ctx->default_preset.name.c_str(),
+        ctx->preset_authoritative() ? " (authoritative — overrides request sampling)" : "",
         args.matched_profile.empty() ? "(none)" : args.matched_profile.c_str(),
         ctx->def_temperature, ctx->def_top_p, ctx->def_top_k, ctx->def_min_p,
         args.repeat_penalty,
@@ -7183,6 +7220,11 @@ int main(int argc, char ** argv) {
                 }},
                 {"n_ctx", ctx_ref.engine.n_ctx()},
             };
+            p["preset"] = ctx_ref.default_preset.name;
+            // True → the preset above overrides per-request sampling knobs
+            // (temperature/top_p/top_k) and inline presets. reasoning_effort
+            // is unaffected and stays client-overridable.
+            p["preset_authoritative"] = ctx_ref.preset_authoritative();
             p["endpoint_props"]   = false;
             p["endpoint_slots"]   = false;
             p["endpoint_metrics"] = ctx_ref.api_key.empty();   // hint

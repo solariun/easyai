@@ -200,11 +200,11 @@ Where the preset name shows up across the server:
 | `install_easyai_server.sh --preset NAME` | Bakes the chosen name into the INI template. The line itself stays commented (operator un-comments to pin); explicit `temperature`/`top_k`/... overrides below WIN when both are set. |
 | `/etc/easyai/easyai.ini` `[ENGINE] preset` | Server reads at startup. Survives restarts. |
 | `easyai-server --preset NAME` | Wins over INI for THIS launch. |
-| `GET /health` `.preset` field | Liveness probe reports the active preset name. |
+| `GET /health` `.preset` / `.preset_authoritative` fields | Liveness probe reports the active preset name and whether it overrides per-request sampling (`/props` reports the same pair). |
 | `POST /v1/preset` body `{"preset":"NAME"}` | Live swap. Sets the server-wide ambient default for every subsequent request — no restart. |
 | Webui **`default` badge** | First button in the tone bar. Resolves to the server's currently-active preset (read at page-load from the values baked into the bundle's injected JS). New sessions start here when `localStorage` has no prior choice; existing sessions keep whatever the user last cycled to. |
-| Webui named badges | `auto` / `deterministic` / `precise` / `balanced` / `creative` / `wild` — per-session client-side override. Affects only requests THIS browser tab sends; doesn't change the server's ambient default. Persists in `localStorage`. The inline webui also carries a **reasoning effort** row (`auto` / `low` / `medium` / `high`) that sets the per-request `reasoning_effort` body field. |
-| Inline preset command | First word in the user's message (`creative 0.9 …`, `precise …`). `parse_preset()` peels the prefix; the rest becomes the actual prompt. Per-turn override. |
+| Webui named badges | `auto` / `deterministic` / `precise` / `balanced` / `creative` / `wild` — per-session client-side override. Affects only requests THIS browser tab sends; doesn't change the server's ambient default. Persists in `localStorage`. **Ignored server-side when the active preset is authoritative** (see below). The inline webui also carries a **reasoning effort** row (`auto` / `low` / `medium` / `high`) that sets the per-request `reasoning_effort` body field — this is *never* suppressed by an authoritative preset. |
+| Inline preset command | First word in the user's message (`creative 0.9 …`, `precise …`). `parse_preset()` peels the prefix; the rest becomes the actual prompt. Per-turn override — but **its sampling has no effect when the active preset is authoritative** (the prefix is still stripped from the prompt). |
 
 The explicit per-knob overrides (`temperature`, `top_p`, `top_k`,
 `min_p`, …) WIN over the preset's baseline values when both are set,
@@ -214,6 +214,34 @@ installer's default config works — `preset` left commented, with
 explicit `temperature = 0.5` / `top_k = 64` / `presence_penalty =
 1.5` tuned for long agentic flows on the AI box (see
 [`design.md` §4b](design.md#4b-sampling-and-the-penalty-stack)).
+
+#### Authoritative presets (per-request precedence)
+
+The rule above is **startup-time**: CLI / INI per-knob overrides shape the
+*baseline* the server boots with. At **request time** the active preset
+decides who wins:
+
+- **`auto` (the default) — the client drives.** A request's
+  `temperature` / `top_p` / `top_k` body fields override the baseline, and an
+  inline preset (`creative 0.9 …`) overrides those in turn. Standard OpenAI
+  behaviour.
+- **Any concrete preset (`deterministic` / `precise` / `balanced` /
+  `creative` / `wild`) — the server decides.** The preset is **authoritative**:
+  its sampling numbers are imposed and a request's `temperature` / `top_p` /
+  `top_k` and any inline preset are **ignored**. `GET /health` and `/props`
+  report `preset_authoritative: true`, and the startup banner tags the preset
+  line accordingly.
+
+  Note this is exactly the operator's intent when pinning a preset on a shared
+  server: clients can't quietly dial sampling away from the configured policy.
+  To hand control back, set the preset to `auto` (`POST /v1/preset
+  {"preset":"auto"}`, `--preset auto`, or `[ENGINE] preset = auto`).
+
+**`reasoning_effort` is exempt from this switch.** A preset carries only
+sampling numbers, never an effort level, so a per-request `reasoning_effort`
+body field always wins over the server's ambient default — *regardless* of
+which preset is pinned. Pinning an authoritative sampling preset never silently
+changes or suppresses a client's reasoning effort.
 
 ### `[MODEL_<pattern>]` — per-model ENGINE overrides
 
