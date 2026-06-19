@@ -589,8 +589,8 @@ async function loadStatus(){
 
   $('#statusWrap').innerHTML=`<div class="stgrid">`+
     `<div class="stcol">${serverCard}${modelCard}${paramsCard}</div>`+
-    `<div class="stcol">${servicesCard}${metricsCard}</div>`+
-    `<div class="stcol">${hwCard}${catCard}${dlCard}</div>`+
+    `<div class="stcol">${servicesCard}</div>`+
+    `<div class="stcol">${hwCard}${catCard}${dlCard}${metricsCard}</div>`+
     `</div>`;
   scheduleStatus();
 }
