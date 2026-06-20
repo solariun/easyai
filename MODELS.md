@@ -22,9 +22,11 @@ It does four things:
    header — architecture, params, layers, heads, quant, context…), whether it
    **fits** this hardware, and the matching **`[MODEL_*]` INI profile** with its
    values.
-3. **Run (hot-swap)** — one click **releases the running model and loads the
-   chosen one in place**, with no server restart, updating the `ai.gguf` symlink
-   so the choice survives reboots.
+3. **Run / Slink (hot-swap + default)** — **Run** releases the running model and
+   loads the chosen one **in place**, no restart (an in-memory swap that reverts
+   to `--model` on the next start). **Slink** points the `ai.gguf` symlink at a
+   model so it becomes the default on the next start (no reload). **Run + slink**
+   does both — load now and persist the choice.
 4. **Download manager** — fetches GGUF weights from HuggingFace into the model
    directory with progress / cancel, and lists / deletes what's already there.
 
@@ -32,6 +34,15 @@ It does four things:
 > in, browse the **Recommend** table, or go to **Local models**, click a model,
 > and hit **Run**. **Change the password** (`webui_password` in
 > `/etc/easyai/easyai.ini`) before the box leaves your LAN.
+
+> **In the terminal:** the same four things are available headless from
+> **easyai-cli** — `easyai-cli --url <server> --llm-manager` opens a full-screen
+> TUI with the same **Status · Local · Recommend · Downloads** tabs (run /
+> hot-swap / symlink / delete, download with a live progress bar, browse the
+> fit-scored catalogue). It drives these same `/models/api/*` endpoints over the
+> OpenAI-compatible transport. A one-shot `easyai-cli --url <server> --status`
+> (or the `/status` slash command in any interactive session) prints the Status
+> tab's data as colorized panels. See `easyai-cli.md` §3b.
 
 ---
 
@@ -175,21 +186,24 @@ the server's `api_key` Bearer auth on `/v1/*`.
 
 ---
 
-## 6. Run / hot-swap mechanics
+## 6. Run / Slink mechanics
 
-Clicking **Run** on a local model:
+Running and the boot default are **decoupled** — a Run never touches the symlink:
 
-1. Validates the filename and resolves it inside `download_dir`.
-2. If the server's configured `--model` path is a **symlink** (the `ai.gguf`
-   convention from the installer), re-points it at the chosen file so the choice
-   **persists across restarts**.
-3. Calls `Engine::reload(<file>)` **under the engine lock** — any in-flight chat
-   finishes first, then the current model/context/sampler/templates are freed and
-   the new model is loaded with the same context/ngl/sampling settings.
-4. Re-applies the server's default system prompt + tools and updates the model id
-   advertised by `/v1/models`.
+- **Run** (`/models/api/run`, `link:false`) — validates + resolves the file inside
+  `download_dir`, then calls `Engine::reload(<file>)` **under the engine lock** (any
+  in-flight chat finishes first; the model/context/sampler/templates are freed and
+  the new model loads with the same context/ngl/sampling), re-applies the default
+  system prompt + tools, and updates the `/v1/models` id. **In memory only** — on
+  the next restart the server loads its configured `--model` again.
+- **Slink** (`/models/api/symlink`) — points the `--model` path (the `ai.gguf`
+  symlink convention from the installer) at the chosen file, so it becomes the
+  default **on the next start**. No reload; the running model is unchanged. Refuses
+  if `--model` is a real file rather than a symlink (it won't overwrite a model).
+- **Run + slink** (`/models/api/run`, `link:true`) — both: load now **and** persist
+  the choice via the symlink.
 
-No process restart; the dashboard stays live and reflects the new running model.
+No process restart; the dashboard stays live and reflects the running model.
 
 ---
 
@@ -227,7 +241,8 @@ is set.
 | GET | `/models/api/local` | `{dir, models:[{name, size_bytes, mtime, is_current}]}`. |
 | GET | `/models/api/local/detail?file=<name>` | GGUF params + fit + `[MODEL_*]` profile for one local model. |
 | POST | `/models/api/local/delete` | `{"name":"…"}` → delete one `.gguf`. |
-| POST | `/models/api/run` | `{"name":"…"}` → hot-swap to that local model. |
+| POST | `/models/api/run` | `{"name":"…", "link":false}` → hot-swap to that local model (in memory). `link:true` also re-points the `ai.gguf` symlink. |
+| POST | `/models/api/symlink` | `{"name":"…"}` → point the `--model` symlink at that local model (default on next start; no reload). |
 | GET | `/models/api/hf/files?repo=<repo>` | List `.gguf` files (`{path, size_bytes}`) in a HF repo. |
 | POST | `/models/api/download` | `{"repo":"…","filename":"…"?}` → start a download (409 if one is running). |
 | GET | `/models/api/download/status` | `{id, repo, filename, state, downloaded_bytes, total_bytes, percent, error}`. |

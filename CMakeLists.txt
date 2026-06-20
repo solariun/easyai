@@ -164,6 +164,7 @@ set(EASYAI_SOURCES
     src/presets.cpp
     src/plan.cpp
     src/models_dashboard.cpp
+    src/model_manager.cpp
     src/ui.cpp
     src/tui.cpp
     src/log.cpp

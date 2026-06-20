@@ -69,6 +69,12 @@ struct Hooks {
     // /models dialog source + apply.
     std::function<std::vector<std::string>()> list_models;
     std::function<void(const std::string &)>  set_model;
+    // /status: show the comprehensive live server-status view. The TUI
+    // suspends its own terminal (alt-screen + raw mode) around the call,
+    // so the hook is free to take over the screen; when it returns the
+    // chat view is repainted. Missing hook → /status falls back to the
+    // inline url/model/ctx toast.
+    std::function<void()> status_screen;
 };
 
 // Run the interactive loop until /exit, double ctrl+c, or ctrl+d on an

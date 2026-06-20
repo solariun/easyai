@@ -110,9 +110,10 @@ on the command line and stdin.
 | **TUI** (default interactive) | No `-p`, no positional prompt, stdin **and** stdout are TTYs | Full-screen chat (opencode-style look & feel): bordered multiline prompt with `/`-command and `@`-file completion, markdown rendering, live tool rows with diffs, todo checklist, status/footer bars, themes. `enter` sends, `shift+enter`/`ctrl+j` newline, `esc esc` interrupts, `ctrl+c ctrl+c` or `/exit` quits, `/help` lists everything. Falls back to the line REPL on `--plain`, `--quiet`, or any non-TTY end. |
 | **REPL** (legacy) | Same as TUI but with `--plain` (or `[cli] tui = off`) | Interactive line loop. Green `●` prompt. Ctrl-C stops generation and returns to prompt. `/exit` or `Ctrl-D` to quit. |
 | **Shell** | `--shell` | Hybrid AI shell. Normal commands via `$SHELL`, lines prefixed with `>` go to the AI. `cd`/`export`/`unset` persist. See [§3a](#3a-shell-mode). |
+| **Model manager** | `--llm-manager` (alias `--model-manager`) | Full-screen TUI for the server's `/models` dashboard — in the terminal. Tabs: **Status · Local · Recommend · Downloads**. Browse the HuggingFace catalogue with hardware-fit scoring, run / hot-swap / symlink / delete local GGUFs, download new ones with a live progress bar, and watch comprehensive live status. `tab`/`shift+tab`/`1-4` switch tabs, `↑↓` move, `enter` opens detail, `?` lists keys, `q` quits. Non-TTY → prints `--status` once and exits. See [§3b](#3b-model-manager). |
 | **One-shot** | `-p <text>` OR a positional argument | Send the single prompt, stream the reply, exit. |
 | **Piped** | stdin is a pipe (anything redirected in) | Reads stdin into the prompt and runs once. Same as one-shot. |
-| **Management** | `--list-models`, `--list-tools`, `--list-remote-tools`, `--health`, `--props`, `--metrics`, `--set-preset`, `--show-system-prompt` | Hits the named endpoint (or, for `--show-system-prompt`, just resolves locally), prints the result, exits. No chat. See [§14](#14-management-subcommands). |
+| **Management** | `--list-models`, `--list-tools`, `--list-remote-tools`, `--health`, `--props`, `--metrics`, `--status`, `--set-preset`, `--show-system-prompt` | Hits the named endpoint (or, for `--show-system-prompt`, just resolves locally), prints the result, exits. No chat. See [§14](#14-management-subcommands). |
 
 The modes are mutually exclusive: passing `-p` AND a management flag is
 an error.
@@ -142,7 +143,13 @@ The prompt shows the current directory (abbreviated with `~`).
 | `unset VAR` | Removes env var. |
 
 **Slash commands** — same as the REPL: `/exit`, `/quit`, `/clear`,
-`/reset`, `/compress`, `/plan`, `/tools`, `/help`.
+`/reset`, `/compress`, `/plan`, `/tools`, `/status`, `/help`.
+
+`/status` (available in the TUI, the line REPL and shell mode) shows the
+full live server status — the same comprehensive view as `--status` and
+the model manager's Status tab. In the full-screen TUI it opens a live,
+auto-refreshing status screen (`q` returns to the chat); in the line
+REPL / shell it prints the status panels inline.
 
 ### Ctrl-C and SIGTERM
 
@@ -158,6 +165,32 @@ Shell-like single-Ctrl-C — no escalation, no multi-step dance.
 Exit via `/exit`, `/quit`, or `Ctrl-D` (EOF). The triple-rapid
 force-exit is the escape hatch for stuck streams or deadlocked tool
 handlers.
+
+### 3b. Model manager
+
+`--llm-manager` (alias `--model-manager`) launches a full-screen,
+interactive front end for the server's `/models` dashboard — the same
+catalogue scoring, GGUF introspection and download manager the web UI
+exposes, driven over the same OpenAI-compatible transport (so endpoint,
+`--api-key`, TLS and retries all apply, and a `--webui-password`-gated
+server needs the cookie). It needs a capable TTY; piped/redirected runs
+fall back to a one-shot `--status` dump.
+
+```bash
+easyai-cli --url http://ai.local:8080 --llm-manager
+```
+
+Four tabs:
+
+| Tab | What it shows / does |
+| --- | --- |
+| **Status** | Live, auto-refreshing (~2 s) comprehensive status — identical to `--status`: server, running model, active sampling parameters, services & tools, hardware, catalogue, downloads, request metrics. |
+| **Local** | Installed `.gguf` files (the `●` marks the running model), with size and date. `enter` opens a detail panel (architecture, params, quant, fit score). Actions: `r` run / hot-swap (in-memory; reverts on restart), `s` set as default (points the `ai.gguf` symlink), `d` delete (confirms first). |
+| **Recommend** | HuggingFace recommendations ranked by hardware fit — params, best quant, fit label, run mode, score, est. tok/s, downloads. `/` search, `f` cycle min-fit, `u` cycle use-case, `R` rebuild the catalogue from HuggingFace, `enter` for detail (where `d` downloads the best quant). |
+| **Downloads** | Active download with a live progress bar (`c` cancels). `e` enter a HuggingFace repo, `l` list its GGUF files, `enter`/`d` download the selected file. |
+
+Keys: `tab` / `shift+tab` / `1`–`4` switch tabs, `↑↓` and `pgup`/`pgdn`
+move, `enter` opens detail, `?` shows the key list, `q` / `ctrl+c` quits.
 
 ---
 
@@ -254,6 +287,8 @@ See [§14](#14-management-subcommands) for the full picture.
 | `--health` | `GET /health`. |
 | `--props` | `GET /props`. |
 | `--metrics` | `GET /metrics` (Prometheus text). |
+| `--status` | `GET /models/api/status` — comprehensive server status (running model, active sampling parameters, services & tools, hardware, catalogue, downloads, request metrics: everything the webui `/models` Status tab shows), printed as colorized panels. Also reachable mid-session as the `/status` slash command. |
+| `--llm-manager` | Launch the full-screen model-manager TUI (alias `--model-manager`). See the **Model manager** mode above and [§3b](#3b-model-manager). |
 | `--set-preset NAME` | `POST /v1/preset {preset:NAME}`. |
 | `--show-system-prompt` | Print the **resolved** system prompt (built-in `[environment]` + `[guidance]` injection PLUS `--system` / `--system-file` content) and exit. Does NOT contact the server — useful for confirming what the model would see, including without a working `--url`. |
 
@@ -879,6 +914,8 @@ runs.
 | `--health` | `GET /health`. Prints `ok` / `unhealthy: <reason>`. |
 | `--props` | `GET /props`. Server-side configuration dump. |
 | `--metrics` | `GET /metrics`. Prometheus exposition. |
+| `--status` | `GET /models/api/status`. Prints the comprehensive server status as colorized panels — server state/uptime/backend, running model + KV usage, active sampling parameters, services & tools, hardware, catalogue, active download, request metrics. The terminal equivalent of the webui `/models` Status tab; also reachable mid-session via the `/status` slash command (which, in the full-screen TUI, opens a live auto-refreshing version). easyai-server extension (404s against plain OpenAI-compat servers). |
+| `--llm-manager` | Not a print-and-exit subcommand — launches the interactive [model-manager TUI](#3b-model-manager) (alias `--model-manager`). Listed here because it's the other `/models`-dashboard entry point. |
 | `--set-preset NAME` | `POST /v1/preset {preset:NAME}`. Switches the server's ambient sampling preset (easyai-server extension). |
 | `--show-system-prompt` | Resolve and print the system prompt the CLI would send on the next turn — built-in `[environment]` + `[guidance]` injection plus any `--system` / `--system-file` content. Does NOT contact the server, so it works without a reachable `--url`. The fastest way to verify "is the model actually seeing my persona / sandbox / guidance?". |
 

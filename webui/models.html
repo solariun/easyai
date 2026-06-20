@@ -406,6 +406,7 @@ async function loadLocal(){
       <td class="num" onclick="localDetail('${esch(m.name)}',this.parentNode)">${fmtBytes(m.size_bytes)}</td>
       <td class="num" style="white-space:nowrap">
         <button class="btn small acc" onclick="runModel('${esch(m.name)}')" ${m.is_current?'disabled':''}>Run</button>
+        <button class="btn small" onclick="slinkModel('${esch(m.name)}')" title="Set as default model (symlink); effective next start">Slink</button>
         <button class="btn small danger" onclick="delModel('${esch(m.name)}')" ${m.is_current?'disabled':''}>Delete</button></td></tr>`).join('');
     let html=`<table><thead><tr><th>File</th><th class="num">Size</th><th class="num">Actions</th></tr></thead><tbody>${rows}</tbody></table>`;
     $('#localWrap').innerHTML=html;$('#dlLocalWrap').innerHTML=html;
@@ -443,17 +444,28 @@ async function localDetail(file,tr){
       <div class="sect scores"><h3>Fit on this hardware · ${f.score}</h3>
         ${scoreBar('Quality',sc.quality)}${scoreBar('Speed',sc.speed)}${scoreBar('Fit',sc.fit)}${scoreBar('Context',sc.context)}</div>
       ${prof}
-      <div class="sect" style="display:flex;gap:8px">
-        <button class="btn acc grow" onclick="runModel('${esch(file)}')" ${d.is_current?'disabled':''}>${d.is_current?'Currently running':'Run this model'}</button>
+      <div class="sect" style="display:flex;flex-wrap:wrap;gap:8px">
+        <button class="btn acc grow" onclick="runModel('${esch(file)}')" ${d.is_current?'disabled':''}>${d.is_current?'Currently running':'Run (this session)'}</button>
+        <button class="btn" onclick="slinkModel('${esch(file)}')" title="Point the --model symlink here; effective next start, no reload">Slink</button>
+        <button class="btn" onclick="runModel('${esch(file)}',true)" ${d.is_current?'disabled':''} title="Run now AND set as default">Run + slink</button>
         <button class="btn danger" onclick="delModel('${esch(file)}')" ${d.is_current?'disabled':''}>Delete</button></div>
       ${d.gguf_readable?'':'<div class="muted small" style="margin-top:8px">GGUF header could not be fully read; values estimated from file size.</div>'}`;
   }catch(e){$('#localDetail').innerHTML='<div class="empty">'+esch(e.message)+'</div>';}
 }
-async function runModel(name){
-  if(!confirm('Release the current model and run "'+name+'"? In-flight requests finish first.'))return;
+async function runModel(name,link){
+  const msg=link?'Run "'+name+'" now AND set it as the default model (symlink) for the next start?'
+               :'Run "'+name+'" now? In-flight requests finish first. This does NOT change the boot default — use Slink for that.';
+  if(!confirm(msg))return;
   toast('Loading '+name+' …');
-  try{await api('/models/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
-    toast('Now running '+name);loadLocal();}catch(e){toast(e.message,true);}
+  try{let r=await api('/models/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,link:!!link})});
+    if(link&&!r.linked)toast('Running '+name+', but symlink failed: '+(r.link_error||'unknown'),true);
+    else toast('Now running '+name+(link?' (set as default)':''));
+    loadLocal();}catch(e){toast(e.message,true);}
+}
+async function slinkModel(name){
+  if(!confirm('Set "'+name+'" as the default model? Points the --model symlink at it — effective on the next restart; the running model is unchanged.'))return;
+  try{await api('/models/api/symlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    toast(name+' set as default (symlink)');loadLocal();}catch(e){toast(e.message,true);}
 }
 async function delModel(name){
   if(!confirm('Delete "'+name+'" from disk? This cannot be undone.'))return;

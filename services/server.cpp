@@ -3470,264 +3470,144 @@ static bool require_auth(const ServerCtx & ctx, const httplib::Request & req,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Point the configured model path (the `ai.gguf` symlink convention) at
+// `target`, so the choice survives a restart. The MODELS dashboard's Slink /
+// Run+slink actions call this; a plain Run never touches the link. Safe:
+// re-points an existing symlink, creates one when nothing is there, and
+// REFUSES to clobber a real regular file. Returns false + err on failure.
+// ---------------------------------------------------------------------------
+static bool set_model_symlink(const std::string & link_path, const std::string & target,
+                              std::string & err) {
+    if (link_path.empty()) { err = "no --model path configured to link"; return false; }
+    std::error_code ec;
+    std::filesystem::path link = link_path;
+    if (std::filesystem::is_symlink(link, ec)) {
+        std::filesystem::remove(link, ec);
+        if (ec) { err = "cannot replace existing symlink: " + ec.message(); return false; }
+    } else if (std::filesystem::exists(link, ec)) {
+        err = "model path '" + link_path + "' is a real file, not a symlink — refusing to "
+              "overwrite it. Point --model at an ai.gguf symlink to use Slink.";
+        return false;
+    }
+    std::filesystem::create_symlink(target, link, ec);
+    if (ec) { err = "create symlink failed: " + ec.message(); return false; }
+    return true;
+}
+
 // ============================================================================
 // main
 // ============================================================================
 
 [[noreturn]] static void die_usage(const char * argv0) {
     std::fprintf(stderr,
-        "Usage: %s -m model.gguf [options]\n\n"
-        "Required:\n"
-        "  -m, --model <path>           GGUF model file\n"
-        "\nNetwork:\n"
-        "      --host <addr>            Bind address (default 127.0.0.1).\n"
-        "                                Use 0.0.0.0 to listen on every IPv4\n"
-        "                                interface (LAN, docker, etc.).\n"
-        "      --port <n>               TCP port (default 8080)\n"
-        "      --max-body <bytes>       Max request body size (default 8 MiB)\n"
-        "      --config <path>          Central INI config file. Default\n"
-        "                                /etc/easyai/easyai.ini. Provides\n"
-        "                                defaults for almost every flag\n"
-        "                                below — explicit CLI flags override\n"
-        "                                the INI value. Sections: [SERVER],\n"
-        "                                [ENGINE], [MCP_USER] (Bearer-token\n"
-        "                                auth for /mcp). Missing file = use\n"
-        "                                hardcoded defaults + open MCP.\n"
-        "      --no-mcp-auth            Force /mcp to accept requests with\n"
-        "                                NO Bearer token even if the INI's\n"
-        "                                [MCP_USER] section has entries.\n"
-        "                                Emergency/dev override — disables\n"
-        "                                what the INI explicitly enabled.\n"
-        "\nDefault system prompt + tools:\n"
-        "  -s, --system-file <path>     Server-default system prompt from file\n"
-        "      --system <text>          Inline system prompt\n"
-        "      --no-local-tools         Don't expose the LOCAL built-in\n"
-        "                                toolbelt (datetime, web_*, *_file,\n"
-        "                                bash, etc). Has no effect on memory\n"
-        "                                (--memory), external tools\n"
-        "                                (--external-tools), or remote\n"
-        "                                tools fetched via --mcp — those\n"
-        "                                are governed by their own flags.\n"
-        "      --mcp <url>              Connect to a remote MCP server as\n"
-        "                                a CLIENT and merge its tool\n"
-        "                                catalogue into ours. Format:\n"
-        "                                http(s)://host:port (the /mcp\n"
-        "                                endpoint is appended). Local-tool\n"
-        "                                names take precedence on collision.\n"
-        "      --mcp-token <token>      Bearer token for --mcp. Empty (the\n"
-        "                                default) sends no Authorization\n"
-        "                                header — use this when the\n"
-        "                                upstream is in open mode.\n"
-        "      --http-retries N         Extra attempts on transient HTTP\n"
-        "                                failures (connect refused, read\n"
-        "                                timeout, 5xx). Applies to the MCP\n"
-        "                                client (--mcp), the unified `web`\n"
-        "                                tool, and any other libcurl-based\n"
-        "                                tool. 0 disables. Default 5.\n"
-        "                                Each retry logs to stderr.\n"
-        "      --http-timeout SECONDS   HTTP read/write timeout for the\n"
-        "                                listen socket AND the MCP-client\n"
-        "                                connection. Bumped from llama-server's\n"
-        "                                60 s to 600 s default to accommodate\n"
-        "                                long thinking turns. INI key:\n"
-        "                                [SERVER] http_timeout. Logged\n"
-        "                                unconditionally at startup.\n"
-        "      --sandbox <dir>          Set the working root for the unified\n"
-        "                                `fs` tool and `bash` AND the cwd /\n"
-        "                                external-tools root / fs(action=\n"
-        "                                \"sandbox\") target. Setting --sandbox\n"
-        "                                alone does NOT register fs / bash —\n"
-        "                                pass --allow-fs / --allow-bash for that.\n"
-        "                                Without --sandbox the tools default\n"
-        "                                to the server's cwd.\n"
-        "      --allow-fs               Register the unified `fs` tool\n"
-        "                                (action=read / write / list / glob /\n"
-        "                                grep / check_path / cwd / sandbox).\n"
-        "                                Scoped to --sandbox dir if given,\n"
-        "                                otherwise the server's cwd.\n"
-        "                                Required even when --sandbox is set;\n"
-        "                                INI [SERVER] allow_fs=on is equivalent.\n"
-        "      --allow-bash             Register the `bash` tool (run shell\n"
-        "                                commands). cwd = --sandbox dir if\n"
-        "                                given, otherwise the server's cwd.\n"
-        "                                NOT a hardened sandbox — the\n"
-        "                                command runs with the server's\n"
-        "                                user privileges.\n"
-        "      --allow-python           Register the `evaluate` (python3)\n"
-        "                                tool. OFF by default. Stdlib-only\n"
-        "                                interpreter (no PYTHON* env, no\n"
-        "                                site-packages, no cwd on sys.path);\n"
-        "                                disk access is auto-restricted to\n"
-        "                                the sandbox root via a Python\n"
-        "                                preamble. NOT a hardened sandbox —\n"
-        "                                the interpreter has full uid/gid\n"
-        "                                and `import os` / `import socket`\n"
-        "                                / `import subprocess` all work.\n"
-        "                                Enable with --allow-python or\n"
-        "                                [SERVER] allow_python = on.\n"
-        "      --use-google             Enable engine=\"google\" inside the\n"
-        "                                unified `web` tool (Google Custom\n"
-        "                                Search JSON API). Requires both\n"
-        "                                GOOGLE_API_KEY and GOOGLE_CSE_ID env\n"
-        "                                vars; counts against Google's quota\n"
-        "                                (free tier: 100 queries/day per key).\n"
-        "                                The default engine \"ddg\" works\n"
-        "                                without env vars and any opt-in.\n"
-        "      --external-tools <dir>   Load every EASYAI-*.tools file in <dir>\n"
-        "                                as an external-tools manifest. Empty\n"
-        "                                directory is a normal state (no extra\n"
-        "                                tools). Per-file errors are logged and\n"
-        "                                skipped; other files still load. The\n"
-        "                                server logs every load error AND every\n"
-        "                                security sanity-check warning to stderr.\n"
-        "                                See EXTERNAL_TOOLS.md for the schema and\n"
-        "                                collaboration workflow.\n"
-        "      --memory <dir>           Enable the agent's persistent memory\n"
-        "                                store (alias: --RAG). Each entry is\n"
-        "                                one Markdown file in <dir>.\n"
-        "                                Registers ONE `memory(action=...)` tool\n"
-        "                                with sub-actions save / append /\n"
-        "                                search / load / list / delete /\n"
-        "                                keywords. The installed systemd unit\n"
-        "                                always passes this flag; manual\n"
-        "                                invocations need it explicitly. See\n"
-        "                                RAG.md.\n"
-        "\nModel tuning (apply on top of --preset):\n"
-        "      --preset <name>          Ambient preset (default 'auto').\n"
-        "                                Choices: auto (model default — no\n"
-        "                                preset imposed), deterministic,\n"
-        "                                precise, balanced, creative, wild.\n"
-        "                                See README.md for what each implies.\n"
-        "      --temperature <f>        Override temperature (0.0-2.0)\n"
-        "      --top-p <f>              Override nucleus sampling p\n"
-        "      --top-k <n>              Override top-k\n"
-        "      --min-p <f>              Override min-p\n"
-        "      --repeat-penalty <f>     Repetition penalty (default 1.15 —\n"
-        "                                anti-loop safety net; pass 1.0 to\n"
-        "                                disable).  INI: [ENGINE] repeat_penalty.\n"
-        "      --presence-penalty <f>   Presence penalty ([-2.0, 2.0]; OpenAI\n"
-        "                                semantics — fixed amount per token\n"
-        "                                that has already appeared at all,\n"
-        "                                regardless of frequency). Default 0.0\n"
-        "                                (disabled). INI: [ENGINE] presence_penalty.\n"
-        "      --max-tokens <n>         Cap tokens generated per request\n"
-        "      --seed <u32>             RNG seed (0 = random)\n"
-        "      --max-incomplete-retries <n>\n"
-        "                               How many times the engine retries when\n"
-        "                                the model finishes a turn with no\n"
-        "                                tool_call and only an 'announce'\n"
-        "                                snippet ('Let me…', 'I'll…'). Each\n"
-        "                                retry discards the bad turn, appends\n"
-        "                                a corrective user message, and runs\n"
-        "                                the model again. Default 10 — sane\n"
-        "                                floor for 1-bit quants (Bonsai,\n"
-        "                                BitNet); 0 disables retries; bump to\n"
-        "                                15-20 for weak models that keep\n"
-        "                                announcing-without-acting. Each retry\n"
-        "                                surfaces in the webui Thinking panel.\n"
-        "\nCompute / memory:\n"
-        "  -c, --ctx <n>                Context size (default 8192)\n"
-        "      --batch <n>              Logical batch size (default = ctx)\n"
-        "      --ngl <n>                GPU layers (-1=auto, 0=CPU)\n"
-        "  -t, --threads <n>            CPU threads\n"
-        "\nKV cache (all optional):\n"
-        " -ctk, --cache-type-k <type>   K-cache dtype (f32|f16|bf16|q8_0|q4_0|q4_1|q5_0|q5_1|iq4_nl)\n"
-        " -ctv, --cache-type-v <type>   V-cache dtype (same options)\n"
-        "-nkvo, --no-kv-offload         Keep KV cache on CPU even with GPU layers\n"
-        "      --kv-unified             Use a single unified KV buffer across sequences\n"
-        "      --override-kv <k=t:v>    Override a GGUF metadata entry (repeatable)\n"
-        "                                Types: int|float|bool|str\n"
-        "\nSpeculative decoding (all optional):\n"
-        "      --spec-type <type>       none (default; off), draft-mtp (MTP-trained\n"
-        "                                 model, no draft file needed), draft-simple,\n"
-        "                                 draft-eagle3, ngram-simple|map-k|map-k4v|\n"
-        "                                 mod|cache. INI key: [ENGINE] spec_type.\n"
-        "      --spec-draft-n-max <n>   Max draft tokens per speculation step. Typical\n"
-        "                                 MTP: 6. Default 16 when --spec-type is set,\n"
-        "                                 unused when --spec-type=none. INI key:\n"
-        "                                 [ENGINE] spec_draft_n_max.\n"
-        "      --draft-model <path>     GGUF path for the draft model (draft-simple /\n"
-        "                                 draft-eagle3). Must share vocabulary with the\n"
-        "                                 target. INI key: [ENGINE] spec_draft_model.\n"
-        "\nChat template / reasoning (llama-server compat):\n"
-        "      --chat-template-file <p> Override the GGUF's embedded chat template\n"
-        "                                 with a Jinja file on disk (e.g. qwen3-\n"
-        "                                 think.jinja). Empty = use the model's\n"
-        "                                 template. INI key: [ENGINE]\n"
-        "                                 chat_template_file.\n"
-        "      --reasoning-format <fmt> Reasoning-content extraction format:\n"
-        "                                 none|auto|deepseek|deepseek-legacy.\n"
-        "                                 Default auto (≡ deepseek for Qwen3 /\n"
-        "                                 R1 templates). INI key: [ENGINE]\n"
-        "                                 reasoning_format.\n"
-        "      --reasoning-effort <lvl> How hard the model thinks, injected as\n"
-        "                                 the reasoning_effort chat-template\n"
-        "                                 kwarg (GPT-OSS et al.): auto|low|\n"
-        "                                 medium|high|max|minimal. Default auto\n"
-        "                                 (model default — inject nothing).\n"
-        "                                 Per-request `reasoning_effort` in the\n"
-        "                                 body overrides it. INI key: [ENGINE]\n"
-        "                                 reasoning_effort.\n"
-        "\nllama-server compatibility:\n"
-        "  -a,  --alias <name>          Public model id reported by /v1/models\n"
-        "       --api-key <key>         Require Bearer auth on every /v1 route\n"
-        "  -fa, --flash-attn            Force flash attention on\n"
-        "  -tb, --threads-batch <n>     Threads used for prompt-eval batches\n"
-        "  -np, --parallel <n>          Accepted for compat; warns when >1\n"
-        "       --mlock                 mlock model weights into RAM\n"
-        "       --no-mmap               Disable mmap (read GGUF straight in)\n"
-        "       --numa <strategy>       distribute|isolate|numactl|mirror\n"
-        "       --metrics               Expose Prometheus /metrics endpoint\n"
-        "       --metrics-interval SECS Periodic METRICS log line every SECS\n"
-        "                                seconds (CPU%%, mem, GPU GTT, load\n"
-        "                                avg, iowait, fd usage, TCP states\n"
-        "                                incl. explicit TIME_WAIT count + %%\n"
-        "                                of ephemeral port range with\n"
-        "                                elevated/HIGH/CRITICAL tag).\n"
-        "                                ALWAYS ON regardless of --verbose so\n"
-        "                                journalctl always carries the\n"
-        "                                telemetry. 0 disables. Default 300\n"
-        "                                (5 min). INI: [SERVER]\n"
-        "                                metrics_interval.\n"
-        "       --reasoning <on|off>    Enable model thinking (default on)\n"
-        "       --no-think              Strip <think>...</think> from replies\n"
-        "       --inject-datetime <on|off>\n"
-        "                               Append authoritative date/time + TZ + a\n"
-        "                               knowledge-cutoff hint to the system prompt\n"
-        "                               on EVERY request (default on).  Tells the\n"
-        "                               model to trust the server's clock and to\n"
-        "                               verify post-cutoff facts via tools.\n"
-        "       --knowledge-cutoff <YYYY-MM>\n"
-        "                               Model training-data cutoff hint used by\n"
-        "                               --inject-datetime.  Default '2024-10'.\n"
-        "  -v,  --verbose               Engine logs raw model output + parser\n"
-        "                                 actions to stderr — useful for debugging\n"
-        "                                 'why did it stop?' moments. Also logs\n"
-        "                                 HTTP-level → arrival / ← completion\n"
-        "                                 lines per request with running totals\n"
-        "                                 (in-flight, bytes in/out, errors).\n"
-        "                                 The periodic METRICS line is ALWAYS\n"
-        "                                 on (default every 5 min, see\n"
-        "                                 --metrics-interval) — independent of\n"
-        "                                 verbose.\n"
-        "       --show-system-prompt    Print the resolved persona (built-in\n"
-        "                                Deep default OR --system OR --system-\n"
-        "                                file content, in the same precedence\n"
-        "                                the running server uses) and exit\n"
-        "                                before any port is bound. Useful for\n"
-        "                                operators inspecting the persona\n"
-        "                                without bouncing the service.\n"
-        "\nWebui:\n"
-        "       --webui <mode>          'modern' (default — embedded llama-server-\n"
-        "                                derived bundle) or 'minimal' (small inline UI)\n"
-        "       --webui-title <text>    Title in the browser tab AND the sidebar\n"
-        "                                brand (default 'Box EasyAI')\n"
-        "       --webui-icon <path>     Favicon file (.ico|.png|.svg|.gif|.jpg|.webp);\n"
-        "                                also rendered before the brand title in the\n"
-        "                                sidebar / topbar\n"
-        "       --webui-placeholder <s> Input box placeholder (default 'Type a message…')\n"
-        "\n  -h, --help                   Show this help and exit\n",
-        argv0);
+        "Usage: %s -m model.gguf [options]\n"
+        "\n"
+        "Nearly every flag has an INI equivalent. Precedence:\n"
+        "  CLI flag  >  [section] key in the --config INI  >  built-in default.\n"
+        "Sections: [SERVER], [ENGINE], [MCP_USER] (Bearer auth for /mcp),\n"
+        "[MODEL_<glob>] (per-model [ENGINE] overrides). Default INI: /etc/easyai/easyai.ini.\n"
+        "Each option below shows its INI key, then the CLI flag(s).\n"
+        "\n"
+        "Required\n"
+        "  model  -m, --model <path>  GGUF file, or an ai.gguf symlink (Slink target).\n"
+        "\n"
+        "Global (no INI key)\n"
+        "    --config <path>       INI config file (default /etc/easyai/easyai.ini).\n"
+        "    --no-mcp-auth         Force /mcp open even if [MCP_USER] is set.\n"
+        "    --no-python           Force the python evaluate tool off.\n"
+        "    --show-system-prompt  Print the resolved system prompt and exit.\n"
+        "    -h, --help            Show this help and exit.\n"
+        "\n"
+        "[SERVER]  network & identity\n"
+        "  host          --host <addr>       Bind address (default 127.0.0.1; 0.0.0.0 = all).\n"
+        "  port          --port <n>          TCP port (default 8080).\n"
+        "  alias         -a, --alias <name>  Model id reported by /v1/models.\n"
+        "  api_key       --api-key <key>     Require Bearer auth on /v1/* (empty = open).\n"
+        "  max_body      --max-body <bytes>  Max request body (default 8 MiB).\n"
+        "  http_timeout  --http-timeout <s>  Socket + MCP read/write timeout (default 600).\n"
+        "  http_retries  --http-retries <n>  Retries on transient HTTP failures (default 5).\n"
+        "\n"
+        "[SERVER]  system prompt, tools & features\n"
+        "  system_file       -s, --system-file <p>         Server-default system prompt from a file.\n"
+        "  system_inline     --system <text>               Inline system prompt.\n"
+        "  local_tools       --no-local-tools              Drop the built-in toolbelt (datetime/web/fs/...).\n"
+        "  sandbox           --sandbox <dir>               Root for fs/bash/python (default: server cwd).\n"
+        "  allow_fs          --allow-fs                    Register the fs tool (read/write/list/glob/grep).\n"
+        "  allow_bash        --allow-bash                  Register the bash tool (runs as the server user).\n"
+        "  allow_python      --allow-python                Register the python3 evaluate tool (off default).\n"
+        "  use_google        --use-google                  Enable google in the web tool (needs GOOGLE_* env).\n"
+        "  external_tools    --external-tools <d>          Load EASYAI-*.tools manifests from <dir>.\n"
+        "  memory            --memory <dir>                Persistent memory store (alias --RAG).\n"
+        "  mcp               --mcp <url>                   Connect to a remote MCP server as a client.\n"
+        "  mcp_token         --mcp-token <tok>             Bearer token for --mcp (empty = open upstream).\n"
+        "  mcp_auth          (INI only)                    on|off - require Bearer on /mcp (cf. --no-mcp-auth).\n"
+        "  inject_datetime   --inject-datetime <on|off>    Append authoritative date/time (default on).\n"
+        "  knowledge_cutoff  --knowledge-cutoff <YYYY-MM>  Training-cutoff hint (default 2024-10).\n"
+        "  no_think          --no-think                    Strip <think>...</think> from replies.\n"
+        "  reasoning         --reasoning <on|off>          Enable model thinking (default on).\n"
+        "  metrics           --metrics                     Expose Prometheus /metrics.\n"
+        "  metrics_interval  --metrics-interval <s>        Periodic METRICS log line (default 300s; 0=off).\n"
+        "  verbose           -v, --verbose                 Log raw model output + per-request HTTP lines.\n"
+        "\n"
+        "[SERVER]  MODELS dashboard (/models)\n"
+        "  webui_password  --webui-password <pw>  Gate /models + its API (empty = open).\n"
+        "  download_dir    --download-dir <dir>   Where GGUF weights download / list / run from.\n"
+        "  data_dir        --data-dir <dir>       Catalog cache dir (default: download_dir).\n"
+        "  catalog_size    --catalog-size <n>     Most-recent GGUF repos, 1-1000 (default 1000).\n"
+        "\n"
+        "[SERVER]  webui\n"
+        "  webui_mode         --webui <mode>           modern (default) | minimal.\n"
+        "  webui_title        --webui-title <text>     Tab + sidebar brand title.\n"
+        "  webui_icon         --webui-icon <path>      Favicon (.ico/.png/.svg/.gif/.jpg/.webp).\n"
+        "  webui_placeholder  --webui-placeholder <s>  Input box placeholder text.\n"
+        "\n"
+        "[ENGINE]  runtime  (also valid under [MODEL_<glob>])\n"
+        "  context          -c, --ctx <n>             Context window (default 8192).\n"
+        "  batch            --batch <n>               Logical batch size (default = ctx).\n"
+        "  ngl              --ngl <n>                 GPU layers (-1=auto, 0=CPU).\n"
+        "  threads          -t, --threads <n>         Generation threads.\n"
+        "  threads_batch    -tb, --threads-batch <n>  Prompt-eval batch threads.\n"
+        "  parallel         -np, --parallel <n>       Parallel slots (warns when >1).\n"
+        "  flash_attn       -fa, --flash-attn         Force flash attention on.\n"
+        "  mlock            --mlock                   Lock weights into RAM.\n"
+        "  no_mmap          --no-mmap                 Disable mmap of the GGUF.\n"
+        "  numa             --numa <strategy>         distribute|isolate|numactl|mirror.\n"
+        "  split_mode       -sm, --split-mode <m>     none|layer|row (multi-GPU split).\n"
+        "  rope_scaling     --rope-scaling <type>     none|linear|yarn.\n"
+        "  rope_freq_scale  --rope-scale <f>          RoPE frequency scale.\n"
+        "  yarn_orig_ctx    --yarn-orig-ctx <n>       YaRN original context (0=model default).\n"
+        "\n"
+        "[ENGINE]  KV cache\n"
+        "  cache_type_k   -ctk, --cache-type-k <t>  K dtype (f16|q8_0|q4_0|...).\n"
+        "  cache_type_v   -ctv, --cache-type-v <t>  V dtype (same options).\n"
+        "  no_kv_offload  -nkvo, --no-kv-offload    Keep KV on CPU even with GPU layers.\n"
+        "  kv_unified     --kv-unified              Single unified KV buffer.\n"
+        "  override_kv    --override-kv <k=t:v>     Override GGUF metadata (repeatable).\n"
+        "\n"
+        "[ENGINE]  speculative decoding\n"
+        "  spec_type         --spec-type <type>      none|draft-mtp|draft-simple|draft-eagle3|ngram-*.\n"
+        "  spec_draft_n_max  --spec-draft-n-max <n>  Max draft tokens/step (default 16 when on).\n"
+        "  spec_draft_model  --draft-model <path>    Draft GGUF (shared vocab with target).\n"
+        "\n"
+        "[ENGINE]  chat template & reasoning\n"
+        "  chat_template_file  --chat-template-file <p>  Jinja template override (empty = model's).\n"
+        "  reasoning_format    --reasoning-format <f>    none|auto|deepseek|deepseek-legacy.\n"
+        "  reasoning_effort    --reasoning-effort <l>    auto|low|medium|high|max|minimal.\n"
+        "\n"
+        "[ENGINE]  sampling  (applied on top of --preset)\n"
+        "  preset                  --preset <name>               auto|deterministic|precise|balanced|creative|wild.\n"
+        "  temperature             --temperature <f>             Temperature 0.0-2.0 (alias --temp).\n"
+        "  top_p                   --top-p <f>                   Nucleus sampling p.\n"
+        "  top_k                   --top-k <n>                   Top-k.\n"
+        "  min_p                   --min-p <f>                   Min-p.\n"
+        "  repeat_penalty          --repeat-penalty <f>          Repetition penalty (default 1.15; 1.0=off).\n"
+        "  presence_penalty        --presence-penalty <f>        Presence penalty [-2,2] (default 0).\n"
+        "  frequency_penalty       --frequency-penalty <f>       Frequency penalty [-2,2] (default 0).\n"
+        "  max_tokens              --max-tokens <n>              Cap tokens generated per request.\n"
+        "  max_incomplete_retries  --max-incomplete-retries <n>  Retries on announce-without-act (default 10).\n"
+        "  seed                    --seed <u32>                  RNG seed (0=random).\n"
+        , argv0);
     std::exit(1);
 }
 
@@ -7711,25 +7591,17 @@ int main(int argc, char ** argv) {
     svr.Post("/models/api/run", [&](const httplib::Request & req, httplib::Response & res) {
         if (!models_require_auth(ctx_ref, req, res)) return;
         if (!models_ready(res)) return;
-        std::string name;
-        try { name = nlohmann::json::parse(req.body).value("name", ""); }
+        std::string name; bool want_link = false;
+        try { auto b = nlohmann::json::parse(req.body); name = b.value("name", ""); want_link = b.value("link", false); }
         catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
         std::string target, err;
         if (!ctx_ref.models->resolve_local(name, target, err)) {
             res.status = 400; res.set_content(error_json(err), "application/json"); return;
         }
-        // Re-point the configured model path if it is a symlink (the ai.gguf
-        // convention) so the choice survives restarts; the engine loads the
-        // real file below either way.
-        {
-            std::error_code ec;
-            std::filesystem::path link = args.model_path;
-            if (!link.empty() && std::filesystem::is_symlink(link, ec)) {
-                std::filesystem::remove(link, ec);
-                std::filesystem::create_symlink(target, link, ec);
-            }
-        }
         // Hot-swap under the engine lock (serialised against in-flight chats).
+        // The ai.gguf symlink is NOT touched here — a plain Run is an in-memory
+        // swap that reverts to the configured --model on restart. Pass
+        // link:true (the "Run + slink" button) to also persist the choice.
         bool ok; std::string load_err;
         {
             std::lock_guard<std::mutex> lk(ctx_ref.engine_mu);
@@ -7747,8 +7619,33 @@ int main(int argc, char ** argv) {
             res.set_content(error_json("failed to load model: " + load_err, "internal_error"), "application/json");
             return;
         }
-        std::fprintf(stderr, "[easyai-server] hot-swapped model -> %s\n", name.c_str());
-        nlohmann::ordered_json j{{"ok", true}, {"model", name}, {"model_id", ctx_ref.model_id}};
+        bool linked = false; std::string link_err;
+        if (want_link) linked = set_model_symlink(args.model_path, target, link_err);
+        std::fprintf(stderr, "[easyai-server] hot-swapped model -> %s%s\n",
+                     name.c_str(), (want_link && linked) ? " (symlinked as default)" : "");
+        nlohmann::ordered_json j{{"ok", true}, {"model", name}, {"model_id", ctx_ref.model_id}, {"linked", linked}};
+        if (want_link && !linked) j["link_error"] = link_err;
+        res.set_content(j.dump(), "application/json");
+    });
+    // Point the model symlink (ai.gguf convention) at a local model WITHOUT
+    // reloading — makes it the default on the next start; the running model is
+    // unchanged. Created at the --model path, targeting the downloaded file.
+    svr.Post("/models/api/symlink", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        std::string name;
+        try { name = nlohmann::json::parse(req.body).value("name", ""); }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
+        std::string target, err;
+        if (!ctx_ref.models->resolve_local(name, target, err)) {
+            res.status = 400; res.set_content(error_json(err), "application/json"); return;
+        }
+        std::string link_err;
+        if (!set_model_symlink(args.model_path, target, link_err)) {
+            res.status = 400; res.set_content(error_json(link_err), "application/json"); return;
+        }
+        std::fprintf(stderr, "[easyai-server] model symlink %s -> %s\n", args.model_path.c_str(), name.c_str());
+        nlohmann::ordered_json j{{"ok", true}, {"model", name}, {"link", args.model_path}, {"target", target}};
         res.set_content(j.dump(), "application/json");
     });
 

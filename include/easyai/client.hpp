@@ -309,6 +309,19 @@ public:
     bool props            (std::string & out_json);            // raw JSON
     bool set_preset       (const std::string & preset_name);   // /v1/preset
 
+    // Generic raw GET/POST against an arbitrary server path, sharing the
+    // same auth header, retry budget, and TLS posture as the typed
+    // helpers above. The body is returned verbatim (caller parses the
+    // JSON). `out_status` optionally receives the HTTP status code even
+    // on a non-2xx (in which case the call returns false and last_error
+    // carries "HTTP <code>: <body>"). These back the management /
+    // model-manager subcommands that drive the server's /models/api/*
+    // dashboard endpoints from the terminal.
+    bool get_json         (const std::string & path, std::string & out_json,
+                           int * out_status = nullptr);
+    bool post_json        (const std::string & path, const std::string & body,
+                           std::string & out_json);
+
     // ----- introspection ---------------------------------------------------
     std::string last_error() const;
 

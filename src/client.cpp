@@ -1539,6 +1539,16 @@ bool Client::set_preset(const std::string & preset_name) {
     return p_->simple_post("/v1/preset", req.dump(), body);
 }
 
+bool Client::get_json(const std::string & path, std::string & out_json,
+                      int * out_status) {
+    return p_->simple_get(path, "application/json", out_json, out_status);
+}
+
+bool Client::post_json(const std::string & path, const std::string & body,
+                       std::string & out_json) {
+    return p_->simple_post(path, body, out_json);
+}
+
 std::string Client::last_error() const { return p_->last_error; }
 
 }  // namespace easyai

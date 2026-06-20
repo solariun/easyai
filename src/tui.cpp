@@ -3008,6 +3008,18 @@ void run_slash(Ui & ui, const std::string & line) {
         return;
     }
     if (cmd == "status") {
+        // Prefer the comprehensive live status screen (everything the
+        // webui Status tab shows). It owns the screen, so suspend the
+        // chat terminal around it and repaint on return.
+        if (ui.hooks.status_screen) {
+            leave_terminal(ui);
+            ui.hooks.status_screen();
+            enter_terminal(ui);
+            ui.force_full = true;
+            ui.bump();
+            return;
+        }
+        // Fallback: inline url/model/ctx toast when no hook was wired.
         std::string txt = "url: " + ui.opt.url + "\nmodel: " + ui.opt.model;
         if (!ui.opt.session_path.empty())
             txt += "\nsession: " + ui.opt.session_path;

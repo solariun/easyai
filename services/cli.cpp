@@ -50,6 +50,7 @@
 #include "easyai/config.hpp"
 #include "easyai/external_tools.hpp"
 #include "easyai/log.hpp"
+#include "easyai/model_manager.hpp"
 #include "easyai/plan.hpp"
 #include "easyai/preamble.hpp"
 #include "easyai/rag_tools.hpp"
@@ -686,8 +687,13 @@ struct Options {
     bool        health            = false;
     bool        props             = false;
     bool        metrics           = false;
+    bool        status            = false;    // GET /models/api/status, print, exit
     std::string set_preset;
     bool        show_system_prompt = false;   // print resolved prompt and exit
+
+    // --llm-manager: full-screen interactive model manager (the /models
+    // dashboard in the terminal — Status / Local / Recommend / Downloads).
+    bool        llm_manager       = false;
 
     // --shell: hybrid AI shell. Normal commands execute via the user's
     // $SHELL. Lines prefixed with > are sent to the AI model. CWD and
@@ -1058,6 +1064,16 @@ void usage(const char * argv0) {
 "    --health                   GET /health\n"
 "    --props                    GET /props\n"
 "    --metrics                  GET /metrics (Prometheus text)\n"
+"    --status                   GET /models/api/status — full server status\n"
+"                               (model, sampling params, services, hardware,\n"
+"                               catalogue, downloads, request metrics — the\n"
+"                               same data the webui /models Status tab shows)\n"
+"    --llm-manager              full-screen model manager TUI: browse the\n"
+"                               HuggingFace catalogue with fit scoring, run /\n"
+"                               delete / symlink local GGUFs, download new\n"
+"                               ones, and watch live status (the /models\n"
+"                               dashboard, in the terminal). Alias:\n"
+"                               --model-manager\n"
 "    --set-preset NAME          POST /v1/preset {preset:NAME}\n"
 "    --show-system-prompt       print the resolved system prompt (built-in\n"
 "                                injection PLUS --system / --system-file\n"
@@ -1247,6 +1263,8 @@ bool parse_args(int argc, char ** argv, Options & o) {
         else if (a == "--health")         o.health      = true;
         else if (a == "--props")          o.props       = true;
         else if (a == "--metrics")        o.metrics     = true;
+        else if (a == "--status")         o.status      = true;
+        else if (a == "--llm-manager" || a == "--model-manager") o.llm_manager = true;
         else if (a == "--set-preset")     o.set_preset  = need(i, "--set-preset");
         else if (a == "--show-system-prompt") o.show_system_prompt = true;
         else if (a == "-h" || a == "--help") { usage(argv[0]); std::exit(0); }
@@ -1551,7 +1569,7 @@ bool parse_args(int argc, char ** argv, Options & o) {
 
 bool any_management(const Options & o) {
     return o.list_models || o.list_tools || o.list_remote_tools
-        || o.health      || o.props      || o.metrics
+        || o.health      || o.props      || o.metrics      || o.status
         || !o.set_preset.empty();
 }
 
@@ -1826,6 +1844,7 @@ int run_management(easyai::Client & cli, const Options & o, const Style & st) {
     if (o.health)             return easyai::cli::print_health       (cli, st);
     if (o.props)              return easyai::cli::print_props        (cli);
     if (o.metrics)            return easyai::cli::print_metrics      (cli);
+    if (o.status)             return easyai::manager::print_status   (cli, st);
     if (!o.set_preset.empty())return easyai::cli::set_preset         (cli, o.set_preset, st);
     return 0;
 }
@@ -2304,6 +2323,10 @@ int run_shell(easyai::Client & cli, easyai::Plan & plan,
             }
             continue;
         }
+        if (is_special(line, "/status")) {
+            easyai::manager::print_status(cli, st);
+            continue;
+        }
         if (is_special(line, "/help")) {
             std::fputs(
                 "  > prompt      send prompt to AI\n"
@@ -2313,7 +2336,8 @@ int run_shell(easyai::Client & cli, easyai::Plan & plan,
                 "  /reset        clear conversation + plan\n"
                 "  /compress     recap session\n"
                 "  /plan         show plan checklist\n"
-                "  /tools        list AI tools\n",
+                "  /tools        list AI tools\n"
+                "  /status       full server status\n",
                 stdout);
             continue;
         }
@@ -2350,6 +2374,8 @@ int run_shell(easyai::Client & cli, easyai::Plan & plan,
 // the duration, so stderr (easyai::log retries, bash mirrors) is
 // parked on /dev/null while it runs — a --log-file keeps capturing
 // everything through its own FILE*.
+easyai::manager::Options manager_options(const Options & o);  // defined below
+
 int run_tui(easyai::Client & cli, easyai::Plan & plan, const Options & o) {
     // The footer badge is always on — give it a real ctx denominator
     // from the start instead of waiting for the first turn's timings.
@@ -2400,6 +2426,12 @@ int run_tui(easyai::Client & cli, easyai::Plan & plan, const Options & o) {
         return ids;
     };
     hooks.set_model = [&cli](const std::string & id) { cli.model(id); };
+    // /status in the chat TUI suspends the chat screen and shows the full,
+    // live server-status view (everything the webui Status tab shows).  The
+    // TUI restores its own terminal around this call.
+    hooks.status_screen = [&cli, o]() {
+        easyai::manager::show_status_screen(cli, manager_options(o));
+    };
 
     int saved_err = ::dup(2);
     int devnull   = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
@@ -2408,6 +2440,22 @@ int run_tui(easyai::Client & cli, easyai::Plan & plan, const Options & o) {
     if (saved_err >= 0) { ::dup2(saved_err, 2); ::close(saved_err); }
     if (devnull >= 0)   ::close(devnull);
     return rc;
+}
+
+// --llm-manager: the /models dashboard in the terminal.  Builds the manager
+// options from the same connection flags the rest of the CLI uses and hands
+// the live Client to the full-screen TUI.
+easyai::manager::Options manager_options(const Options & o) {
+    easyai::manager::Options mopt;
+    mopt.url     = o.url;
+    mopt.model   = o.model;
+    mopt.theme   = o.theme;
+    mopt.version = "easyai-cli " EASYAI_CLI_VERSION_STR;
+    return mopt;
+}
+
+int run_manager(easyai::Client & cli, const Options & o) {
+    return easyai::manager::run(cli, manager_options(o));
 }
 
 int run_repl(easyai::Client & cli, easyai::Plan & plan,
@@ -2486,9 +2534,13 @@ int run_repl(easyai::Client & cli, easyai::Plan & plan,
             }
             continue;
         }
+        if (is_special(line, "/status")) {
+            easyai::manager::print_status(cli, st);
+            continue;
+        }
         if (is_special(line, "/help")) {
             std::fputs(
-                "/exit /quit /clear /reset /compress /plan /tools /help\n",
+                "/exit /quit /clear /reset /compress /plan /tools /status /help\n",
                 stdout);
             continue;
         }
@@ -3012,6 +3064,8 @@ int main(int argc, char ** argv) {
     int rc;
     if (any_management(o)) {
         rc = run_management(cli, o, st);
+    } else if (o.llm_manager) {
+        rc = run_manager(cli, o);
     } else if (o.shell_mode) {
         rc = run_shell(cli, plan, o, st);
     } else {

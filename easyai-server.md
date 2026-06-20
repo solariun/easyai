@@ -765,9 +765,11 @@ downloading local models. No external binary.
 - **Local models** — lists the `.gguf` files in `download_dir`; click one for a
   panel of all its parameters (read from the GGUF header), its fit on this
   hardware, and the matching `[MODEL_*]` INI profile.
-- **Run (hot-swap)** — `Engine::reload()` releases the running model and loads the
-  chosen one **in place** (no restart; in-flight chats finish first), re-pointing
-  the `ai.gguf` symlink so the choice survives reboots.
+- **Run / Slink** — **Run** (`Engine::reload()`) releases the running model and
+  loads the chosen one **in place** (no restart; in-flight chats finish first) — an
+  in-memory swap that reverts to `--model` on the next start. **Slink** re-points
+  the `ai.gguf` symlink so the model becomes the default on reboot (no reload;
+  refuses if `--model` is a real file). **Run + slink** does both.
 - **Downloads** — native libcurl → HuggingFace, into `download_dir`, with
   progress / cancel / list / delete.
 
@@ -790,7 +792,8 @@ requires the session cookie when `webui_password` is set):
 | GET | `/models/api/local` | List `.gguf` in `download_dir` (`name, size, mtime, is_current`). |
 | GET | `/models/api/local/detail?file=<name>` | GGUF params + fit + `[MODEL_*]` profile for one local model. |
 | POST | `/models/api/local/delete` | `{name}` → delete one (path-guarded; regular files only; not the running one). |
-| POST | `/models/api/run` | `{name}` → hot-swap to that local model in-process. |
+| POST | `/models/api/run` | `{name, link?}` → hot-swap to that local model in-process; `link:true` also re-points the `ai.gguf` symlink. |
+| POST | `/models/api/symlink` | `{name}` → point the `--model` symlink at that local model (boot default; no reload). |
 | GET | `/models/api/hf/files?repo=<repo>` | List `.gguf` files in a HuggingFace repo (quant picker). |
 | POST | `/models/api/download` | `{repo, filename?}` → start a download (best quant if omitted; whole shard set for a sharded pick). |
 | GET | `/models/api/download/status` · POST `/models/api/download/cancel` | Progress / cancel of the single active download. |
