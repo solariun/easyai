@@ -172,12 +172,19 @@ handlers.
 interactive front end for the server's `/models` dashboard — the same
 catalogue scoring, GGUF introspection and download manager the web UI
 exposes, driven over the same OpenAI-compatible transport (so endpoint,
-`--api-key`, TLS and retries all apply, and a `--webui-password`-gated
-server needs the cookie). It needs a capable TTY; piped/redirected runs
-fall back to a one-shot `--status` dump.
+`--api-key`, TLS and retries all apply). It needs a capable TTY;
+piped/redirected runs fall back to a one-shot `--status` dump.
+
+If the server's `/models` gate is closed (`--webui-password` on the
+server side), the manager logs in first — using `--webui-password PW` /
+`EASYAI_WEBUI_PASSWORD`, or **prompting for it** (echo off) before the
+screen opens. Same for `--status` and `/status`. Without it every
+`/models/api/*` call would 401. The session cookie is then attached to
+every request for the life of the process.
 
 ```bash
-easyai-cli --url http://ai.local:8080 --llm-manager
+easyai-cli --url http://ai.local:8080 --llm-manager                    # prompts if gated
+easyai-cli --url http://ai.local:8080 --webui-password 0000 --llm-manager
 ```
 
 Four tabs:
@@ -205,6 +212,7 @@ appear next to the matching flag.
 | --- | --- | --- |
 | `--url URL` | `EASYAI_URL` | Required (or set via env). |
 | `--api-key KEY` | `EASYAI_API_KEY` | Bearer auth. |
+| `--webui-password PW` | `EASYAI_WEBUI_PASSWORD` | Password for the server's `/models` gate, used by `--llm-manager` / `--status` / `/status`. Omit to be prompted (echo off) when the gate is closed. |
 | `--model NAME` | `EASYAI_MODEL` | Default `EasyAi`. |
 | `--timeout SEC` | `EASYAI_TIMEOUT` | Default 1800. |
 | `--http-retries N` | `EASYAI_HTTP_RETRIES` | Default 5. |
@@ -914,7 +922,7 @@ runs.
 | `--health` | `GET /health`. Prints `ok` / `unhealthy: <reason>`. |
 | `--props` | `GET /props`. Server-side configuration dump. |
 | `--metrics` | `GET /metrics`. Prometheus exposition. |
-| `--status` | `GET /models/api/status`. Prints the comprehensive server status as colorized panels — server state/uptime/backend, running model + KV usage, active sampling parameters, services & tools, hardware, catalogue, active download, request metrics. The terminal equivalent of the webui `/models` Status tab; also reachable mid-session via the `/status` slash command (which, in the full-screen TUI, opens a live auto-refreshing version). easyai-server extension (404s against plain OpenAI-compat servers). |
+| `--status` | `GET /models/api/status`. Prints the comprehensive server status as colorized panels — server state/uptime/backend, running model + KV usage, active sampling parameters, services & tools, hardware, catalogue, active download, request metrics. The terminal equivalent of the webui `/models` Status tab; also reachable mid-session via the `/status` slash command (which, in the full-screen TUI, opens a live auto-refreshing version). Logs in via `--webui-password` / `EASYAI_WEBUI_PASSWORD` (or an interactive prompt) when the server's `/models` gate is closed. easyai-server extension (404s against plain OpenAI-compat servers). |
 | `--llm-manager` | Not a print-and-exit subcommand — launches the interactive [model-manager TUI](#3b-model-manager) (alias `--model-manager`). Listed here because it's the other `/models`-dashboard entry point. |
 | `--set-preset NAME` | `POST /v1/preset {preset:NAME}`. Switches the server's ambient sampling preset (easyai-server extension). |
 | `--show-system-prompt` | Resolve and print the system prompt the CLI would send on the next turn — built-in `[environment]` + `[guidance]` injection plus any `--system` / `--system-file` content. Does NOT contact the server, so it works without a reachable `--url`. The fastest way to verify "is the model actually seeing my persona / sandbox / guidance?". |

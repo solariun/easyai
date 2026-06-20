@@ -262,6 +262,11 @@ struct Client::Impl {
     // Transport / auth.
     std::string endpoint;
     std::string api_key;
+    // Session cookie minted by POST /models/api/login (the /models
+    // dashboard gate, --webui-password). Sent verbatim as the Cookie
+    // header on every request once models_login() succeeds; empty when
+    // the gate is open or no login has happened.
+    std::string models_cookie;
     // 86400s (24 hours) — sized for multi-hour agentic sessions where
     // the model spends long stretches in tool dispatch / reasoning
     // without producing visible bytes.  Long-running agent flows
@@ -420,6 +425,7 @@ struct Client::Impl {
         httplib::Headers h;
         if (!accept.empty()) h.emplace("Accept", accept);
         if (!api_key.empty()) h.emplace("Authorization", "Bearer " + api_key);
+        if (!models_cookie.empty()) h.emplace("Cookie", models_cookie);
         return h;
     }
 
@@ -1547,6 +1553,36 @@ bool Client::get_json(const std::string & path, std::string & out_json,
 bool Client::post_json(const std::string & path, const std::string & body,
                        std::string & out_json) {
     return p_->simple_post(path, body, out_json);
+}
+
+bool Client::models_login(const std::string & password) {
+    p_->last_error.clear();
+    auto * cli = p_->get_http();
+    if (!cli) { p_->last_error = "no endpoint configured"; return false; }
+    auto headers = p_->headers_with_auth("application/json");
+    ordered_json req; req["password"] = password;
+    const std::string path = p_->base_path() + "/models/api/login";
+    auto res = cli->Post(path, headers, req.dump(), "application/json");
+    if (!res) {
+        p_->last_error = "HTTP request failed: " + httplib::to_string(res.error());
+        return false;
+    }
+    if (res->status == 401) { p_->last_error = "invalid password"; return false; }
+    if (res->status < 200 || res->status >= 300) {
+        p_->last_error = "HTTP " + std::to_string(res->status) + ": " + res->body;
+        return false;
+    }
+    // Keep just the `easyai_models=<token>` pair (drop attributes after ';').
+    std::string sc = res->get_header_value("Set-Cookie");
+    std::string cookie = sc.substr(0, sc.find(';'));
+    auto nb = cookie.find_first_not_of(' ');
+    if (nb != std::string::npos) cookie = cookie.substr(nb);
+    if (cookie.rfind("easyai_models=", 0) != 0) {
+        p_->last_error = "login ok but no session cookie returned";
+        return false;
+    }
+    p_->models_cookie = std::move(cookie);
+    return true;
 }
 
 std::string Client::last_error() const { return p_->last_error; }

@@ -573,6 +573,7 @@ easyai::Tool make_system_swaps() {
 struct Options {
     std::string url;
     std::string api_key;
+    std::string webui_password;          // --models gate (--llm-manager / --status)
     std::string model = "EasyAi";
     std::string system_prompt;
     std::string system_file;
@@ -772,6 +773,10 @@ void usage(const char * argv0) {
 "  Connection (env fallback in parens):\n"
 "    --url URL                  OpenAI-compat endpoint (EASYAI_URL)\n"
 "    --api-key KEY              Bearer auth (EASYAI_API_KEY)\n"
+"    --webui-password PW        password for the server's /models gate, used\n"
+"                                by --llm-manager / --status / /status\n"
+"                                (EASYAI_WEBUI_PASSWORD). Omit to be prompted\n"
+"                                interactively when the gate is closed.\n"
 "    --model NAME               request body 'model' field (EASYAI_MODEL)\n"
 "    --timeout SECONDS          read+write timeout (default 86400 = 24h,\n"
 "                                sized for multi-hour agentic sessions —\n"
@@ -1110,6 +1115,8 @@ bool parse_args(int argc, char ** argv, Options & o) {
     };
     if (const char * v = std::getenv("EASYAI_URL"))     o.url     = v;
     if (const char * v = std::getenv("EASYAI_API_KEY")) o.api_key = v;
+    if (o.webui_password.empty())
+        if (const char * v = std::getenv("EASYAI_WEBUI_PASSWORD")) o.webui_password = v;
     if (const char * v = std::getenv("EASYAI_MODEL"))   o.model   = v;
     if (const char * v = std::getenv("EASYAI_TIMEOUT")) {
         try { o.timeout = std::stoi(v); } catch (...) {}
@@ -1122,6 +1129,7 @@ bool parse_args(int argc, char ** argv, Options & o) {
         std::string a = argv[i];
         if      (a == "--url")            { o.url = need(i, "--url"); o.url_cli_set = true; }
         else if (a == "--api-key")        { o.api_key = need(i, "--api-key"); o.api_key_cli_set = true; }
+        else if (a == "--webui-password") o.webui_password = need(i, "--webui-password");
         else if (a == "--model")          { o.model = need(i, "--model"); o.model_cli_set = true; }
         else if (a == "--timeout")        { o.timeout = std::stoi(need(i, "--timeout")); o.timeout_cli_set = true; }
         else if (a == "--http-retries")   { o.http_retries = std::stoi(need(i, "--http-retries")); o.http_retries_cli_set = true; }
@@ -1844,7 +1852,7 @@ int run_management(easyai::Client & cli, const Options & o, const Style & st) {
     if (o.health)             return easyai::cli::print_health       (cli, st);
     if (o.props)              return easyai::cli::print_props        (cli);
     if (o.metrics)            return easyai::cli::print_metrics      (cli);
-    if (o.status)             return easyai::manager::print_status   (cli, st);
+    if (o.status)             return easyai::manager::print_status   (cli, st, stdout, o.webui_password);
     if (!o.set_preset.empty())return easyai::cli::set_preset         (cli, o.set_preset, st);
     return 0;
 }
@@ -2324,7 +2332,7 @@ int run_shell(easyai::Client & cli, easyai::Plan & plan,
             continue;
         }
         if (is_special(line, "/status")) {
-            easyai::manager::print_status(cli, st);
+            easyai::manager::print_status(cli, st, stdout, o.webui_password);
             continue;
         }
         if (is_special(line, "/help")) {
@@ -2447,10 +2455,11 @@ int run_tui(easyai::Client & cli, easyai::Plan & plan, const Options & o) {
 // the live Client to the full-screen TUI.
 easyai::manager::Options manager_options(const Options & o) {
     easyai::manager::Options mopt;
-    mopt.url     = o.url;
-    mopt.model   = o.model;
-    mopt.theme   = o.theme;
-    mopt.version = "easyai-cli " EASYAI_CLI_VERSION_STR;
+    mopt.url            = o.url;
+    mopt.model          = o.model;
+    mopt.theme          = o.theme;
+    mopt.version        = "easyai-cli " EASYAI_CLI_VERSION_STR;
+    mopt.webui_password = o.webui_password;
     return mopt;
 }
 
@@ -2535,7 +2544,7 @@ int run_repl(easyai::Client & cli, easyai::Plan & plan,
             continue;
         }
         if (is_special(line, "/status")) {
-            easyai::manager::print_status(cli, st);
+            easyai::manager::print_status(cli, st, stdout, o.webui_password);
             continue;
         }
         if (is_special(line, "/help")) {

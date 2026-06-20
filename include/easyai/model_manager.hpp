@@ -39,6 +39,11 @@ struct Options {
     std::string model;     // current model id (cosmetic; status reports live)
     std::string theme;     // "opencode" (default) | "opencode-light"
     std::string version;   // e.g. "easyai-cli 0.1.0" (header)
+    // Password for a server whose /models gate is closed (--webui-password).
+    // When the gate is closed and this is empty, the screens prompt for it
+    // interactively (echo off) before the first request. Empty + open gate
+    // → no login needed.
+    std::string webui_password;
 };
 
 // Full-screen interactive model manager — tabs: Status · Local · Recommend ·
@@ -54,9 +59,11 @@ int show_status_screen(Client & cli, const Options & opt);
 
 // One-shot: GET /models/api/status and print the comprehensive status (every
 // field the webui Status tab shows) to `out`, colorized per `st`. Backs
-// `easyai-cli --status` and the plain-REPL `/status` command. Returns a
-// process exit code (0 on success, 1 on transport / parse failure — the
-// reason is written to stderr).
-int print_status(Client & cli, const ui::Style & st, std::FILE * out = stdout);
+// `easyai-cli --status` and the REPL `/status` command. If the server's
+// /models gate is closed it logs in first — using `webui_password`, or, on a
+// TTY, prompting for it (echo off). Returns a process exit code (0 on success,
+// 1 on transport / parse / auth failure — the reason is written to stderr).
+int print_status(Client & cli, const ui::Style & st, std::FILE * out = stdout,
+                 const std::string & webui_password = "");
 
 }  // namespace easyai::manager

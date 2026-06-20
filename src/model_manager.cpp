@@ -470,13 +470,84 @@ int term_cols() { winsize w{}; return (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) ==
 int term_rows() { winsize w{}; return (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_row > 0) ? w.ws_row : 30; }
 
 // ===========================================================================
+// Fetch helpers (parse a JSON body out of the Client's get_json/post_json)
+// ===========================================================================
+bool get(Client & cli, const std::string & path, json & out, std::string & err) {
+    std::string body;
+    if (!cli.get_json(path, body)) { err = cli.last_error(); return false; }
+    try { out = json::parse(body); } catch (const std::exception & e) { err = std::string("parse: ") + e.what(); return false; }
+    return true;
+}
+bool post(Client & cli, const std::string & path, const json & b, json & out, std::string & err) {
+    std::string body;
+    if (!cli.post_json(path, b.dump(), body)) { err = cli.last_error(); return false; }
+    if (body.empty()) { out = json::object(); return true; }
+    try { out = json::parse(body); } catch (...) { out = json::object(); }
+    return true;
+}
+
+// ===========================================================================
+// /models gate (--webui-password) — login + interactive prompt
+// ===========================================================================
+// Read a line from the terminal with echo disabled (password entry). Reads
+// stdin in cooked mode, so call this BEFORE any raw-mode term.enter().
+std::string read_password(const std::string & prompt) {
+    std::fputs(prompt.c_str(), stderr); std::fflush(stderr);
+    termios old{}; bool tty = ::isatty(STDIN_FILENO) == 1;
+    if (tty && ::tcgetattr(STDIN_FILENO, &old) == 0) {
+        termios ne = old; ne.c_lflag &= ~(ECHO);
+        ::tcsetattr(STDIN_FILENO, TCSANOW, &ne);
+    }
+    std::string pw; char buf[512];
+    if (std::fgets(buf, sizeof buf, stdin)) pw = buf;
+    if (tty) { ::tcsetattr(STDIN_FILENO, TCSANOW, &old); std::fputc('\n', stderr); }
+    while (!pw.empty() && (pw.back() == '\n' || pw.back() == '\r')) pw.pop_back();
+    return pw;
+}
+
+// Get the Client past the /models gate before the screens hit /models/api/*.
+// Probes GET /models/api/auth (always open); if a password is required and we
+// aren't already authed, log in — using `password`, else (on a TTY) prompting
+// for it (echo off). Returns false + sets `err` only when the gate is closed
+// and authentication couldn't be completed.
+bool ensure_auth(Client & cli, const std::string & password, bool interactive, std::string & err) {
+    json a; std::string e;
+    if (!get(cli, "/models/api/auth", a, e)) return true;  // let the real call surface transport errors
+    if (!jb(a, "required") || jb(a, "authed")) return true;
+    std::string pw = password;
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        if (pw.empty()) {
+            if (!interactive) {
+                err = "server requires a /models password — pass --webui-password "
+                      "(or set EASYAI_WEBUI_PASSWORD)";
+                return false;
+            }
+            pw = read_password("/models password: ");
+            if (pw.empty()) { err = "no password entered"; return false; }
+        }
+        if (cli.models_login(pw)) return true;
+        if (!interactive) { err = "login failed: " + cli.last_error(); return false; }
+        std::fputs("  invalid password — try again\n", stderr);
+        pw.clear();
+    }
+    err = "authentication failed";
+    return false;
+}
+
+// ===========================================================================
 // print_status — one-shot, to a FILE* (--status / REPL /status)
 // ===========================================================================
 }  // namespace
 
-int print_status(Client & cli, const ui::Style & st, std::FILE * out) {
+int print_status(Client & cli, const ui::Style & st, std::FILE * out,
+                 const std::string & webui_password) {
     detect_term();
     g_color = st.color;
+    std::string aerr;
+    if (!ensure_auth(cli, webui_password, ::isatty(STDIN_FILENO) == 1, aerr)) {
+        std::fprintf(stderr, "%serror:%s %s\n", st.red(), st.reset(), aerr.c_str());
+        return 1;
+    }
     std::string body;
     if (!cli.get_json("/models/api/status", body)) {
         std::fprintf(stderr, "%serror:%s %s\n", st.red(), st.reset(), cli.last_error().c_str());
@@ -597,22 +668,6 @@ long long now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(clock_::now().time_since_epoch()).count();
 }
 
-// ===========================================================================
-// Fetch helpers
-// ===========================================================================
-bool get(Client & cli, const std::string & path, json & out, std::string & err) {
-    std::string body;
-    if (!cli.get_json(path, body)) { err = cli.last_error(); return false; }
-    try { out = json::parse(body); } catch (const std::exception & e) { err = std::string("parse: ") + e.what(); return false; }
-    return true;
-}
-bool post(Client & cli, const std::string & path, const json & b, json & out, std::string & err) {
-    std::string body;
-    if (!cli.post_json(path, b.dump(), body)) { err = cli.last_error(); return false; }
-    if (body.empty()) { out = json::object(); return true; }
-    try { out = json::parse(body); } catch (...) { out = json::object(); }
-    return true;
-}
 std::string urlenc(const std::string & s) {
     static const char * hex = "0123456789ABCDEF";
     std::string o;
@@ -650,11 +705,18 @@ int show_status_screen(Client & cli, const Options & opt) {
     g_color = true;
     if (!::isatty(STDIN_FILENO) || !::isatty(STDOUT_FILENO)) {
         ui::Style st = ui::detect_style();
-        return print_status(cli, st, stdout);
+        return print_status(cli, st, stdout, opt.webui_password);
+    }
+    // Authenticate (prompt for the /models password if needed) on the normal
+    // terminal, before we switch into raw-mode alt-screen.
+    std::string aerr;
+    if (!ensure_auth(cli, opt.webui_password, true, aerr)) {
+        std::fprintf(stderr, "error: %s\n", aerr.c_str());
+        return 1;
     }
     Theme th = pick_theme(opt.theme);
     Term term;
-    if (!term.enter()) { ui::Style st = ui::detect_style(); return print_status(cli, st, stdout); }
+    if (!term.enter()) { ui::Style st = ui::detect_style(); return print_status(cli, st, stdout, opt.webui_password); }
 
     InputParser ip;
     json status; std::string err;
@@ -1269,9 +1331,16 @@ int Manager::loop() {
     g_color = true;
     if (!::isatty(STDIN_FILENO) || !::isatty(STDOUT_FILENO)) {
         ui::Style st = ui::detect_style();
-        return print_status(cli, st, stdout);
+        return print_status(cli, st, stdout, opt.webui_password);
     }
-    if (!term.enter()) { ui::Style st = ui::detect_style(); return print_status(cli, st, stdout); }
+    // Get past the /models gate (prompting for the password if needed) on the
+    // normal terminal, before entering raw-mode alt-screen.
+    std::string aerr;
+    if (!ensure_auth(cli, opt.webui_password, true, aerr)) {
+        std::fprintf(stderr, "error: %s\n", aerr.c_str());
+        return 1;
+    }
+    if (!term.enter()) { ui::Style st = ui::detect_style(); return print_status(cli, st, stdout, opt.webui_password); }
     fetch_status(true);
     while (!quit) {
         cols = term_cols(); rows = term_rows();

@@ -322,6 +322,16 @@ public:
     bool post_json        (const std::string & path, const std::string & body,
                            std::string & out_json);
 
+    // Authenticate against the server's /models dashboard gate
+    // (--webui-password). POSTs {password} to /models/api/login; on
+    // success stores the returned `easyai_models` session cookie and
+    // attaches it to every subsequent request, so the /models/api/*
+    // endpoints (which back --status / --llm-manager) stop returning
+    // 401. Returns false + sets last_error on a wrong password or a
+    // transport failure. A server started without a password leaves the
+    // gate open and never needs this.
+    bool models_login     (const std::string & password);
+
     // ----- introspection ---------------------------------------------------
     std::string last_error() const;
 

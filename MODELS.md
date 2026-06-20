@@ -42,7 +42,10 @@ It does four things:
 > fit-scored catalogue). It drives these same `/models/api/*` endpoints over the
 > OpenAI-compatible transport. A one-shot `easyai-cli --url <server> --status`
 > (or the `/status` slash command in any interactive session) prints the Status
-> tab's data as colorized panels. See `easyai-cli.md` §3b.
+> tab's data as colorized panels. When `webui_password` is set, pass
+> `--webui-password` (or `EASYAI_WEBUI_PASSWORD`, or just answer the prompt) so
+> the CLI logs in and gets the same session cookie the browser uses. See
+> `easyai-cli.md` §3b.
 
 ---
 
