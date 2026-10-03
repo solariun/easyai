@@ -1802,6 +1802,18 @@ bool Engine::load() {
         p_->params.kv_overrides.push_back(term);
     }
 
+    // Resolve the CPU thread params the way common_params_parse does
+    // for the llama.cpp tools. common_init_from_params now builds the
+    // ggml threadpools itself from cpuparams / cpuparams_batch, and an
+    // unresolved n_threads == -1 sentinel in cpuparams_batch makes
+    // ggml_threadpool_new allocate a garbage-sized block and crash.
+    // Each *_batch pool inherits from its non-batch sibling, the draft
+    // pools from the target's — same role model chain as arg.cpp.
+    postprocess_cpu_params(p_->params.cpuparams,       nullptr);
+    postprocess_cpu_params(p_->params.cpuparams_batch, &p_->params.cpuparams);
+    postprocess_cpu_params(p_->params.speculative.draft.cpuparams,       &p_->params.cpuparams);
+    postprocess_cpu_params(p_->params.speculative.draft.cpuparams_batch, &p_->params.cpuparams_batch);
+
     p_->init = common_init_from_params(p_->params);
     if (!p_->init || !p_->init->model() || !p_->init->context()) {
         p_->last_error = "failed to load model: " + p_->params.model.path;
@@ -2058,7 +2070,9 @@ std::string Engine::generate() {
     if (!tail.empty()) {
         const int n_ctx = llama_n_ctx(p_->ctx());
         if (n_past + (int) tail.size() > n_ctx) {
-            p_->last_error = "prompt overflows context window";
+            p_->last_error = "prompt overflows context window (cached "
+                + std::to_string(n_past) + " + new " + std::to_string(tail.size())
+                + " tokens > n_ctx " + std::to_string(n_ctx) + ")";
             return {};
         }
         const int n_batch = p_->params.n_batch > 0 ? p_->params.n_batch : 512;

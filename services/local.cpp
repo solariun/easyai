@@ -431,8 +431,9 @@ int main(int argc, char ** argv) {
             text = text.substr(pr.consumed);
         }
 
+        std::string reply;
         try {
-            session.chat(text);
+            reply = session.chat(text);
         } catch (const std::exception & e) {
             spinner.stop_heartbeat();
             spinner.finish();
@@ -453,6 +454,13 @@ int main(int argc, char ** argv) {
                 "\n── context full ──\n%s\n"
                 "Start a new conversation (or shorten the prompt) to keep going.\n",
                 session.last_error().c_str());
+        } else if (reply.empty() && !session.last_error().empty()) {
+            // An empty reply with an engine error is a failure, not a
+            // silent no-op — surface it and exit non-zero so scripts
+            // piping stdout notice.
+            std::fprintf(stderr, "\n[easyai-local] error: %s\n",
+                         session.last_error().c_str());
+            return 1;
         }
         return 0;
     }
