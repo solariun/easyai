@@ -116,9 +116,12 @@ constexpr std::string_view kBrandSvg = R"SVG(<svg xmlns="http://www.w3.org/2000/
 #include <unistd.h>      // chdir
 #include <vector>
 
-// (chat.h pulls in nlohmann::json + a `using json = nlohmann::ordered_json`
-// alias, so we don't redeclare those here.)
+// chat.h used to leak a `using json = nlohmann::ordered_json` alias;
+// upstream llama.cpp no longer does, so declare it here explicitly.
+// ordered_json keeps object keys in insertion order — matters for the
+// stable field ordering llama-server-compatible clients expect.
 using nlohmann::ordered_json;
+using json = nlohmann::ordered_json;
 
 // ============================================================================
 // Inline webui

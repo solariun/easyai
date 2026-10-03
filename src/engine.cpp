@@ -788,6 +788,24 @@ struct Engine::Impl {
     // Per-generation stats (reset in chat_continue's outer loop).
     uint64_t                    spec_drafted  = 0;
     uint64_t                    spec_accepted = 0;
+    // Tokens decoded into seq 0 of the target KV so far — what the
+    // speculative impls read via draft_params.prompt (ngram-* consume
+    // it; draft-simple/MTP only log its size, but upstream derefs the
+    // pointer unconditionally so it must never be null while drafting).
+    // Kept in lockstep with n_past: generate() assigns the full prompt,
+    // the spec loop appends each accepted token.
+    llama_tokens                spec_prompt;
+
+    // Model load mode — upstream folded use_mmap/use_mlock into the
+    // single llama_load_mode enum. We keep the two booleans the public
+    // Engine API exposes and derive params.load_mode from them.
+    bool                        want_mmap     = true;
+    bool                        want_mlock    = false;
+    void apply_load_mode() {
+        params.load_mode = want_mmap
+            ? (want_mlock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP)
+            : (want_mlock ? LLAMA_LOAD_MODE_MLOCK      : LLAMA_LOAD_MODE_NONE);
+    }
 
     std::vector<common_chat_msg> history;
     std::vector<Tool>            tools;
@@ -942,11 +960,15 @@ struct Engine::Impl {
         }
 
         const int n_batch = params.n_batch > 0 ? params.n_batch : 512;
+        const int n_past_start = n_past_inout;
         for (size_t i = 0; i < toks.size(); i += n_batch) {
             int n = std::min<int>(n_batch, toks.size() - i);
-            llama_batch b = llama_batch_get_one(toks.data() + i, n);
-            if (llama_decode(ctx(), b) != 0) {
-                last_error = "llama_decode failed while feeding prompt";
+            // common_batch_get_one continues positions from the KV's
+            // pos_max+1 (== n_past_inout here) with logits on the last
+            // token only — same contract the old llama_batch_get_one had.
+            common_batch b = common_batch_get_one(ctx(), toks.data() + i, n);
+            if (llama_process(ctx(), LLAMA_PROCESS_TYPE_DECODE, b.get()) != 0) {
+                last_error = "llama_process failed while feeding prompt";
                 return false;
             }
             // For MTP: feed the same batch to the speculative pipeline so
@@ -968,7 +990,9 @@ struct Engine::Impl {
             // Reset per-generation acceptance counters.
             spec_drafted  = 0;
             spec_accepted = 0;
-            common_speculative_begin(spec.get(), /*seq_id=*/0, toks);
+            spec_prompt.resize(n_past_start);
+            spec_prompt.insert(spec_prompt.end(), toks.begin(), toks.end());
+            common_speculative_begin(spec.get(), /*seq_id=*/0, spec_prompt);
         }
         return true;
     }
@@ -1009,6 +1033,7 @@ struct Engine::Impl {
         // varies (1..n_max+1 tokens).
         llama_tokens draft;
         std::vector<int> i_logits;        // batch positions to sample at
+        common_batch b(ctx());            // verify batch, cleared per iter
 
         while (true) {
             if (cancel_requested.load(std::memory_order_relaxed)) {
@@ -1054,13 +1079,13 @@ struct Engine::Impl {
             dp.drafting = true;
             dp.n_max    = std::min(n_draft_max,
                                    std::max(0, n_ctx - n_past_inout - 1));
-            dp.n_past   = n_past_inout;
+            dp.pos0     = n_past_inout;
             dp.id_last  = last_id;
             dp.result   = &draft;
-            // MTP and draft-simple don't read .prompt (they reuse KV
-            // state via ctx_dft). ngram-* impls DO read it — set to
-            // null for now since ngram isn't wired through this loop.
-            dp.prompt   = nullptr;
+            // Everything currently decoded into the target KV (seq 0).
+            // ngram-* impls consume it; MTP/draft-simple only log its
+            // size — but upstream dereferences it unconditionally.
+            dp.prompt   = &spec_prompt;
 
             common_speculative_draft(spec.get());
             spec_drafted += draft.size();
@@ -1081,29 +1106,29 @@ struct Engine::Impl {
                 n_past_inout, /*p1=*/-1);
 
             // --- 2. Build target batch: [last_id, draft[0..N-1]] --------
-            // All positions need logits=true so sample_and_accept_n can
-            // verify each draft. We use llama_batch_init / common_batch_add
-            // (not llama_batch_get_one which doesn't expose per-token
-            // logits flags).
+            // All positions need output=true so sample_and_accept_n can
+            // verify each draft (common_batch exposes per-token output
+            // flags; common_batch_get_one only sets the last one).
             const int n_tokens = 1 + (int) draft.size();
-            llama_batch b = llama_batch_init(n_tokens, /*embd=*/0, /*n_seq_max=*/1);
-            common_batch_add(b, last_id, n_past_inout, {0}, /*logits=*/true);
+            b.clear();
+            b.add(last_id, n_past_inout, /*seq_id=*/0, /*output=*/true);
             i_logits.clear();
             i_logits.push_back(0);  // position of last_id in batch
             for (size_t k = 0; k < draft.size(); ++k) {
-                common_batch_add(b, draft[k],
-                                 n_past_inout + 1 + (int) k,
-                                 {0}, /*logits=*/true);
+                b.add(draft[k], n_past_inout + 1 + (int) k,
+                      /*seq_id=*/0, /*output=*/true);
                 i_logits.push_back(1 + (int) k);
             }
 
             // --- 3. Decode on target + feed spec pipeline ----------------
-            if (llama_decode(ctx(), b) != 0) {
-                llama_batch_free(b);
-                last_error = "llama_decode failed during speculative generation";
+            if (llama_process(ctx(), LLAMA_PROCESS_TYPE_DECODE, b.get()) != 0) {
+                last_error = "llama_process failed during speculative generation";
                 break;
             }
-            common_speculative_process(spec.get(), b);
+            if (!common_speculative_process(spec.get(), b)) {
+                last_error = "common_speculative_process failed during speculative generation";
+                break;
+            }
 
             // --- 4. Verify drafts + sample next continuation -----------
             // Returns: vector of accepted tokens (size 1..draft.size()+1).
@@ -1113,7 +1138,6 @@ struct Engine::Impl {
             // drafts. The last element is the new last_id.
             auto accepted = common_sampler_sample_and_accept_n(
                 sampler, ctx(), i_logits, draft);
-            llama_batch_free(b);
 
             if (accepted.empty()) {
                 // Defensive — should never happen per llama-server's
@@ -1142,6 +1166,13 @@ struct Engine::Impl {
                     n_past_inout + n_tokens);
             }
             n_past_inout += (int) accepted.size();
+            // Mirror the KV in spec_prompt: last_id plus every accepted
+            // draft now sit at [old n_past .. new n_past). The final
+            // accepted token becomes the next last_id and is NOT yet in
+            // the KV, so it stays out of spec_prompt until next iter.
+            spec_prompt.push_back(last_id);
+            spec_prompt.insert(spec_prompt.end(),
+                               accepted.begin(), accepted.end() - 1);
 
             // --- 6. Emit accepted draft tokens (skip index 0 which is
             //         the new sample — we emit it next iter as last_id). --
@@ -1213,9 +1244,9 @@ struct Engine::Impl {
                 break;
             }
 
-            llama_batch b = llama_batch_get_one(&id, 1);
-            if (llama_decode(ctx(), b) != 0) {
-                last_error = "llama_decode failed during generation";
+            common_batch b = common_batch_get_one(ctx(), &id, 1);
+            if (llama_process(ctx(), LLAMA_PROCESS_TYPE_DECODE, b.get()) != 0) {
+                last_error = "llama_process failed during generation";
                 break;
             }
             ++n_past_inout;
@@ -1592,8 +1623,8 @@ Engine & Engine::flash_attn(bool on) {
                                     : LLAMA_FLASH_ATTN_TYPE_DISABLED;
     return *this;
 }
-Engine & Engine::use_mlock(bool on)        { p_->params.use_mlock = on; return *this; }
-Engine & Engine::use_mmap (bool on)        { p_->params.use_mmap  = on; return *this; }
+Engine & Engine::use_mlock(bool on)        { p_->want_mlock = on; p_->apply_load_mode(); return *this; }
+Engine & Engine::use_mmap (bool on)        { p_->want_mmap  = on; p_->apply_load_mode(); return *this; }
 Engine & Engine::threads_batch(int n)      { p_->params.cpuparams_batch.n_threads = n; return *this; }
 
 Engine & Engine::numa(const std::string & strategy) {
@@ -2035,9 +2066,18 @@ std::string Engine::generate() {
         int processed = 0;
         for (size_t i = 0; i < tail.size(); i += n_batch) {
             int n = std::min<int>(n_batch, tail.size() - i);
-            llama_batch b = llama_batch_get_one(tail.data() + i, n);
-            if (llama_decode(p_->ctx(), b) != 0) {
-                p_->last_error = "llama_decode failed feeding prompt";
+            common_batch b = common_batch_get_one(p_->ctx(), tail.data() + i, n);
+            if (llama_process(p_->ctx(), LLAMA_PROCESS_TYPE_DECODE, b.get()) != 0) {
+                p_->last_error = "llama_process failed feeding prompt";
+                return {};
+            }
+            // Speculative decoding: the draft side (MTP's ctx_dft, the
+            // draft-simple model) must see the same prompt batches so
+            // its KV stays in lockstep with the target before the first
+            // draft() — same as llama-server / speculative-simple.
+            if (p_->spec_active &&
+                !common_speculative_process(p_->spec.get(), b)) {
+                p_->last_error = "common_speculative_process failed feeding prompt";
                 return {};
             }
             n_past    += n;
@@ -2077,6 +2117,14 @@ std::string Engine::generate() {
                 /*prompt_ms=*/ prompt_ms,
             });
         }
+    }
+
+    if (p_->spec_active) {
+        // Everything in the target KV for seq 0 is exactly `all`
+        // (cached prefix + the tail we just fed). Hand it to the spec
+        // pipeline as the per-generation prompt.
+        p_->spec_prompt.assign(all.begin(), all.end());
+        common_speculative_begin(p_->spec.get(), /*seq_id=*/0, p_->spec_prompt);
     }
 
     return p_->generate_until_done(n_past);
