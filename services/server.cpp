@@ -1273,12 +1273,26 @@ $('#thinkToggleHdr').onclick = () => {
   $('#thinkToggleHdr').textContent = (state.showThinking ? '◐' : '○') + ' thinking';
 };
 
-// /health pills
-fetch('/health').then(r => r.json()).then(j => {
-  $('#model').textContent   = j.model || '?';
-  $('#backend').textContent = j.backend ? 'backend: ' + j.backend : '';
-  $('#ntools').textContent  = (j.tools ?? 0) + ' tools';
-}).catch(()=>{});
+// /health pills + no-model gate (prompt locked until a model is loaded;
+// re-checked every 3 s so a Run from /models unlocks it without a reload)
+const NO_MODEL_MSG = 'No model loaded — open /models to download, run or slink one';
+function pollHealth(){
+  fetch('/health').then(r => r.json()).then(j => {
+    $('#model').textContent   = j.model || '?';
+    $('#backend').textContent = j.backend ? 'backend: ' + j.backend : '';
+    $('#ntools').textContent  = (j.tools ?? 0) + ' tools';
+    const ta = $('#textArea'), noModel = j.model_loaded === false;
+    if (noModel && !ta.disabled) {
+      ta.dataset.prevPlaceholder = ta.placeholder; ta.placeholder = NO_MODEL_MSG;
+      ta.disabled = true; $('#sendBtn').disabled = true;
+    } else if (!noModel && ta.placeholder === NO_MODEL_MSG) {
+      ta.placeholder = ta.dataset.prevPlaceholder || 'Type a message…';
+      ta.disabled = false; $('#sendBtn').disabled = false;
+    }
+  }).catch(()=>{});
+}
+pollHealth();
+setInterval(pollHealth, 3000);
 
 // ============================================================================
 //  bootstrap
@@ -1464,7 +1478,8 @@ struct ServerCtx {
     std::string                memory_root;     // --memory dir; empty if no memory tool; used to render the per-request vocabulary
     bool                       verbose            = false;       // mirror of args.verbose for HTTP-layer logs
     easyai::Preset             default_preset;  // current "ambient" preset
-    std::string                model_id;        // basename of model file
+    std::string                model_id;        // basename of model file; "(no model)" while nothing is loaded
+    std::string                load_error;      // why the start-up load failed; empty once a model is loaded
     std::string                api_key;         // empty = auth disabled
     bool                       no_think = false;// strip <think> from responses
     // Ambient reasoning-effort level applied to every request unless the
@@ -3099,8 +3114,25 @@ static void handle_chat_stream(ServerCtx & ctx,
 // ---------------------------------------------------------------------------
 // POST /v1/chat/completions — dispatch to sync or stream path.
 // ---------------------------------------------------------------------------
+// No model loaded (start-up load failed or no --model): every generation
+// route answers 503 with a pointer at the model manager instead of touching
+// the engine. The server stays up so /models can download, run or slink one.
+static bool require_model(ServerCtx & ctx, httplib::Response & res) {
+    if (ctx.engine.is_loaded()) return true;
+    res.status = 503;
+    ordered_json err;
+    err["error"] = {
+        {"message", "no model loaded — open /models to download, run or slink one" +
+                    (ctx.load_error.empty() ? std::string() : " (" + ctx.load_error + ")")},
+        {"type",    "model_not_loaded"},
+    };
+    res.set_content(err.dump(), "application/json");
+    return false;
+}
+
 static void route_chat_completions(ServerCtx & ctx, const httplib::Request & req,
                                    httplib::Response & res) {
+    if (!require_model(ctx, res)) return;
     // ALWAYS log the full incoming POST body + summary to the raw
     // transaction log (auto-opened by Engine::load).  No verbose flag
     // gate: this is exactly the data the operator needs when a turn
@@ -3403,6 +3435,8 @@ static void route_health(ServerCtx & ctx, const httplib::Request &,
     ordered_json j;
     j["status"]  = "ok";
     j["model"]   = ctx.model_id;
+    j["model_loaded"] = ctx.engine.is_loaded();
+    if (!ctx.load_error.empty()) j["load_error"] = ctx.load_error;
     j["backend"] = ctx.engine.backend_summary();
     j["tools"]   = ctx.default_tools.size();
     j["preset"]  = ctx.default_preset.name;
@@ -6398,6 +6432,10 @@ int main(int argc, char ** argv) {
                 "const setInputLocked=(locked,reason)=>{"
                   "const ta=document.querySelector('textarea');"
                   "if(!ta)return;"
+                  // While no model is loaded the lock belongs to the model
+                  // poller below; the ctx-full logic's unlock ticks must not
+                  // release it. Only an unlock with reason 'model' may.
+                  "if(!locked&&window.__easyaiNoModel&&reason!=='model')return;"
                   "if(locked){"
                     "window.__easyaiCtxFull=true;"
                     "if(ta.dataset.easyaiLockedReason===reason)return;"
@@ -6430,6 +6468,47 @@ int main(int argc, char ** argv) {
                     "if(form)form.querySelectorAll('button[disabled]').forEach(b=>{b.disabled=false;});"
                   "}"
                 "};"
+                // ---- no-model gate ----------------------------------------
+                // /health.model_loaded is false while the server runs without
+                // a model (start-up load failed, or no --model). Lock the
+                // prompt with a pointer at /models and show a banner with a
+                // link above the form; release both once a hot-swap lands.
+                "const NO_MODEL_MSG='No model loaded \u2014 open /models to download, run or slink one';"
+                "const BANNER_ID='__easyaiNoModelBanner';"
+                "const showBanner=(on,detail)=>{"
+                  "let b=document.getElementById(BANNER_ID);"
+                  "if(!on){if(b)b.remove();return;}"
+                  "const ta=document.querySelector('textarea');"
+                  "const form=ta&&ta.closest('form');"
+                  "if(!form||!form.parentElement)return;"
+                  "if(!b){"
+                    "b=document.createElement('div');"
+                    "b.id=BANNER_ID;"
+                    "b.style.cssText='margin:0 auto .5rem;max-width:48rem;padding:.5rem .75rem;"
+                      "border:1px solid #f85149;border-radius:.5rem;background:rgba(248,81,73,.08);"
+                      "color:#f85149;font-size:.8rem;line-height:1.4;';"
+                  "}"
+                  "b.innerHTML='<b>No model loaded.</b> <a href=\"/models\" style=\"color:#5b8dee;text-decoration:underline\">Open the model manager</a> to download, run or slink one.'"
+                    "+(detail?'<div style=\"opacity:.8;margin-top:.2rem\">'+detail.replace(/[<>&]/g,c=>c==='<'?'&lt;':c==='>'?'&gt;':'&amp;')+'</div>':'');"
+                  "if(b.nextSibling!==form)form.parentElement.insertBefore(b,form);"
+                "};"
+                "const pollModel=async()=>{"
+                  "let j=null;"
+                  "try{const r=await fetch('/health');j=await r.json();}catch(e){return;}"
+                  "if(!j||j.model_loaded!==false){"
+                    "if(window.__easyaiNoModel){"
+                      "window.__easyaiNoModel=false;"
+                      "setInputLocked(false,'model');"
+                      "showBanner(false);"
+                    "}"
+                    "return;"
+                  "}"
+                  "window.__easyaiNoModel=true;"
+                  "setInputLocked(true,NO_MODEL_MSG);"
+                  "showBanner(true,j.load_error||'');"
+                "};"
+                "pollModel();"
+                "setInterval(pollModel,3000);"
                 // Observer tracks the bundle's `.chat-processing-info-detail`:
                 // when Svelte re-renders or replaces it, our content gets
                 // overwritten — the observer fires renderOverview again so we
@@ -7000,10 +7079,21 @@ int main(int argc, char ** argv) {
     ctx->engine.set_sampling(ctx->def_temperature, ctx->def_top_p,
                              ctx->def_top_k, ctx->def_min_p);
 
-    if (!ctx->engine.load()) {
-        std::fprintf(stderr, "[easyai-server] load failed: %s\n",
-                     ctx->engine.last_error().c_str());
-        return 1;
+    // A failed load is NOT fatal: the server comes up without a model so the
+    // operator can open /models and download, run or slink one. Every
+    // generation route answers 503 (require_model) until a hot-swap succeeds.
+    const bool model_loaded = ctx->engine.load();
+    if (!model_loaded) {
+        ctx->load_error = ctx->engine.last_error();
+        ctx->model_id   = "(no model)";
+        std::fprintf(stderr,
+            "[easyai-server] NO MODEL LOADED: %s\n"
+            "                path: %s\n"
+            "                chat is unavailable (503 model_not_loaded) until a model is loaded.\n"
+            "                open http://%s:%d/models to download, run or slink one.\n",
+            ctx->load_error.c_str(),
+            args.model_path.empty() ? "(none — pass --model or [SERVER] model)" : args.model_path.c_str(),
+            args.host.c_str(), args.port);
     }
 
     // Engine::load() resolves symlinks on the model path (so the AI box's
@@ -7012,7 +7102,7 @@ int main(int argc, char ** argv) {
     // post-resolution path so /v1/models, the webui badge, and the chat-
     // completion response all advertise the real model name instead of
     // the symlink stub.  Operator-provided --alias still wins.
-    if (args.alias.empty()) {
+    if (model_loaded && args.alias.empty()) {
         std::string p = ctx->engine.model_path();
         auto slash = p.find_last_of("/\\");
         if (slash != std::string::npos) p = p.substr(slash + 1);
@@ -7021,7 +7111,7 @@ int main(int argc, char ** argv) {
         if (!p.empty()) ctx->model_id = p;
     }
 
-    std::fprintf(stderr,
+    if (model_loaded) std::fprintf(stderr,
         "[easyai-server] %s loaded\n"
         "                backend=%s  ctx=%d  tools=%zu  preset=%s%s\n"
         "                profile=%s\n"
@@ -7409,6 +7499,7 @@ int main(int argc, char ** argv) {
             ordered_json p;
             p["model_alias"]   = ctx_ref.model_id;
             p["model_path"]    = ctx_ref.engine.model_path();
+            p["model_loaded"]  = ctx_ref.engine.is_loaded();
             p["total_slots"]   = 1;
             p["modalities"]    = { {"vision", false}, {"audio", false} };
             p["chat_template"] = "";
@@ -7764,6 +7855,7 @@ int main(int argc, char ** argv) {
             std::lock_guard<std::mutex> lk(ctx_ref.engine_mu);
             ok = ctx_ref.engine.reload(target);
             if (ok) {
+                ctx_ref.load_error.clear();
                 ctx_ref.reset_engine_defaults();
                 std::string p = ctx_ref.engine.model_path();
                 auto slash = p.find_last_of("/\\"); if (slash != std::string::npos) p = p.substr(slash + 1);

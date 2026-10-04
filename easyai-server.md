@@ -94,7 +94,7 @@ The HTTP layer, paths, tool gating, MCP auth.
 
 | Key | Type | CLI equivalent | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `model` | path | `-m`, `--model` | (none — REQUIRED) | GGUF file the engine loads. |
+| `model` | path | `-m`, `--model` | (none) | GGUF file the engine loads, or an `ai.gguf` symlink (Slink target). **A missing or unloadable file no longer aborts start-up**: the server comes up with no model, every generation route answers `503 model_not_loaded`, the webui locks the prompt with a banner pointing at `/models`, and the first successful **Run** (or **Run + slink**) from the MODELS dashboard brings chat back without a restart. |
 | `host` | string | `--host` | `127.0.0.1` | Bind address. `0.0.0.0` to listen on every interface. |
 | `port` | int | `--port` | `8080` | TCP port. |
 | `alias` | string | `-a`, `--alias` | basename of `model` | Public model id reported by `/v1/models` and `/api/tags`. |
@@ -476,7 +476,7 @@ unchanged.
 | GET | `/bundle.{js,css}` | webui | (open) | Bundle assets. |
 | GET | `/loading.html` | webui | (open) | Loading splash. |
 | GET | `/favicon` (+ `.ico`/`.svg`) | webui | (open) | Operator-supplied (`--webui-icon`) or the embedded AI Box logo SVG (compiled into the binary as `kBrandSvg`; canonical copy at `webui/AI-brain.svg`). |
-| GET | `/health` | easyai | (open) | `{model, backend, tools, preset, compat:{...}}` — liveness probe. |
+| GET | `/health` | easyai | (open) | `{model, model_loaded, load_error?, backend, tools, preset, compat:{...}}` — liveness probe. `model_loaded:false` means the server is up without a model (`model` reads `(no model)`, `load_error` says why); `/props` carries the same `model_loaded`. |
 | GET | `/metrics` | easyai | api_key | Prometheus exposition (only when `--metrics` is on). |
 | GET | `/v1/models` | OpenAI | api_key | OpenAI-shape list-models. |
 | GET | `/v1/tools` | easyai | api_key | Tool catalogue. Each entry: `{name, description, short_description}`. `description` is the full multi-line manual; `short_description` is the one-line trigger shipped in the per-turn `<tools>` block. `easyai-cli` reads `short_description` to render its prompt prefix; the webui popover reads `description`. Pre-Shape-C consumers see only the `description` field — backward compatible. |
@@ -754,6 +754,7 @@ a small "MODELS" pill (injected top-right) — for picking, running, and
 downloading local models. No external binary.
 
 **What it does.**
+- **Start without a model** — if the configured GGUF is missing or fails to load (or no `--model` was given) the server still starts; chat answers `503 model_not_loaded`, both webuis lock the prompt and show a link to `/models`, and a **Run** from the Local tab unlocks everything in place (the webui re-checks `/health` every 3 s).
 - **Recommend** — detects this machine's hardware (RAM / CPU / GPU+VRAM via ggml)
   and keeps a **static list of the top GGUF models on HuggingFace**
   (`/api/models?filter=gguf`), rebuilt on startup, lazily after 1 h, and via a

@@ -265,10 +265,14 @@ curl -s -b cj -X POST $B/models/api/run -H 'Content-Type: application/json' -d '
 
 ## 9. The model source & scoring fidelity
 
-- **Source:** the Recommend list is a snapshot of the **1000 most-recently-updated
-  GGUF repos** on HuggingFace (`/api/models?filter=gguf&sort=lastModified`),
-  followed across the listing cursor until it has 1000 or the listing is
-  exhausted (`--catalog-size` caps it, default/max 1000). It is **persisted to
+- **Source:** the Recommend list is a snapshot of the **1000 most-downloaded**
+  plus the **1000 most-recently-updated GGUF repos** on HuggingFace
+  (`/api/models?filter=gguf&sort=downloads` ∪ `…&sort=lastModified`, deduplicated
+  with the popular list first; `--catalog-size` sizes each half, default/max 1000).
+  **Search is live**: a non-empty search also queries HuggingFace's own index
+  (`search=` matches the full repo id, owner included, e.g. `unsloth`, `google
+  gemma`), most-downloaded first, cached per query for 10 min; those hits come
+  before the snapshot matches. It is **persisted to
   `data_dir/easyai_hf_catalog.json`** so a restart serves it instantly, refreshed
   **lazily when accessed if >1 h old**, and on demand via the **Refresh list**
   button. While a rebuild runs the UI shows a "Rebuilding…" banner.
@@ -293,6 +297,7 @@ curl -s -b cj -X POST $B/models/api/run -H 'Content-Type: application/json' -d '
 | Recommend tab shows "HuggingFace: …" error | The server couldn't reach the HuggingFace API (offline / rate-limited / DNS). Local models, Downloads, and Run still work. Retry, or narrow the search. |
 | GPU shows as CPU / wrong VRAM | ggml didn't detect a GPU backend (driver / build). On Apple Silicon VRAM == system RAM (unified). Use the simulation inputs to model target hardware. |
 | Run fails | The new GGUF couldn't load (corrupt / incompatible). The error is returned; the previous model stays unloaded — re-run a known-good model. |
+| Server starts with "NO MODEL LOADED" | The configured `--model` (or `ai.gguf` link target) is missing or unloadable, or no `--model` was given. This is not fatal: `/models` is up, chat answers `503 model_not_loaded`, the webui prompt is locked with a link here. **Run** (or **Run + slink**) a local model to bring chat back; the webui unlocks within 3 s. |
 | Download 409 | One download at a time; wait or cancel. |
 | Downloaded file not appearing | Confirm `download_dir` is writable by the service user. |
 

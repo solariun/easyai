@@ -490,6 +490,63 @@ contains `__easyaiEffortHost` and `EFFORT_DEFAULT='max'`; all 12 injected
 scripts parse under JavaScriptCore. Browser click-through was not possible
 from the session (no browser tool); see the manual check in the chat log.
 
+## Server starts without a model (AUTHORITATIVE — 2026-10-04)
+
+**Plain words.** Gustavo: "if loading the gguf file fails the server should
+always start; the user can download, run or slink another model, and the
+prompt is unavailable". Before, a bad `--model` path killed the process, so
+the model manager that could have fixed it was unreachable too.
+
+**Rules.**
+
+1. `Engine::load()` failure at start-up is logged (`NO MODEL LOADED: <why>`,
+   the path, and the `/models` URL) and the server keeps going.
+   `ctx->model_id = "(no model)"`, `ctx->load_error = <why>`. No `--model`
+   at all is the same case ("model path not set").
+2. `require_model()` guards every generation route (`/v1/chat/completions`):
+   `503 {"error":{"type":"model_not_loaded","message":"no model loaded — open
+   /models to download, run or slink one (<why>)"}}`. Nothing touches the
+   engine. Listing, tools, MCP, `/models/*` and the webui stay up.
+3. `/health` gains `model_loaded` (bool) and `load_error` (when set);
+   `/props` gains `model_loaded`.
+4. `POST /models/api/run` (`Engine::reload`) is the way back: on success
+   `load_error` is cleared and `model_id` recomputed; `link:true` also
+   re-points the `ai.gguf` symlink so the next restart loads it.
+5. Webui gate: both UIs poll `/health` every 3 s. Bundle: the prompt is
+   locked through the existing `setInputLocked` with the reason text and a
+   red banner with a link to `/models` is inserted above the form; the
+   ctx-full logic's unlock ticks are ignored while `window.__easyaiNoModel`
+   is set, only the poller's unlock (`reason === 'model'`) releases it.
+   Minimal: textarea + send disabled, placeholder carries the message.
+6. The engine getters the server calls while empty (`n_ctx`, `model_path`,
+   `backend_summary`, `perf_data`, `set_sampling`) are already null-safe;
+   verified, no change needed.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Empty: load() fails / no --model
+    [*] --> Loaded: load() ok
+    Empty --> Empty: chat → 503 model_not_loaded
+    Empty --> Loaded: POST /models/api/run ok
+    Loaded --> Loaded: chat → 200
+    Loaded --> Loaded: POST /models/api/run (swap)
+    Empty --> Empty: webui prompt locked, banner → /models
+```
+
+**Proof (2026-10-04, local).** Start with `--model …/ai.gguf` that does not
+exist: banner printed, `/health` → `model_loaded:false` with `load_error`,
+chat → 503, `/models` → 200, page carries the gate. `POST /models/api/run
+{"name":"stories260K.gguf","link":true}` → `ok`, `ai.gguf` symlink created,
+`/health` → `model_loaded:true`, chat → 200. Start with no `--model` at all:
+same empty state, `/models` → 200. All injected scripts parse (JavaScriptCore);
+minimal webui carries `pollHealth`. Full build green, ctest 1/1.
+
+**Decision.** The gate lives in the server (`require_model`), not in the
+engine, because the engine already reports `is_loaded()` and library users
+decide their own policy. Polling `/health` (3 s) was chosen over a push
+channel: the state changes once per operator action and the probe is
+lock-free.
+
 ## Backend::Config extensions (2026-05-27)
 
 `LocalBackend::Config` and `RemoteBackend::Config` gained two fields,
