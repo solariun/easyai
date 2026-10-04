@@ -502,6 +502,7 @@ header.topbar h1 { font-size: 1rem; margin: 0; font-weight: 600; letter-spacing:
           <button data-e="low">low</button>
           <button data-e="medium">medium</button>
           <button data-e="high">high</button>
+          <button data-e="xhigh">xhigh</button>
           <button data-e="max">max</button>
         </div>
         <h3>sampling</h3>
@@ -691,7 +692,7 @@ function loadSettings(){
     const j = JSON.parse(localStorage.getItem('easyai-settings') || '{}');
     return Object.assign({
       preset:       'auto',
-      reasoning_effort: 'auto',   // 'auto' = model default (field omitted)
+      reasoning_effort: 'auto',   // 'auto' = server default (field omitted; server default is max)
       temperature:  PRESETS.auto.temperature,
       top_p:        PRESETS.auto.top_p,
       top_k:        PRESETS.auto.top_k,
@@ -3147,27 +3148,29 @@ static void route_chat_completions(ServerCtx & ctx, const httplib::Request & req
         std::fprintf(fp,
             "----- PARSED REQUEST -----\n"
             "client_tools=%s stream=%s tools=%zu hist=%zu "
-            "last_user_bytes=%zu last_is_tool=%s inject_override=%s\n",
+            "last_user_bytes=%zu last_is_tool=%s inject_override=%s effort=%s\n",
             state->client_tools ? "yes" : "no",
             state->stream       ? "yes" : "no",
             state->client_tools ? state->tools_blob.size() : ctx.default_tools.size(),
             state->hist.size(),
             state->last_user.size(),
             state->last_is_tool ? "yes" : "no",
-            state->inject_override.empty() ? "(default)" : state->inject_override.c_str());
+            state->inject_override.empty() ? "(default)" : state->inject_override.c_str(),
+            state->reasoning_effort_set ? state->reasoning_effort.c_str() : "(default)");
         std::fflush(fp);
     }
 
     if (ctx.verbose) {
         std::fprintf(stderr,
             "[easyai-server] POST /v1/chat/completions  client_tools=%s "
-            "stream=%s tools=%zu hist=%zu last_user_bytes=%zu inject_override=%s\n",
+            "stream=%s tools=%zu hist=%zu last_user_bytes=%zu inject_override=%s effort=%s\n",
             state->client_tools ? "yes" : "no",
             state->stream       ? "yes" : "no",
             state->client_tools ? state->tools_blob.size() : ctx.default_tools.size(),
             state->hist.size(),
             state->last_user.size(),
-            state->inject_override.empty() ? "(default)" : state->inject_override.c_str());
+            state->inject_override.empty() ? "(default)" : state->inject_override.c_str(),
+            state->reasoning_effort_set ? state->reasoning_effort.c_str() : "(default)");
     }
 
     if (state->stream) {
@@ -3597,7 +3600,8 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "[ENGINE]  chat template & reasoning\n"
         "  chat_template_file  --chat-template-file <p>  Jinja template override (empty = model's).\n"
         "  reasoning_format    --reasoning-format <f>    none|auto|deepseek|deepseek-legacy.\n"
-        "  reasoning_effort    --reasoning-effort <l>    auto|low|medium|high|max|minimal.\n"
+        "  reasoning_effort    --reasoning-effort <l>    auto|low|medium|high|xhigh|max|minimal\n"
+        "                                                (default max = deepest the template accepts).\n"
         "\n"
         "[ENGINE]  sampling  (applied on top of --preset)\n"
         "  preset                  --preset <name>               auto|deterministic|precise|balanced|creative|wild.\n"
@@ -3672,9 +3676,12 @@ struct ServerArgs {
     // is the tuned choice for code, math, and factual Q&A.
     std::string preset     = "auto";
     // Reasoning-effort level injected into the chat template ("low" /
-    // "medium" / "high" / model-specific). "auto" = use the model default
-    // (inject nothing). Per-request `reasoning_effort` in the body wins.
-    std::string reasoning_effort = "auto";
+    // "medium" / "high" / model-specific). Default "max": the engine's
+    // fallback ladder lowers it to the deepest level the loaded template
+    // accepts (spec.md "Reasoning-effort fallback ladder"). "auto" = use
+    // the model default (inject nothing). Per-request `reasoning_effort`
+    // in the body wins.
+    std::string reasoning_effort = "max";
     size_t      max_body   = 8u * 1024u * 1024u;
 
     // Authoritative date/time injection — see build_authoritative_preamble
@@ -4855,6 +4862,29 @@ int main(int argc, char ** argv) {
         }
     }
 
+    {
+        // Reasoning effort. Validate the startup flag for a friendly typo
+        // message (a model-specific level can still come per-request via the
+        // body). "auto"/"none"/"default"/"model"/"" all mean model default.
+        // Resolved BEFORE the webui HTML is built below: the effort chip
+        // bakes ctx->default_reasoning_effort into its injected script.
+        std::string re = args.reasoning_effort;
+        for (auto & c : re) c = (char) std::tolower((unsigned char) c);
+        const bool is_default = re.empty() || re == "auto" || re == "none" ||
+                                re == "default" || re == "model";
+        const bool is_level   = re == "low" || re == "medium" || re == "high" ||
+                                re == "xhigh" || re == "max" || re == "minimal";
+        if (!is_default && !is_level) {
+            std::fprintf(stderr,
+                "[easyai-server] unknown reasoning effort: %s\n"
+                "                accepted values: auto, low, medium, high, xhigh, max, minimal\n",
+                args.reasoning_effort.c_str());
+            return 1;
+        }
+        ctx->default_reasoning_effort = is_default ? std::string() : re;
+        ctx->engine.reasoning_effort(ctx->default_reasoning_effort);
+    }
+
     // ----- webui rebrand: build the served HTML once and load any custom
     //       favicon into memory.
     {
@@ -5109,6 +5139,10 @@ int main(int argc, char ** argv) {
                 // across reloads — no force-overwrite.
                 "try{window.__easyaiTone=localStorage.getItem('easyai-tone')||'default';}"
                   "catch(e){window.__easyaiTone='default';}"
+                // Reasoning effort chosen in the effort chip (block5).
+                // 'auto' = omit the field so the server default applies.
+                "try{window.__easyaiEffort=localStorage.getItem('easyai-effort')||'auto';}"
+                  "catch(e){window.__easyaiEffort='auto';}"
                 "window.fetch=async(input,init)=>{"
                   "let url=typeof input==='string'?input:(input&&input.url)||'';"
                   "try{const u=new URL(url,location.origin);url=u.pathname;}catch(e){}"
@@ -5130,6 +5164,9 @@ int main(int argc, char ** argv) {
                         "if(body.top_p===undefined)body.top_p=t.top_p;"
                         "if(body.top_k===undefined)body.top_k=t.top_k;"
                       "}"
+                      "const ef=window.__easyaiEffort;"
+                      "if(ef&&ef!=='auto'&&body.reasoning_effort===undefined)"
+                        "body.reasoning_effort=ef;"
                       "init={...init,body:JSON.stringify(body)};"
                     "}catch(e){}"
                     "const r=await orig(input,init);"
@@ -5646,12 +5683,20 @@ int main(int argc, char ** argv) {
                   "[class*=\"rounded-sm\"][class*=\"px-1.5\"]';"
                 "const TONE_ID='__easyaiToneHost';"
                 "const TOOLS_ID='__easyaiToolsHost';"
+                "const EFFORT_ID='__easyaiEffortHost';"
+                // Server-side default effort, baked at render time so the
+                // chip can say what 'auto' resolves to without a round-trip.
+                "const EFFORT_DEFAULT='" << (ctx->default_reasoning_effort.empty()
+                                              ? std::string("auto")
+                                              : ctx->default_reasoning_effort) << "';"
+                "const EFFORT_LEVELS="
+                  "['auto','minimal','low','medium','high','xhigh','max'];"
                 // 'default' first (cycle starts on the operator's preset);
                 // 'wild' last (exploratory escape hatch — keep it out of
                 // the way during normal cycling).
                 "const TONE_ORDER="
                   "['default','deterministic','precise','balanced','creative','wild'];"
-                "let toneBtn=null,toolsBtn=null,toolsPop=null;"
+                "let toneBtn=null,toolsBtn=null,toolsPop=null,effortBtn=null;"
                 // findPill MUST skip our own clones — `cloneNode(false)`
                 // copies the pill's class string, so toneBtn and toolsBtn
                 // also match PILL_SEL.  Without this guard, querySelector
@@ -5662,7 +5707,7 @@ int main(int argc, char ** argv) {
                 "const findPill=()=>{"
                   "const all=document.querySelectorAll(PILL_SEL);"
                   "for(const p of all){"
-                    "if(p.id===TONE_ID||p.id===TOOLS_ID)continue;"
+                    "if(p.id===TONE_ID||p.id===TOOLS_ID||p.id===EFFORT_ID)continue;"
                     "return p;"
                   "}"
                   "return null;"
@@ -5834,6 +5879,130 @@ int main(int argc, char ** argv) {
                   "return b;"
                 "};"
 
+                // Effort chip: sits right AFTER the model-name pill. Click
+                // opens a popover listing the reasoning-effort levels; the
+                // choice persists in localStorage ('easyai-effort') and
+                // block4 injects it as `reasoning_effort` on every request.
+                // 'auto' omits the field (server default, shown in the
+                // popover so the user knows what they get).
+                "const effortLabel=()=>{"
+                  "const v=window.__easyaiEffort||'auto';"
+                  "return v==='auto'?'effort '+EFFORT_DEFAULT:'effort '+v;"
+                "};"
+                "const buildEffortFromPill=(pill)=>{"
+                  "if(effortBtn)return effortBtn;"
+                  "const b=pill.cloneNode(false);"
+                  "b.id=EFFORT_ID;"
+                  "b.type='button';"
+                  "b.removeAttribute('disabled');"
+                  "b.removeAttribute('aria-disabled');"
+                  "b.removeAttribute('data-svelte-h');"
+                  "b.setAttribute('aria-label','reasoning effort');"
+                  "b.setAttribute('aria-haspopup','listbox');"
+                  "b.innerHTML="
+                    "'<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" "
+                      "fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" "
+                      "stroke-linecap=\"round\" stroke-linejoin=\"round\" "
+                      "style=\"opacity:.75;flex-shrink:0\">"
+                      "<path d=\"M12 3a6 6 0 0 0-4 10.5V17h8v-3.5A6 6 0 0 0 12 3z\"/>"
+                      "<path d=\"M9 21h6\"/>"
+                    "</svg>"
+                    "<span data-effort-current "
+                      "style=\"font-variant-numeric:tabular-nums\"></span>';"
+                  "const lbl=b.querySelector('[data-effort-current]');"
+                  "const setLbl=()=>{lbl.textContent=effortLabel();};"
+                  "setLbl();"
+
+                  "let pop=document.getElementById('__easyaiEffortPop');"
+                  "if(pop)pop.remove();"
+                  "pop=document.createElement('div');"
+                  "pop.id='__easyaiEffortPop';"
+                  "pop.setAttribute('role','listbox');"
+                  "pop.setAttribute('aria-label','reasoning effort');"
+                  "pop.style.cssText="
+                    "'position:fixed;display:none;pointer-events:auto;"
+                    "min-width:11rem;"
+                    "background:#0f1318;border:1px solid #2a313b;"
+                    "border-radius:.5rem;padding:.3rem;"
+                    "box-shadow:0 6px 24px rgba(0,0,0,.5);"
+                    "color:#c9d1d9;font-size:.72rem;"
+                    "font-family:-apple-system,system-ui,sans-serif;"
+                    "z-index:2147483646;';"
+                  "if(!document.getElementById('__easyaiEffortPopStyle')){"
+                    "const ps=document.createElement('style');"
+                    "ps.id='__easyaiEffortPopStyle';"
+                    "ps.textContent="
+                      "'#__easyaiEffortPop .opt{display:flex;align-items:center;"
+                        "justify-content:space-between;gap:.8rem;"
+                        "padding:.32rem .5rem;border-radius:.3rem;cursor:pointer}"
+                      "#__easyaiEffortPop .opt:hover{background:rgba(91,141,238,.12)}"
+                      "#__easyaiEffortPop .opt.on{background:rgba(91,141,238,.22);"
+                        "color:#fff}"
+                      "#__easyaiEffortPop .hint{color:#8b949e;font-size:.65rem}"
+                      "#__easyaiEffortPop .head{color:#8b949e;font-size:.62rem;"
+                        "padding:.15rem .5rem .3rem;text-transform:uppercase;"
+                        "letter-spacing:.04em}';"
+                    "(document.head||document.documentElement).appendChild(ps);"
+                  "}"
+                  "const renderOpts=()=>{"
+                    "const cur=window.__easyaiEffort||'auto';"
+                    "let html='<div class=\"head\">reasoning effort</div>';"
+                    "for(const l of EFFORT_LEVELS){"
+                      "const hint=l==='auto'?'server: '+EFFORT_DEFAULT:"
+                        "l==='max'?'deepest the model accepts':'';"
+                      "html+='<div class=\"opt'+(l===cur?' on':'')+'\" data-l=\"'+l+'\">'+"
+                        "'<span>'+l+'</span><span class=\"hint\">'+hint+'</span></div>';"
+                    "}"
+                    "pop.innerHTML=html;"
+                  "};"
+                  "renderOpts();"
+                  "pop.addEventListener('click',(e)=>{"
+                    "const o=e.target.closest('.opt');"
+                    "if(!o)return;"
+                    "e.preventDefault();e.stopPropagation();"
+                    "window.__easyaiEffort=o.dataset.l;"
+                    "try{localStorage.setItem('easyai-effort',o.dataset.l);}catch(_){}"
+                    "setLbl();renderOpts();"
+                    "pop.style.display='none';"
+                  "});"
+
+                  "const ensurePopAttached=()=>{"
+                    "if(!pop.isConnected&&document.body)"
+                      "document.body.appendChild(pop);"
+                  "};"
+                  "ensurePopAttached();"
+                  "if(!pop.isConnected){"
+                    "document.addEventListener('DOMContentLoaded',"
+                      "ensurePopAttached,{once:true});"
+                  "}"
+                  "const placePop=()=>{"
+                    "const r=b.getBoundingClientRect();"
+                    "const vw=window.innerWidth;"
+                    "pop.style.left=Math.min(vw-16,Math.max(8,r.left))+'px';"
+                    "pop.style.bottom=(window.innerHeight-r.top+6)+'px';"
+                  "};"
+                  "b.addEventListener('click',(e)=>{"
+                    "e.preventDefault();e.stopPropagation();"
+                    "ensurePopAttached();"
+                    "const willOpen=pop.style.display!=='block';"
+                    "if(willOpen){renderOpts();placePop();pop.style.display='block';}"
+                    "else{pop.style.display='none';}"
+                  "});"
+                  "window.addEventListener('resize',()=>{"
+                    "if(pop.style.display==='block')placePop();"
+                  "});"
+                  "window.addEventListener('scroll',()=>{"
+                    "if(pop.style.display==='block')placePop();"
+                  "},true);"
+                  "document.addEventListener('click',(e)=>{"
+                    "if(b.contains(e.target))return;"
+                    "if(pop.contains(e.target))return;"
+                    "pop.style.display='none';"
+                  "});"
+                  "effortBtn=b;"
+                  "return b;"
+                "};"
+
                 // Reposition: walk UP from the pill until we hit a
                 // horizontal flex container (display:flex, flex-direction
                 // anything but column).  The pill itself often lives in
@@ -5844,7 +6013,7 @@ int main(int argc, char ** argv) {
                 // row and inserting tone+tools as siblings of the column
                 // (the "pillBranch"), we get true left-to-right placement:
                 //
-                //     [ ...left content ][ tone ][ tools ][ pill-col ][ send ]
+                //     [ ...left content ][ tone ][ tools ][ pill-col ][ effort ][ send ]
                 //
                 // Fast-path early-return keeps the MutationObserver from
                 // feeding itself.
@@ -5866,7 +6035,8 @@ int main(int argc, char ** argv) {
                   "if(!pill)return;"
                   "if(!toneBtn)buildToneFromPill(pill);"
                   "if(!toolsBtn)buildToolsFromPill(pill);"
-                  "if(!toneBtn||!toolsBtn)return;"
+                  "if(!effortBtn)buildEffortFromPill(pill);"
+                  "if(!toneBtn||!toolsBtn||!effortBtn)return;"
                   "const row=findHorizontalRow(pill);"
                   "if(!row)return;"
                   // The pill may be nested several levels deep inside a
@@ -5880,12 +6050,15 @@ int main(int argc, char ** argv) {
                   "if(!pillBranch)return;"
                   "if(toneBtn.parentElement===row&&"
                      "toolsBtn.parentElement===row&&"
+                     "effortBtn.parentElement===row&&"
                      "toneBtn.nextSibling===toolsBtn&&"
-                     "toolsBtn.nextSibling===pillBranch){"
+                     "toolsBtn.nextSibling===pillBranch&&"
+                     "pillBranch.nextSibling===effortBtn){"
                     "return;"
                   "}"
                   "row.insertBefore(toneBtn,pillBranch);"
                   "row.insertBefore(toolsBtn,pillBranch);"
+                  "row.insertBefore(effortBtn,pillBranch.nextSibling);"
                 "};"
 
                 "if(document.documentElement){reposition();}"
@@ -6813,26 +6986,6 @@ int main(int argc, char ** argv) {
             return 1;
         }
     }
-    {
-        // Reasoning effort. Validate the startup flag for a friendly typo
-        // message (a model-specific level can still come per-request via the
-        // body). "auto"/"none"/"default"/"model"/"" all mean model default.
-        std::string re = args.reasoning_effort;
-        for (auto & c : re) c = (char) std::tolower((unsigned char) c);
-        const bool is_default = re.empty() || re == "auto" || re == "none" ||
-                                re == "default" || re == "model";
-        const bool is_level   = re == "low" || re == "medium" ||
-                                re == "high" || re == "max" || re == "minimal";
-        if (!is_default && !is_level) {
-            std::fprintf(stderr,
-                "[easyai-server] unknown reasoning effort: %s\n"
-                "                accepted values: auto, low, medium, high, max, minimal\n",
-                args.reasoning_effort.c_str());
-            return 1;
-        }
-        ctx->default_reasoning_effort = is_default ? std::string() : re;
-        ctx->engine.reasoning_effort(ctx->default_reasoning_effort);
-    }
     if (args.flash_attn)     ctx->engine.flash_attn(true);
     if (args.mlock)          ctx->engine.use_mlock(true);
     if (args.no_mmap)        ctx->engine.use_mmap(false);
@@ -6940,12 +7093,12 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr,
             "[easyai-server] models: %s\n"
             "                download dir: %s\n"
-            "                catalog: %d most-recent GGUF repos, cached at %s/easyai_hf_catalog.json\n"
-            "                         (refreshed from HuggingFace on request, once >1h old)\n"
+            "                catalog: %d most-downloaded + %d most-recent GGUF repos, cached at %s/easyai_hf_catalog.json\n"
+            "                         (refreshed from HuggingFace on request, once >1h old; search is live)\n"
             "                /models auth: %s\n",
             ctx->models->status_message().c_str(),
             dl_dir.c_str(),
-            args.catalog_size, ctx->models->data_dir().c_str(),
+            args.catalog_size, args.catalog_size, ctx->models->data_dir().c_str(),
             ctx->webui_password.empty() ? "OPEN (set webui_password to require login)"
                                         : "password required");
         // Serve the on-disk catalog cache (loaded in the ctor); only fetch from

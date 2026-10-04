@@ -364,6 +364,16 @@ cache empty, all-rejected rethrows the template's message, an unrelated
 2026-10-04. Before the change the same template ended every turn with
 `finish_reason="error"` (production log, ai-pro, 2026-10-04 12:10).
 
+**Server default = `max` (Gustavo, 2026-10-04).** `--reasoning-effort`
+defaults to `max` instead of `auto`: with the ladder in place, `max` means
+"the deepest level this template accepts" (`xhigh` on the Nemotron/GLM
+family, `max` on DeepSeek V4, `high` on gpt-oss-style three-level
+templates that validate). `auto` is still available to inject nothing.
+**Known limit:** a template that does *not* validate the level and prints
+it verbatim (gpt-oss, llm-jp: `Reasoning: max`) gets a word its model was
+not trained on; the ladder cannot see that because nothing throws. Operators
+of such models set `--reasoning-effort high`. Accepted values gain `xhigh`.
+
 **Decision.** Fallback lives in the Engine, not the server, so the CLI,
 library users and the server all get it. Parsing the template's
 "Supported types are …" text was rejected: the wording is template-specific;
@@ -429,6 +439,56 @@ mirror, and HF's index already ranks by downloads. Parsing `author=` was
 rejected: `search=` already matches the owner. An async live search was
 rejected: one 300–800 ms round-trip per new query is acceptable and the
 webui debounces input; the cache removes the cost on repeats.
+
+## Webui effort chip (bundle webui, 2026-10-04)
+
+**Plain words.** Gustavo asked for a popup to change the reasoning effort
+right after the model-name pill in the prompt box. The bundle (llama-server
+derived SvelteKit app) is not ours to edit, so the chip is injected the same
+way the tone and tools pills are: a shallow clone of the model pill so it
+inherits the bundle's styling, placed by the existing `reposition()` walk.
+
+**Layout.** `[ tone ][ tools ][ model pill ][ effort ][ send ]`. The chip is
+inserted after the pill's branch in the enclosing horizontal flex row; the
+fast-path check in `reposition()` includes it so the MutationObserver does
+not thrash.
+
+**Rules.**
+
+1. Label `effort <level>`; when the choice is `auto` the label shows the
+   server default (`EFFORT_DEFAULT`, baked at render time from
+   `ctx->default_reasoning_effort`, `auto` when empty).
+2. Popover (`#__easyaiEffortPop`, fixed, attached to `document.body` like the
+   tools popover) lists `auto minimal low medium high xhigh max`; the
+   current one is highlighted; `auto` shows `server: <default>`, `max`
+   shows `deepest the model accepts`. Click selects and closes; outside
+   click, resize and scroll handling mirror the tools popover.
+3. Persistence: `localStorage['easyai-effort']`, default `auto`.
+4. Request: block4's fetch interceptor sets `body.reasoning_effort` when the
+   choice is not `auto` and the bundle did not set it. Independent of the
+   tone sampling overrides and of the server's authoritative preset.
+5. Startup order: the server now resolves `--reasoning-effort` BEFORE it
+   builds the webui HTML (it used to run after, so the chip would have baked
+   `auto` while the server default was `max`).
+
+```mermaid
+sequenceDiagram
+    participant U as user
+    participant C as effort chip
+    participant F as fetch interceptor
+    participant S as easyai-server
+    U->>C: click, pick xhigh
+    C->>C: localStorage easyai-effort = xhigh
+    U->>F: send message (bundle POST /v1/chat/completions)
+    F->>F: body.reasoning_effort = xhigh
+    F->>S: POST
+    S->>S: Engine::reasoning_effort(xhigh) → ladder if rejected
+```
+
+**Proof (2026-10-04).** Local server on a 1 MB test GGUF: served page
+contains `__easyaiEffortHost` and `EFFORT_DEFAULT='max'`; all 12 injected
+scripts parse under JavaScriptCore. Browser click-through was not possible
+from the session (no browser tool); see the manual check in the chat log.
 
 ## Backend::Config extensions (2026-05-27)
 
