@@ -37,6 +37,7 @@ option(EASYAI_INSTALL        "Generate install + find_package targets" ON)
 # OFF keeps configure/build fast; the installer flips this ON so the
 # AI box ships with the full tool set under $prefix/bin.
 option(EASYAI_BUILD_LLAMA_TOOLS "Also build llama.cpp tool binaries"   OFF)
+option(EASYAI_BUILD_TESTS       "Build the easyai unit tests (ctest)"    OFF)
 
 # ----- 64-bit std::atomic probe ---------------------------------------------
 # Some service binaries declare `std::atomic<int64_t>` /
@@ -361,6 +362,17 @@ if (EASYAI_BUILD_SERVICES)
     target_include_directories(easyai-mcp-server PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor/cpp-httplib
         ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor)
+endif()
+
+# ---------------------------------------------------------------------------
+# Tests — model-free, run with `ctest --test-dir <build>` after configuring
+# with -DEASYAI_BUILD_TESTS=ON.
+# ---------------------------------------------------------------------------
+if (EASYAI_BUILD_TESTS)
+    enable_testing()
+    add_executable(easyai-test-reasoning-effort tests/test_reasoning_effort.cpp)
+    target_link_libraries(easyai-test-reasoning-effort PRIVATE easyai llama-common)
+    add_test(NAME reasoning_effort COMMAND easyai-test-reasoning-effort)
 endif()
 
 # ============================================================================

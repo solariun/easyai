@@ -22,6 +22,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -31,6 +32,8 @@
 // hefty common/chat.h.  Callers that actually use the result include it
 // themselves.
 struct common_chat_params;
+struct common_chat_templates;
+struct common_chat_templates_inputs;
 
 namespace easyai {
 
@@ -289,6 +292,14 @@ class Engine {
     //
     // No-op on templates that don't consult `reasoning_effort` (most
     // non-reasoning models simply ignore the extra kwarg).
+    //
+    // A template that REJECTS the level (raise_exception "Unexpected
+    // reasoning effort max. Supported types are xhigh, medium, and low")
+    // does not fail the turn: render() retries with the nearest well-known
+    // level on the ladder minimal < low < medium < high < xhigh < max
+    // (lower neighbour first), then with no kwarg at all, and remembers the
+    // answer for that level until the next load(). One warning is logged
+    // per remapped level.
     Engine & reasoning_effort(const std::string & level);
 
     // ---------------- tools -------------------------------------------------
@@ -482,5 +493,16 @@ class Engine {
     struct Impl;
     std::unique_ptr<Impl> p_;
 };
+
+// Render `in` with the `reasoning_effort` chat-template kwarg set to
+// `requested`, degrading to the nearest level the template accepts (the
+// ladder documented at Engine::reasoning_effort). `effort_remap` caches the
+// accepted level per requested level; the Engine owns one per loaded model.
+// Internal to the Engine — exposed only so the ladder is testable without
+// loading a model.
+::common_chat_params apply_reasoning_effort(const ::common_chat_templates * templates,
+                                            ::common_chat_templates_inputs & in,
+                                            const std::string & requested,
+                                            std::map<std::string, std::string> & effort_remap);
 
 }  // namespace easyai

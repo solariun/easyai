@@ -18,8 +18,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -767,6 +769,102 @@ std::string format_unknown_tool_error(
 }  // namespace (top-level helpers)
 
 // ===========================================================================
+// Reasoning-effort fallback ladder (spec.md "Reasoning-effort fallback ladder")
+// ===========================================================================
+// Well-known effort levels, shallowest first. Used to pick a neighbour
+// when the template rejects the requested one.
+static const std::vector<std::string> & effort_ladder() {
+    static const std::vector<std::string> ladder =
+        { "minimal", "low", "medium", "high", "xhigh", "max" };
+    return ladder;
+}
+
+// Candidate levels to try after `level` was rejected: nearest ladder
+// neighbours first (ties prefer the lower one), then "" (inject
+// nothing, model default). A level outside the ladder tries the whole
+// ladder from the top.
+static std::vector<std::string> effort_candidates(const std::string & level) {
+    const auto & ladder = effort_ladder();
+    std::vector<std::string> out;
+    auto it = std::find(ladder.begin(), ladder.end(), level);
+    if (it == ladder.end()) {
+        out.assign(ladder.rbegin(), ladder.rend());
+    } else {
+        const int idx = (int) (it - ladder.begin());
+        const int n   = (int) ladder.size();
+        for (int d = 1; d < n; ++d) {
+            if (idx - d >= 0) out.push_back(ladder[idx - d]);
+            if (idx + d <  n) out.push_back(ladder[idx + d]);
+        }
+    }
+    out.push_back("");
+    return out;
+}
+
+// The template engine wraps raise_exception() in a multi-line parser dump;
+// the last non-empty line is the template's own message.
+static std::string last_line(const std::string & what) {
+    size_t end = what.find_last_not_of("\r\n");
+    if (end == std::string::npos) return what;
+    size_t start = what.find_last_of('\n', end);
+    start = (start == std::string::npos) ? 0 : start + 1;
+    return what.substr(start, end - start + 1);
+}
+
+static bool is_effort_rejection(const std::string & what) {
+    std::string w;
+    w.reserve(what.size());
+    for (char c : what) w += (char) std::tolower((unsigned char) c);
+    return w.find("effort") != std::string::npos;
+}
+
+// Render with the `reasoning_effort` kwarg set to `requested`, degrading
+// to the nearest level the template accepts when it throws an
+// effort-related exception. Unrelated exceptions propagate untouched.
+// Declared in engine.hpp so the ladder can be exercised without a model.
+common_chat_params apply_reasoning_effort(const common_chat_templates * templates,
+                                          common_chat_templates_inputs & in,
+                                          const std::string & requested,
+                                          std::map<std::string, std::string> & effort_remap) {
+    auto cached = effort_remap.find(requested);
+    if (cached != effort_remap.end()) {
+        if (!cached->second.empty()) {
+            in.chat_template_kwargs["reasoning_effort"] = "\"" + cached->second + "\"";
+        }
+        return common_chat_templates_apply(templates, in);
+    }
+
+    std::string first_error;
+    try {
+        in.chat_template_kwargs["reasoning_effort"] = "\"" + requested + "\"";
+        return common_chat_templates_apply(templates, in);
+    } catch (const std::exception & e) {
+        if (!is_effort_rejection(e.what())) throw;
+        first_error = last_line(e.what());
+    }
+
+    for (const std::string & cand : effort_candidates(requested)) {
+        try {
+            in.chat_template_kwargs.erase("reasoning_effort");
+            if (!cand.empty()) {
+                in.chat_template_kwargs["reasoning_effort"] = "\"" + cand + "\"";
+            }
+            auto out = common_chat_templates_apply(templates, in);
+            effort_remap[requested] = cand;
+            easyai::log::error(
+                "[easyai] reasoning_effort '%s' rejected by the chat template "
+                "(%s) — using '%s' for this model from now on\n",
+                requested.c_str(), first_error.c_str(),
+                cand.empty() ? "model default" : cand.c_str());
+            return out;
+        } catch (const std::exception & e) {
+            if (!is_effort_rejection(e.what())) throw;
+        }
+    }
+    throw std::runtime_error(first_error);
+}
+
+// ===========================================================================
 // Engine::Impl
 // ===========================================================================
 struct Engine::Impl {
@@ -827,6 +925,13 @@ struct Engine::Impl {
     // Set via Engine::reasoning_effort, which maps "auto"/"none"/"default" to
     // empty. Lowercased simple word ("low"/"medium"/"high"/…) otherwise.
     std::string reasoning_effort;
+    // Resolved effort per requested level, learned by render(): a template
+    // that raise_exception()s on a level it doesn't know (Nemotron/GLM-style
+    // "Supported types are xhigh, medium, and low") is retried with the
+    // nearest well-known level, and the answer is remembered here so the
+    // next request pays no retry. Value "" = inject nothing. Cleared on
+    // load()/unload() because the template changes with the model.
+    mutable std::map<std::string, std::string> effort_remap;
     common_chat_tool_choice tool_choice = COMMON_CHAT_TOOL_CHOICE_AUTO;
     bool         parallel_tool_calls    = false;
     int          max_tool_hops          = 8;     // default agentic safety cap
@@ -935,11 +1040,12 @@ struct Engine::Impl {
         // so the value must be a JSON literal — wrap the level in quotes
         // (it's a validated simple word, no escaping needed). Empty means
         // "model default": inject nothing and let the template decide.
-        if (!reasoning_effort.empty()) {
-            in.chat_template_kwargs["reasoning_effort"] = "\"" + reasoning_effort + "\"";
+        if (reasoning_effort.empty()) {
+            return common_chat_templates_apply(templates.get(), in);
         }
-        return common_chat_templates_apply(templates.get(), in);
+        return apply_reasoning_effort(templates.get(), in, reasoning_effort, effort_remap);
     }
+
 
     bool feed_prompt(const std::string & prompt, int & n_past_inout) {
         // Tokenize and decode the new prompt span past whatever is already
@@ -1833,6 +1939,7 @@ bool Engine::load() {
     // load cost. Empty when no override path was set; in that case we
     // pass "" and common_chat_templates_init uses the embedded template.
     p_->templates = common_chat_templates_init(p_->init->model(), tmpl_override);
+    p_->effort_remap.clear();
     if (!p_->templates) {
         p_->last_error = "model has no usable chat template";
         easyai::log::error("[easyai] Engine::load: %s", p_->last_error.c_str());
@@ -1996,6 +2103,7 @@ bool Engine::reload(const std::string & new_model_path) {
     if (p_->ctx_dft)   { llama_free(p_->ctx_dft);         p_->ctx_dft   = nullptr; }
     if (p_->model_dft) { llama_model_free(p_->model_dft); p_->model_dft = nullptr; }
     p_->templates.reset();
+    p_->effort_remap.clear();
     p_->init.reset();                 // frees the model + its context
 
     p_->spec_active = false;

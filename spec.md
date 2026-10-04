@@ -309,6 +309,67 @@ self-gate on their flags:
   Note: against an easyai-server this double-injects the date/time block
   (cli + server); both read their own wall clock.
 
+## Reasoning-effort fallback ladder (AUTHORITATIVE — 2026-10-04)
+
+**Plain words.** The operator or the client asks for a thinking depth
+(`reasoning_effort`, e.g. `max`). Some chat templates only know a few
+names and `raise_exception` on the rest (seen in production: *"Unexpected
+reasoning effort max. Supported types are xhigh (default), medium, and
+low."*). Before this rule the exception escaped `render()`, the server fell
+back to the generic parser, the engine produced nothing and the turn ended
+as `finish_reason="error"`. Now the engine quietly picks the closest level
+the template accepts and keeps going.
+
+**Rules.**
+
+1. `Engine::Impl::render()` passes `reasoning_effort` to
+   `common_chat_templates_apply` only when non-empty (unchanged).
+2. If the template throws and the message contains the word `effort`
+   (case-insensitive), the level was rejected. Any other exception
+   propagates untouched — a malformed history must still surface.
+3. Candidates are tried in order on the ladder
+   `minimal < low < medium < high < xhigh < max`: nearest neighbours of
+   the requested level first, lower before higher on ties, then `""`
+   (inject nothing, template default). A level outside the ladder tries
+   the ladder from `max` down. Example for `max`: `xhigh`, `high`,
+   `medium`, `low`, `minimal`, none.
+4. The first accepted candidate is cached per requested level in
+   `effort_remap` for the lifetime of the loaded model (cleared on
+   `load()` / `unload()`), so later requests pay no retry.
+5. One `easyai::log::error` line per remapped level, naming the request,
+   the template's message and the chosen level.
+6. If every candidate is rejected the original exception is rethrown.
+
+```mermaid
+flowchart TD
+    A[render with requested level] -->|ok| Z[prompt]
+    A -->|throws, no 'effort' in message| X[rethrow]
+    A -->|throws 'effort'| B{next candidate on ladder}
+    B -->|accepted| C[cache level, log once] --> Z
+    B -->|rejected| B
+    B -->|none left| X
+```
+
+**Code.** `easyai::apply_reasoning_effort(templates, inputs, requested,
+remap)` in `src/engine.cpp`, declared in `engine.hpp` so it can be driven
+without a model. `Engine::Impl::render()` calls it with the per-model
+`effort_remap` cache.
+
+**Proof.** `tests/test_reasoning_effort.cpp` (target
+`easyai-test-reasoning-effort`, `-DEASYAI_BUILD_TESTS=ON`, `ctest`) renders
+real Jinja templates through llama.cpp with no model loaded: `max`→`xhigh`,
+`high`→`medium`, `minimal`→`low`, `turbo`→`xhigh`, accepted level leaves the
+cache empty, all-rejected rethrows the template's message, an unrelated
+`raise_exception` propagates untouched. 15 checks, all green on
+2026-10-04. Before the change the same template ended every turn with
+`finish_reason="error"` (production log, ai-pro, 2026-10-04 12:10).
+
+**Decision.** Fallback lives in the Engine, not the server, so the CLI,
+library users and the server all get it. Parsing the template's
+"Supported types are …" text was rejected: the wording is template-specific;
+the ladder retry is template-agnostic and costs a few extra Jinja renders
+only on the first rejected request per model.
+
 ## Backend::Config extensions (2026-05-27)
 
 `LocalBackend::Config` and `RemoteBackend::Config` gained two fields,
