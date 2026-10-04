@@ -3557,7 +3557,8 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "  webui_password  --webui-password <pw>  Gate /models + its API (empty = open).\n"
         "  download_dir    --download-dir <dir>   Where GGUF weights download / list / run from.\n"
         "  data_dir        --data-dir <dir>       Catalog cache dir (default: download_dir).\n"
-        "  catalog_size    --catalog-size <n>     Most-recent GGUF repos, 1-1000 (default 1000).\n"
+        "  catalog_size    --catalog-size <n>     Most-downloaded + most-recent GGUF repos per\n"
+        "                                         listing, 1-1000 (default 1000). Search is live.\n"
         "\n"
         "[SERVER]  webui\n"
         "  webui_mode         --webui <mode>           modern (default) | minimal.\n"
@@ -3773,9 +3774,9 @@ struct ServerArgs {
     std::string download_dir;            // where GGUF weights are downloaded /
                                          // listed / deleted. Default: dir of --model.
     std::string webui_password;          // gates /models + its API; empty = open.
-    int         catalog_size = 1000;     // most-recently-updated GGUF repos pulled
-                                         // into the searchable /models snapshot per
-                                         // refresh, paged from HF. Clamped [1,1000].
+    int         catalog_size = 1000;     // GGUF repos per listing (most-downloaded
+                                         // + most-recent) pulled into the /models
+                                         // snapshot per refresh. Clamped [1,1000].
                                          // CLI: --catalog-size N. INI:
                                          // [SERVER] catalog_size.
     std::string data_dir;                // where the /models catalog snapshot is

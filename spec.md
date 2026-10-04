@@ -370,6 +370,66 @@ library users and the server all get it. Parsing the template's
 the ladder retry is template-agnostic and costs a few extra Jinja renders
 only on the first rejected request per model.
 
+## `/models` catalog: popular ∪ recent snapshot + live search (AUTHORITATIVE — 2026-10-04)
+
+**Plain words.** The model browser looked "utterly incomplete": unsloth,
+google, Qwen and friends never showed up. The catalog was a snapshot of the
+1000 *most-recently-modified* GGUF repos on HuggingFace, and "search" was a
+substring filter over that snapshot. Measured on 2026-10-04: that window
+covers ~2 days of uploads, 161 of the 1000 belong to one re-uploader, and
+unsloth, google and Qwen have 0 entries each. Searching could never find
+what the window did not contain. Now the snapshot has a stable popular half,
+and a search goes to HuggingFace's own index.
+
+**Rules.**
+
+1. **Snapshot** (`hf_fetch_catalog`): `catalog_size` repos by `downloads`
+   plus `catalog_size` by `lastModified`, both `filter=gguf`, cursor-paged,
+   deduplicated with the popular list first. Either half may fail: the
+   other is kept and the error is reported in the envelope. Persisted to
+   `easyai_hf_catalog.json` as before (same format, more rows).
+2. **Live search** (`hf_live_search`, `ModelsEngine::live_search`): a
+   non-empty `search` sends `GET /api/models?filter=gguf&search=<q>&sort=downloads&direction=-1&limit=L`
+   with `L = clamp(limit, 50, 200)`. HF matches `search` against the full
+   repo id, owner included, and accepts several words.
+3. **Merge**: live hits first (HF download order), then snapshot rows whose
+   `name provider params` contains the query, deduplicated by repo. The
+   existing fit scoring, `min_fit`, `use_case` and `sort` apply to the
+   merged list unchanged.
+4. **Cache**: per lowercased query, TTL 600 s, at most 64 queries (oldest
+   evicted). The cache mutex is never held across the network call. Repeat
+   query measured at 4 ms.
+5. **Envelope**: `live_search:true` when the live half answered; on HF
+   failure the answer is snapshot-only and `error` carries the reason.
+6. `catalog_size` keeps its name and range; it now sizes each half.
+
+```mermaid
+flowchart LR
+    R[refresh] --> P[HF sort=downloads ×N] --> U[dedupe, popular first] --> S[(snapshot)]
+    R --> Q[HF sort=lastModified ×N] --> U
+    G[GET /models/api/models?search=q] --> C{cache hit <10 min?}
+    C -->|no| H[HF search=q sort=downloads] --> K[cache] --> M
+    C -->|yes| M[live hits + snapshot substring matches] --> F[score, filter, sort] --> J[JSON]
+    G -->|empty search| S --> F
+```
+
+**Proof** (2026-10-04, real HF, `ModelsEngine` driven directly):
+
+| query | before | after |
+|---|---|---|
+| snapshot size | 1000 (recent only) | 1975 (1000 popular ∪ 1000 recent) |
+| `search=unsloth` | 0 | 115 |
+| `search=google` | 0 | 60 |
+| `search=gemma` | ~0 | 148 |
+| repeat query | n/a | 4 ms (cache) |
+
+**Decision.** Live search over a bigger snapshot was chosen instead of a
+much bigger snapshot: HF holds far more GGUF repos than one process should
+mirror, and HF's index already ranks by downloads. Parsing `author=` was
+rejected: `search=` already matches the owner. An async live search was
+rejected: one 300–800 ms round-trip per new query is acceptable and the
+webui debounces input; the cache removes the cost on repeats.
+
 ## Backend::Config extensions (2026-05-27)
 
 `LocalBackend::Config` and `RemoteBackend::Config` gained two fields,

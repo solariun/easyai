@@ -84,6 +84,10 @@ std::int64_t now_sec() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 constexpr std::int64_t kSnapshotTtlSec = 3600;   // auto-refresh after 1 hour
+constexpr std::int64_t kSearchTtlSec   = 600;    // live HF search results stay fresh this long
+constexpr std::size_t  kSearchCacheMax = 64;     // distinct live queries kept
+constexpr int          kSearchMinHits  = 50;     // live search asks HF for at least this many
+constexpr int          kSearchMaxHits  = 200;    // ... and at most this many (one HF page)
 constexpr std::uint32_t kFitContext    = 131072; // 128K — the context fit is judged at
 constexpr long         kGgufHeaderBytes = 16 * 1024 * 1024; // range-read budget for a remote GGUF header
 
@@ -290,10 +294,13 @@ struct ModelEntry {
 struct HfHit  { std::string repo, owner, pipeline, last_modified; std::uint64_t downloads = 0, likes = 0; };
 struct CachedHf { std::string repo; ModelEntry entry; std::uint64_t best_size = 0, downloads = 0, likes = 0; bool ok = false; };
 // The static model snapshot: enriched HF entries + when it was last rebuilt.
+struct SearchHit { std::vector<HfHit> hits; std::int64_t when = 0; };
 struct ModelsEngine::HfCache {
     std::vector<CachedHf> snapshot;
     std::int64_t          last_refresh = 0;   // unix seconds; 0 = never
     std::string           error;
+    // Live HF search results keyed by the lowercased query (see models_json).
+    std::map<std::string, SearchHit> searches;
 };
 
 namespace {
@@ -1705,21 +1712,61 @@ bool curl_get_paged(const std::string & url, std::string & out, std::string & ne
     return true;
 }
 
-// Pull up to `target` most-recently-updated GGUF repos, following the HF cursor
-// across pages until we have enough OR the listing is exhausted — we're bounded
-// by GGUF-only repos, so "keep going until 1000 or it's finished" terminates.
-bool hf_search_recent(int target, std::vector<HfHit> & out, std::string & err) {
-    out.clear();
+// Append up to `target` GGUF repos ordered by `sort` (an HF sort key such as
+// "downloads" or "lastModified", descending), following the HF cursor across
+// pages until we have enough OR the listing is exhausted.
+bool hf_list(const std::string & sort, int target, std::vector<HfHit> & out, std::string & err) {
     if (target < 1) target = 1;
-    std::string url = "https://huggingface.co/api/models?filter=gguf&direction=-1&sort=lastModified&limit=" +
-                      std::to_string(std::min(target, 1000));
-    for (int guard = 0; (int) out.size() < target && !url.empty() && guard < 64; ++guard) {
+    const std::size_t base = out.size();
+    const int want = (int) base + target;
+    std::string url = "https://huggingface.co/api/models?filter=gguf&direction=-1&sort=" + sort +
+                      "&limit=" + std::to_string(std::min(target, 1000));
+    for (int guard = 0; (int) out.size() < want && !url.empty() && guard < 64; ++guard) {
         std::string body, next;
-        if (!curl_get_paged(url, body, next, err)) return !out.empty();  // keep a partial list on a later-page error
-        if (parse_hf_page(body, target, out, err) == 0) break;           // empty page → exhausted
-        url = next;                                                       // follow the cursor
+        if (!curl_get_paged(url, body, next, err)) return out.size() > base;  // keep a partial list on a later-page error
+        if (parse_hf_page(body, want, out, err) == 0) break;                  // empty page → exhausted
+        url = next;                                                            // follow the cursor
     }
     return true;
+}
+
+// Drop repeated repos, keeping the first occurrence (so the order of `hits`
+// decides which listing wins).
+void dedupe_hits(std::vector<HfHit> & hits) {
+    std::vector<HfHit> uniq; uniq.reserve(hits.size());
+    std::map<std::string, bool> seen;
+    for (auto & h : hits) {
+        if (seen.emplace(h.repo, true).second) uniq.push_back(std::move(h));
+    }
+    hits.swap(uniq);
+}
+
+// The catalog snapshot: the `target` most-downloaded GGUF repos (the stable
+// backbone — unsloth, bartowski, Qwen, google, ggml-org… live here) plus the
+// `target` most-recently-updated ones (so a model released today is visible
+// before it has earned downloads), deduplicated with the popular list first.
+bool hf_fetch_catalog(int target, std::vector<HfHit> & out, std::string & err) {
+    out.clear();
+    std::string err_recent;
+    bool ok_popular = hf_list("downloads",    target, out, err);
+    bool ok_recent  = hf_list("lastModified", target, out, err_recent);
+    if (!ok_popular && !ok_recent) { if (err.empty()) err = err_recent; return false; }
+    if (!ok_popular || !ok_recent) err = ok_popular ? err_recent : err;   // partial: report, keep going
+    else err.clear();
+    dedupe_hits(out);
+    return true;
+}
+
+// Live HF search: `search` matches the full repo id (owner included — "google"
+// finds google/gemma-*, "unsloth qwen" narrows further), most downloaded first.
+bool hf_live_search(const std::string & query, int limit, std::vector<HfHit> & out, std::string & err) {
+    out.clear();
+    limit = std::max(kSearchMinHits, std::min(limit, kSearchMaxHits));
+    std::string url = "https://huggingface.co/api/models?filter=gguf&direction=-1&sort=downloads&search=" +
+                      url_encode(query) + "&limit=" + std::to_string(limit);
+    std::string body;
+    if (!curl_get_string(url, body, err)) return false;
+    return parse_hf_page(body, limit, out, err) > 0 || err.empty();
 }
 
 // Enrich a hit into a scoreable ModelEntry by listing the repo's GGUF files
@@ -1855,7 +1902,7 @@ void ModelsEngine::start_refresh(bool force) {
     refresh_thread_ = std::thread([this]() {
 #if defined(EASYAI_HAVE_CURL)
         std::vector<HfHit> hits; std::string err;
-        bool ok = hf_search_recent(catalog_size_, hits, err);   // 1000 most-recent GGUF repos, paged
+        bool ok = hf_fetch_catalog(catalog_size_, hits, err);   // most-downloaded ∪ most-recent, paged
         std::vector<CachedHf> snap;
         if (ok) {
             snap.reserve(hits.size());
@@ -1932,6 +1979,29 @@ std::string ModelsEngine::models_json(const std::string & query) {
         snap = hf_cache_->snapshot; last = hf_cache_->last_refresh; err = hf_cache_->error;
     }
 
+    // A non-empty search also asks HuggingFace directly: the snapshot is a
+    // bounded window, HF's own index is not. Live hits go FIRST (they are
+    // sorted by downloads), snapshot substring matches fill in after them.
+    bool live = false;
+    if (!search.empty()) {
+        std::vector<HfHit> hits; std::string serr;
+        if (live_search(search, limit, hits, serr)) {
+            live = true;
+            std::vector<CachedHf> merged; merged.reserve(hits.size() + snap.size());
+            std::map<std::string, bool> seen;
+            for (auto & h : hits) {
+                if (!seen.emplace(h.repo, true).second) continue;
+                CachedHf c; c.repo = h.repo; c.downloads = h.downloads; c.likes = h.likes;
+                build_light_entry(h, c.entry); c.best_size = 0; c.ok = true;
+                merged.push_back(std::move(c));
+            }
+            for (auto & c : snap) if (seen.emplace(c.repo, true).second) merged.push_back(std::move(c));
+            snap.swap(merged);
+        } else if (err.empty()) {
+            err = serr;   // snapshot-only answer; tell the client why it is narrower
+        }
+    }
+
     std::vector<FitRow> rows;
     for (auto & c : snap) {
         if (!c.ok) continue;
@@ -1962,12 +2032,49 @@ std::string ModelsEngine::models_json(const std::string & query) {
     env["total_models"]    = total;
     env["returned_models"] = (int) rows.size();
     env["source"]          = "huggingface";
+    env["live_search"]     = live;
     env["refreshing"]      = refreshing_.load();
     env["last_refresh"]    = last;
     env["stale"]           = (now_sec() - last) > kSnapshotTtlSec;
     if (!err.empty()) env["error"] = "HuggingFace: " + err;
     env["models"] = models;
     return env.dump();
+}
+
+// Cached live HF search (see hf_live_search). One HF round-trip per distinct
+// query per kSearchTtlSec; the cache is bounded by evicting the oldest entry.
+// The lock is never held across the network call.
+bool ModelsEngine::live_search(const std::string & query, int limit,
+                               std::vector<HfHit> & out, std::string & err) {
+#if !defined(EASYAI_HAVE_CURL)
+    (void) query; (void) limit; (void) out;
+    err = "server built without libcurl";
+    return false;
+#else
+    {
+        std::lock_guard<std::mutex> lk(hf_cache_mu_);
+        auto it = hf_cache_->searches.find(query);
+        if (it != hf_cache_->searches.end() && now_sec() - it->second.when <= kSearchTtlSec) {
+            out = it->second.hits;
+            return true;
+        }
+    }
+    std::vector<HfHit> hits;
+    if (!hf_live_search(query, limit, hits, err)) return false;
+    {
+        std::lock_guard<std::mutex> lk(hf_cache_mu_);
+        auto & cache = hf_cache_->searches;
+        if (cache.size() >= kSearchCacheMax) {
+            auto oldest = cache.begin();
+            for (auto it = cache.begin(); it != cache.end(); ++it)
+                if (it->second.when < oldest->second.when) oldest = it;
+            cache.erase(oldest);
+        }
+        cache[query] = SearchHit{ hits, now_sec() };
+    }
+    out = std::move(hits);
+    return true;
+#endif
 }
 
 std::string ModelsEngine::plan_json(const std::string & body) {

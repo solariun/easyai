@@ -42,6 +42,8 @@
 namespace easyai {
 namespace config { struct Ini; }   // borrowed by the engine for [MODEL_*] lookups
 
+struct HfHit;   // one HuggingFace listing hit (defined in models_dashboard.cpp)
+
 class ModelsEngine {
 public:
     // A .gguf file in the download directory.
@@ -147,11 +149,15 @@ private:
     std::string                   download_dir_;
     const config::Ini *           ini_ = nullptr;
     std::function<std::string()>  current_model_;
-    int                           catalog_size_ = 1000;  // most-recent GGUF repos in the snapshot
+    int                           catalog_size_ = 1000;  // per listing: most-downloaded + most-recent GGUF repos
     std::string                   data_dir_;             // where the catalog cache is persisted
     std::string                   status_;
 
     void load_catalog_cache();    // populate the snapshot from disk at startup
+    // Live HuggingFace search for a non-empty `search` query, cached per query
+    // for a few minutes (real type of the hits lives in the .cpp).
+    bool live_search(const std::string & query, int limit,
+                     std::vector<HfHit> & out, std::string & err);
 
     // The static model snapshot (opaque pImpl; real type in the .cpp): the
     // enriched HF entries + last-refresh time. Guarded by hf_cache_mu_; rebuilt
