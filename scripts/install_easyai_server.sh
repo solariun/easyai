@@ -370,8 +370,9 @@ preset="auto"                                 # written ACTIVE into [ENGINE]. "a
                                               # overrides per-request temperature/top_p/
                                               # top_k and inline presets.
 reasoning_effort="max"                        # written ACTIVE into [ENGINE]. auto|low|
-                                              # medium|high|max|minimal. "auto" omits the
-                                              # field (model default). A per-request
+                                              # medium|high|xhigh|max|minimal. "auto" omits
+                                              # the field (model default); "max" = deepest
+                                              # level the template accepts. A per-request
                                               # reasoning_effort body field always wins.
 thinking="on"
 enable_metrics=1
@@ -657,8 +658,8 @@ case "$preset" in
     *) die "--preset: must be one of auto|deterministic|precise|balanced|creative|wild, got: $(printf '%q' "$preset")" ;;
 esac
 case "$reasoning_effort" in
-    auto|low|medium|high|max|minimal) ;;
-    *) die "--reasoning-effort: must be one of auto|low|medium|high|max|minimal, got: $(printf '%q' "$reasoning_effort")" ;;
+    auto|low|medium|high|xhigh|max|minimal) ;;
+    *) die "--reasoning-effort: must be one of auto|low|medium|high|xhigh|max|minimal, got: $(printf '%q' "$reasoning_effort")" ;;
 esac
 
 # Hostname must be a valid RFC 1123 label: letters / digits / hyphens,
@@ -1523,9 +1524,10 @@ download_dir    = $service_model_dir
 #   instantly and the 1-hour refresh clock survives. The server creates it if
 #   missing.
 data_dir        = $service_data_dir
-# catalog_size: how many of the most-recently-updated GGUF repos to keep in the
-#   searchable catalog (paged from HuggingFace, refreshed on request once >1h
-#   old). Clamped to [1, 1000].
+# catalog_size: size of each half of the /models catalog snapshot — the N
+#   most-downloaded GGUF repos plus the N most-recently-updated (paged from
+#   HuggingFace, deduplicated, refreshed on request once >1h old). Search is
+#   live against HuggingFace and not bounded by this. Clamped to [1, 1000].
 catalog_size    = 1000
 metrics         = $([[ "$enable_metrics" -eq 1 ]] && echo on || echo off)
 allow_fs        = off
@@ -1628,10 +1630,12 @@ threads_batch    = $n_threads_batch_default
 preset           = $preset
 
 # Reasoning effort fed to the chat template as the reasoning_effort
-# kwarg (GPT-OSS et al.): auto|low|medium|high|max|minimal. "auto"
-# injects nothing (model default). A per-request reasoning_effort
-# body field overrides this; templates that ignore the kwarg are
-# unaffected.
+# kwarg (GPT-OSS et al.): auto|low|medium|high|xhigh|max|minimal.
+# "auto" injects nothing (model default). "max" = the deepest level the
+# template accepts: a template that rejects a level makes the engine
+# fall back along minimal<low<medium<high<xhigh<max instead of failing
+# the turn. A per-request reasoning_effort body field overrides this;
+# templates that ignore the kwarg are unaffected.
 reasoning_effort = $reasoning_effort
 flash_attn       = $([[ "$enable_flash_attn" -eq 1 ]] && echo on || echo off)
 cache_type_k     = $cache_type_k

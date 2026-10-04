@@ -45,9 +45,12 @@ easyai is more than a library — it's a **complete, self-hostable AI stack** wi
   polished chat web UI and the **[MODELS dashboard](MODELS.md)** (`/models`): browse &
   fit-score HuggingFace models against *your* hardware, read a model's GGUF
   parameters, **hot-swap the running model in one click**, and download weights — all
-  password-gated. The dashboard keeps the **1000 most-recently-updated GGUF repos**
-  in a searchable catalog, cached on disk (`--data-dir`, default `/var/lib/easyai/data`)
-  and refreshed from HuggingFace on request once it is >1h old. Full SSE streaming,
+  password-gated. The dashboard keeps the **1000 most-downloaded plus the 1000
+  most-recently-updated GGUF repos** in a catalog cached on disk (`--data-dir`, default
+  `/var/lib/easyai/data`), refreshed from HuggingFace on request once it is >1h old, and
+  **searches HuggingFace live** (`unsloth`, `google gemma`, …). A missing or broken model
+  file no longer stops the server: it comes up, locks the prompt, and lets you download,
+  run or slink a model from `/models` without a restart. Full SSE streaming,
   Prometheus `/metrics`, Bearer auth, KV-cache / flash-attn knobs. Speaks **MCP, OpenAI
   and Ollama** from one process. A drop-in `llama-server`, supercharged.
 - 💬 **easyai-cli** — a gorgeous full-screen agent **TUI** (markdown, live tool rows
@@ -1375,7 +1378,8 @@ has a matching INI key (see [`easyai-server.md`](easyai-server.md) §1).
 
 | Flag | Default | What it does |
 |---|---|---|
-| `-m, --model PATH` | (required) | GGUF model file. |
+| `-m, --model PATH` | (none) | GGUF model file or an `ai.gguf` symlink. Missing / unloadable → the server still starts; chat answers `503 model_not_loaded` until a model is run from `/models`. |
+| `--reasoning-effort LVL` | `max` | `auto` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`; `max` = the deepest level the model's template accepts (unknown levels fall back along the ladder instead of failing the turn). |
 | `--config PATH` | `/etc/easyai/easyai.ini` | Central INI; CLI > INI > hardcoded. |
 | `--host ADDR` | `127.0.0.1` | Bind address (`0.0.0.0` = any iface). |
 | `--port N` | `8080` | TCP port. |
@@ -2360,6 +2364,9 @@ cmake --build build -j
 
 # Drop libcurl-using tools (the `web` tool's search and fetch actions):
 cmake -S . -B build -DEASYAI_WITH_CURL=OFF
+
+# Model-free unit tests (reasoning-effort ladder against real Jinja templates):
+cmake -S . -B build -DEASYAI_BUILD_TESTS=ON && cmake --build build && ctest --test-dir build
 cmake --build build -j
 
 # Clean rebuild from scratch:

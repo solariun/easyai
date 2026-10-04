@@ -2394,7 +2394,8 @@ easyai-cli --url http://ai.local:8080 \
   --temperature 0.0 --top-p 0.9 --seed 42 --stop "USER:" --stop "Q:" \
   -p "Translate the next sentence to PT-BR: ..."
 
-# reasoning_effort is first-class (default 'auto' = model default):
+# reasoning_effort is first-class (default 'auto' = field omitted, the server decides;
+# easyai-server defaults to max = deepest level the model's template accepts):
 easyai-cli --url https://api.openai.com --api-key $K --model o1-preview \
   --reasoning-effort high \
   -p "Plan the Mars-mission trajectory."
@@ -3219,8 +3220,13 @@ inside one server is the right unit; between servers you scale by process.
 
 ## Part 10 — troubleshooting
 
-### "load failed: failed to load model"
+### "load failed: failed to load model" / "NO MODEL LOADED"
 
+* `easyai-server` does **not** exit on this: it starts without a model,
+  answers `503 model_not_loaded` on chat, and lets you download, run or
+  slink a model from `/models` (the webui prompt is locked with a link
+  until then). `easyai-local` and library callers see `Engine::load()`
+  return false with `last_error()` set.
 * Did the GGUF download fully? Check the file size; small files often mean
   HTML 404 pages.
 * Wrong architecture? llama.cpp prints the supported-arch list during load

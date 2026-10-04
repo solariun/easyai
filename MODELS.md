@@ -63,11 +63,13 @@ chat webui ──(injected "MODELS" pill)─► /models
 
 - **No external dependency; a small on-disk catalog cache.** Hardware is detected
   through ggml (`ggml_backend_dev_memory` for VRAM) + the OS (RAM/CPU). The
-  Recommend list is the **1000 most-recently-updated GGUF repos** on HuggingFace
-  (`/api/models?filter=gguf&sort=lastModified`, cursor-paged until 1000 or the
-  listing is exhausted), persisted to `data_dir/easyai_hf_catalog.json` and
-  refreshed from HuggingFace on request once the snapshot is >1h old — so a
-  restart shows the list instantly. Per-repo specifics (exact params / quant /
+  Recommend list is the **1000 most-downloaded ∪ 1000 most-recently-updated GGUF
+  repos** on HuggingFace (`/api/models?filter=gguf&sort=downloads` and
+  `…&sort=lastModified`, cursor-paged, deduplicated with the popular list first),
+  persisted to `data_dir/easyai_hf_catalog.json` and refreshed from HuggingFace on
+  request once the snapshot is >1h old — so a restart shows the list instantly.
+  A **search** additionally queries HuggingFace's own index live (owner names
+  match: `unsloth`, `google`, `bartowski`), so it is never limited to the snapshot. Per-repo specifics (exact params / quant /
   fit) are read live from the remote GGUF header on demand. Scoring, the hardware
   plan, and GGUF introspection are all native C++.
 - **Hot-swap is in-process.** `Engine::reload()` tears down the current model
@@ -105,7 +107,8 @@ easyai-server -m models/your-model.gguf \
   --download-dir ./models \
   --data-dir ./data \
   --webui-password 's3cret'
-# Recommend caches the 1000 most-recent GGUF repos in --data-dir, refreshed >1h on request.
+# Recommend caches the 1000 most-downloaded + 1000 most-recent GGUF repos in --data-dir,
+# refreshed >1h on request; a search also hits HuggingFace live.
 ```
 
 Then open `/models` (or click the MODELS pill in the chat UI).
@@ -122,7 +125,7 @@ All keys live in `[SERVER]`; each has a matching CLI flag. Precedence is
 | `webui_password` | `--webui-password` | (empty — open) | Password for `/models` and **all** its API routes. A session cookie, separate from `api_key` (which still guards `/v1/*`). The installer sets it to `0000`. |
 | `download_dir` | `--download-dir` | directory of `--model` | Where GGUF weights are downloaded / listed / deleted, and the directory the dashboard introspects + hot-swaps from. |
 | `data_dir` | `--data-dir` | `download_dir` | Where the dashboard persists its HuggingFace catalog snapshot (`easyai_hf_catalog.json`). Loaded on startup so the list shows instantly, and the 1-hour refresh clock survives a restart. The server creates it if missing. |
-| `catalog_size` | `--catalog-size` | `1000` | How many of the **most-recently-updated** GGUF repos to keep in the searchable catalog, paged from HuggingFace (cursor-followed until this many or the listing runs out) and refreshed on request once the snapshot is >1h old. Clamped to `[1, 1000]`. |
+| `catalog_size` | `--catalog-size` | `1000` | Size of each half of the catalog snapshot: the N **most-downloaded** GGUF repos plus the N **most-recently-updated**, paged from HuggingFace, deduplicated, refreshed on request once the snapshot is >1h old. Clamped to `[1, 1000]`. Search is not bounded by it (live HuggingFace query). |
 
 ---
 
@@ -208,6 +211,13 @@ Running and the boot default are **decoupled** — a Run never touches the symli
 
 No process restart; the dashboard stays live and reflects the running model.
 
+**From the empty state.** When the server started without a usable model
+(missing file, broken `ai.gguf` link, no `--model`), it is still running:
+`/health` reports `model_loaded:false`, chat answers `503 model_not_loaded`,
+and the chat UI locks its prompt with a link here. **Run** or **Run + slink**
+from the Local tab loads the first model exactly as a hot-swap would and the
+prompt unlocks within 3 s.
+
 ---
 
 ## 7. Download manager details
@@ -237,7 +247,7 @@ is set.
 | GET | `/models/api/auth` | `{authed, required, source, status, download_dir}` (open). |
 | POST | `/models/api/login` / `logout` | `{"password":"…"}` → sets / clears the cookie. |
 | GET | `/models/api/system` | Detected/simulated hardware. Query: `ram_gb`, `vram_gb`, `cpu_cores`. |
-| GET | `/models/api/models` | The scored model snapshot. Query: `search`, `min_fit`, `use_case`, `sort` (`score`/`tps`/`params`/`mem`/`downloads`/`likes`), `limit`, + sim params. Envelope also carries `refreshing`, `last_refresh`, `stale`. |
+| GET | `/models/api/models` | The scored model list. Query: `search`, `min_fit`, `use_case`, `sort` (`score`/`tps`/`params`/`mem`/`downloads`/`likes`), `limit`, + sim params. A non-empty `search` first queries HuggingFace live (full repo id incl. owner, most-downloaded first, 50–200 hits, cached 10 min per query) and then appends snapshot matches. Envelope also carries `refreshing`, `last_refresh`, `stale`, `live_search` (true when the live half answered; otherwise `error` says why the list is snapshot-only). |
 | POST | `/models/api/refresh` | Rebuild the static model list from HuggingFace (runs in the background). |
 | GET | `/models/api/hf/detail?repo=<repo>&context=&quant=` | Precise fit for a HF model — reads its remote GGUF header (HTTP range). Returns real params, the **available quants**, the fit, and a **hardware plan** at the chosen context (default 128K) + quant. |
 | POST | `/models/api/plan` | `{model, context, quant?, kv_quant?, ram_gb?, vram_gb?, cpu_cores?}` → min/recommended hardware + KV alternatives. |

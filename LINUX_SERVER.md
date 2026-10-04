@@ -734,9 +734,13 @@ manually.
 The pinned `--ngl` value doesn't fit. Lower it to match your VRAM, or
 set `--ngl -1` to let llama.cpp auto-fit.
 
-### "model not found" on startup
+### "NO MODEL LOADED" on startup (was: "model not found")
 
-The unit's `-m` arg points at a symlink that doesn't resolve. Check:
+The server no longer exits on this. It comes up without a model,
+`/health` says `model_loaded:false`, chat answers `503 model_not_loaded`,
+and the web UI locks its prompt with a link to `/models`. Fix it from the
+browser (**Run + slink** a local model, or download one first), or on the
+host: the unit's `-m` arg points at a symlink that doesn't resolve. Check:
 
 ```bash
 ls -la /var/lib/easyai/models/current.gguf
@@ -846,7 +850,7 @@ unchanged. Endpoints:
 | Verb | Path | API | Notes |
 | --- | --- | --- | --- |
 | GET | `/` | webui | embedded webui |
-| GET | `/health` | easyai | `{model, backend, tools, preset, compat:{...}}` |
+| GET | `/health` | easyai | `{model, model_loaded, load_error?, backend, tools, preset, compat:{...}}` — `model_loaded:false` = up without a model (run one from `/models`) |
 | GET | `/v1/models` | OpenAI | OpenAI-shape list-models |
 | POST | `/v1/chat/completions` | OpenAI | the workhorse — streaming SSE, tools, sampling controls |
 | POST | `/v1/preset` | easyai | swap the ambient preset |
@@ -1076,7 +1080,12 @@ sudo userdel easyai
 
 ## 14. Troubleshooting
 
-### Server won't start, journal shows "model not found"
+### Journal shows "NO MODEL LOADED" (server is up, chat returns 503)
+
+Since 2026-10-04 a broken model link no longer stops the service: open
+`http://<host>:8080/models`, download or pick a local model and press
+**Run + slink** — chat comes back within seconds and the link is fixed for
+the next restart. To fix it by hand instead:
 
 ```bash
 ls -la /var/lib/easyai/models/
