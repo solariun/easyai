@@ -604,8 +604,8 @@ flowchart LR
 
 **Field test and revision (Gustavo, 2026-10-04 evening).** First deploy:
 "info about X.25" came back text-only, "diagrams" too, and "an SVG"
-produced a block labelled `xml` that was cut off before `</svg>` (the
-model wrote "since I am an AI text model…"). Revision: the `## Be visual`
+produced a block labelled `xml` (the model wrote "since I am an AI text
+model…"); the block was complete — the paste was taken mid-stream. Revision: the `## Be visual`
 block now states that the UI renders SVG as a drawing and the model is not
 text-only here; WHEN is mandatory with trigger words and "text-only or
 xml/html-labelled code is a FAILURE"; WHAT lists a shape per case; HOW
