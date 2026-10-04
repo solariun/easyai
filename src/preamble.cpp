@@ -110,12 +110,10 @@ std::string build(const Options & opt) {
                 << "uncertainty. Never present a post-cutoff\n"
                 << "time-sensitive fact as known.\n"
                 << "\n"
-                << "STABLE facts (definitions, syntax, architecture,\n"
-                << "math, algorithms) don't need verification just\n"
-                << "because the topic is recent — trust your\n"
-                << "knowledge unless the user asks for the latest\n"
-                << "state. One verification per topic is enough; don't\n"
-                << "re-verify after every fetch.\n";
+                << "One verification per topic is enough; don't\n"
+                << "re-verify after every fetch. Verify with the\n"
+                << "knowledge tool first when it is registered, the\n"
+                << "web second.\n";
         }
     }
 
@@ -720,9 +718,11 @@ std::string build_base_system_prompt() {
          "reply is for the user.\n"
          "  - >5 sentences without a decision → STOP and act.\n"
          "\n"
-         "Answer directly for greetings, chitchat, math, and anything "
-         "you already know — no tool needed. When a request truly "
-         "needs work, run a tight loop:\n"
+         "Answer directly for greetings, chitchat and arithmetic — no "
+         "tool needed. For anything factual, NEVER ASSUME: when a "
+         "knowledge or web tool is registered, look it up before you "
+         "answer (knowledge first, then web). When a request needs "
+         "work, run a tight loop:\n"
          "  1. Plan ONE small concrete next step (not a roadmap).\n"
          "  2. Act — call the tool in the SAME turn. Announcing a "
          "call without making it (\"I'll search…\", \"Let me "
@@ -769,8 +769,8 @@ std::string build_tool_guidance(const ToolsetView & view) {
     s << tools_block(view);
 
     s << "## Information pipeline (AUTHORITATIVE)\n"
-         "When the request needs facts you don't already know, follow "
-         "this order — strictly:\n"
+         "For every factual question — even one you think you know — "
+         "NEVER ASSUME; follow this order strictly:\n"
          "\n";
     if (view.memory_on) {
         s << "  1. KNOWLEDGE FIRST. Use your `search_knowledge` tool with "
@@ -785,7 +785,8 @@ std::string build_tool_guidance(const ToolsetView & view) {
              "answer the user. Don't re-search knowledge, don't "
              "re-search the web, don't store more knowledge first.\n";
     } else if (view.web_on) {
-        s << "  1. WEB if you don't already know. ONE web search, "
+        s << "  1. WEB first — never answer a factual question from "
+             "memory while web tools are available. ONE web search, "
              "then fetch_web the top 1-3 URLs.\n"
              "  2. ANSWER. As soon as the fetched text gives you "
              "enough, answer. Don't re-search the same query.\n";
@@ -795,10 +796,15 @@ std::string build_tool_guidance(const ToolsetView & view) {
              "so directly if you don't know.\n";
     }
     s << "\n"
-         "STOP SIGNAL. After each tool result, ask: do I have enough "
-         "now? Yes → answer immediately. No → ONE more focused tool "
-         "call, then re-check. Three or more tool calls in a row "
-         "without re-checking is a bug — you're exploring instead of "
+         "BATCH INDEPENDENT CALLS. Lookups that do not depend on each "
+         "other go in ONE turn — up to 10 tool calls at once (knowledge "
+         "search + web search, or fetching several URLs). Dependent "
+         "steps go one hop at a time.\n"
+         "\n"
+         "STOP SIGNAL. After each round of tool results, ask: do I have "
+         "enough now? Yes → answer immediately. No → ONE more focused "
+         "round, then re-check. Three or more rounds without "
+         "re-checking is a bug — you're exploring instead of "
          "answering.\n"
          "\n";
 

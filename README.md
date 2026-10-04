@@ -1625,7 +1625,7 @@ Full local engine. Header:
 | `.presence_penalty(p)` | `float` | 0.1 | Presence penalty (additive, fixed cost per token-already-seen, OpenAI semantics, range `[-2.0, 2.0]`). Pairs well with `repeat_penalty=1.0` on long agentic flows. See [`design.md` §4b](design.md#4b-sampling-and-the-penalty-stack). |
 | `.max_tokens(n)` | `int` | 12288 | Per-turn cap. |
 | `.tool_choice_auto / .tool_choice_required / .tool_choice_none` | call | auto | Tool-choice mode. |
-| `.parallel_tool_calls(on)` | `bool` | off | Allow parallel tool calls. |
+| `.parallel_tool_calls(on)` | `bool` | off | Run every tool call the model emits in one turn (max 10, extras dropped with a log line) instead of only the first. easyai-server turns this on. |
 | `.verbose(on)` | `bool` | off | Engine debug logs. |
 | `.max_tool_hops(n)` | `int` | 8 | Agentic-loop cap (bumped to 99999 with `bash`). |
 | `.retry_on_incomplete(on)` | `bool` | on | Auto-retry "announce-only" turns. |

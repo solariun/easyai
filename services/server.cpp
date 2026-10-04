@@ -314,6 +314,7 @@ header.topbar h1 { font-size: 1rem; margin: 0; font-weight: 600; letter-spacing:
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
 .msg.assistant .content pre code { background: transparent; padding: 0; font-size: 1em; }
+.msg.assistant .content img { max-width: 100%; height: auto; border-radius: 6px; margin: .4rem 0; }
 .msg.assistant .content a { color: var(--accent); text-decoration: none; }
 .msg.assistant .content a:hover { text-decoration: underline; }
 .msg.assistant .content table { border-collapse: collapse; margin: .5rem 0; }
@@ -553,6 +554,7 @@ header.topbar h1 { font-size: 1rem; margin: 0; font-weight: 600; letter-spacing:
 </div>
 
 <!-- markdown lib (loaded async, with graceful fallback) -->
+<script>__EASYAI_VISUAL_JS__</script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
 
@@ -606,16 +608,19 @@ function renderMD(s){
         window._mdReady = true;
       }
       let html = window.marked.parse(s || '');
-      // Run highlight.js on freshly built code blocks.
+      // Run highlight.js on freshly built code blocks, then turn complete
+      // ```svg blocks into inline figures (see kEasyaiVisualJs).
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
       if (window.hljs) {
-        const tmp = document.createElement('div');
-        tmp.innerHTML = html;
         $$('pre code', tmp).forEach(b => {
           try { window.hljs.highlightElement(b); } catch {}
         });
-        html = tmp.innerHTML;
       }
-      return html;
+      if (window.__easyaiRenderSvgFigures) {
+        try { window.__easyaiRenderSvgFigures(tmp); } catch {}
+      }
+      return tmp.innerHTML;
     } catch (e) {
       console.warn('markdown fallback', e);
     }
@@ -4372,6 +4377,71 @@ static std::mutex               g_metrics_mu;
 // tools will actually be registered. Naming an unregistered tool here makes
 // models try to call it ("bash"/"fs" hallucinations), so each bullet is
 // conditional on the same flag that controls registration.
+// ---------------------------------------------------------------------------
+// Visual replies — shared by both webuis. Turns a fenced ```svg block (a
+// <pre><code> whose text is one complete <svg>…</svg>) into an inline,
+// sanitised figure with the source kept in a collapsed <details>. Markdown
+// images (![caption](url)) already render as <img> in both UIs.
+//
+// Sanitiser: parses as image/svg+xml, drops script/foreignObject/iframe/
+// object/embed/link/meta/style/image, keeps <use> only for #fragment hrefs,
+// strips on* handlers, non-fragment href/xlink:href and style attributes
+// that pull url()s. Exposed as window.__easyaiRenderSvgFigures(root).
+// ---------------------------------------------------------------------------
+static const char kEasyaiVisualJs[] = R"JS((()=>{
+  const FIG='easyai-svg-fig';
+  const BAD=new Set(['script','foreignobject','iframe','object','embed','link','meta','style','image','animate','set']);
+  const scrubAttrs=(el)=>{
+    for(const a of Array.from(el.attributes)){
+      const n=a.name.toLowerCase(), v=a.value||'';
+      if(n.startsWith('on')||((n==='href'||n==='xlink:href')&&!v.startsWith('#'))
+         ||(n==='style'&&/url\s*\(|expression|@import/i.test(v))) el.removeAttribute(a.name);
+    }
+  };
+  const walk=(el)=>{
+    for(const c of Array.from(el.children)){
+      const t=c.nodeName.toLowerCase();
+      if(BAD.has(t)){c.remove();continue;}
+      if(t==='use'){const h=c.getAttribute('href')||c.getAttribute('xlink:href')||'';if(!h.startsWith('#')){c.remove();continue;}}
+      scrubAttrs(c);walk(c);
+    }
+  };
+  const sanitize=(src)=>{
+    let doc;try{doc=new DOMParser().parseFromString(src,'image/svg+xml');}catch(e){return null;}
+    const root=doc.documentElement;
+    if(!root||root.nodeName.toLowerCase()!=='svg'||doc.querySelector('parsererror'))return null;
+    scrubAttrs(root);walk(root);
+    const w=parseFloat(root.getAttribute('width')),h=parseFloat(root.getAttribute('height'));
+    if(!root.getAttribute('viewBox')&&w>0&&h>0)root.setAttribute('viewBox','0 0 '+w+' '+h);
+    root.removeAttribute('width');root.removeAttribute('height');
+    root.setAttribute('width','100%');root.setAttribute('role','img');
+    return new XMLSerializer().serializeToString(root);
+  };
+  const isSvg=(code)=>{const t=(code.textContent||'').trim();return t.startsWith('<svg')&&t.endsWith('</svg>');};
+  const render=(root)=>{
+    (root||document).querySelectorAll('pre > code').forEach(code=>{
+      const pre=code.parentElement;
+      if(!pre||pre.dataset.easyaiSvg||!isSvg(code))return;
+      const svg=sanitize(code.textContent.trim());
+      if(!svg){pre.dataset.easyaiSvg='bad';return;}
+      const fig=document.createElement('figure');fig.className=FIG;fig.innerHTML=svg;
+      const det=document.createElement('details');det.innerHTML='<summary>svg source</summary>';
+      const src=pre.cloneNode(true);src.dataset.easyaiSvg='src';det.appendChild(src);fig.appendChild(det);
+      pre.replaceWith(fig);
+    });
+  };
+  window.__easyaiRenderSvgFigures=render;
+  if(!document.getElementById('__easyaiSvgFigStyle')){
+    const st=document.createElement('style');st.id='__easyaiSvgFigStyle';
+    st.textContent='.'+FIG+'{margin:.6rem 0;padding:.5rem;border:1px solid rgba(128,128,128,.35);border-radius:.5rem;background:rgba(128,128,128,.06)}'
+      +'.'+FIG+' svg{display:block;max-width:100%;height:auto;margin:0 auto}'
+      +'.'+FIG+' details{margin-top:.3rem;font-size:.7rem;opacity:.7}'
+      +'.'+FIG+' details pre{margin-top:.3rem;max-height:14rem;overflow:auto}'
+      +'.msg.assistant .content img,[aria-label="Assistant message with actions"] img{max-width:100%;height:auto;border-radius:.5rem;margin:.4rem 0}';
+    (document.head||document.documentElement).appendChild(st);
+  }
+})();)JS";
+
 static const char kWebUIAppendix[] =
     "\n\n## Interface — Web UI\n"
     "You are interfacing through a web UI. All requests must be "
@@ -4379,7 +4449,39 @@ static const char kWebUIAppendix[] =
     "listed above, exactly as described and within their stated "
     "constraints. Do NOT assume, invent, or guess tool names — "
     "if a tool is not in your AVAILABLE TOOLS list, it does not "
-    "exist.\n";
+    "exist.\n"
+    "\n"
+    "## Be visual (AUTHORITATIVE for this web UI)\n"
+    "Your reply renders as markdown with INLINE SVG and IMAGES. Whenever "
+    "a picture conveys more than words — an architecture, a data flow, a "
+    "protocol or state machine, a timeline, a comparison, a layout, a "
+    "pinout, a waveform, a geometry — DRAW IT. Technical aspects get a "
+    "diagram by default, not as decoration; the text explains, the "
+    "picture shows.\n"
+    "  - DIAGRAMS: emit a fenced ```svg block containing one complete "
+    "<svg> element with a viewBox, width=\"100%\" style, readable on "
+    "dark and light backgrounds (use mid-tone fills and strokes, no "
+    "pure black or white backgrounds), legible labels (font-size 12-14), "
+    "no <script>, no external references, no foreignObject. Keep it "
+    "focused: one idea per figure, under ~120 lines.\n"
+    "  - IMAGES FROM TOOL RESULTS: when a web search or fetch returned "
+    "an image URL (a photo, chart, map, schematic, product shot, "
+    "screenshot) that shows what you are explaining, SHOW it with the "
+    "image tag `![caption](https://url)` on its own line, with a short "
+    "caption. Only URLs that actually appeared in a tool result THIS "
+    "turn — never a remembered or invented URL. Prefer the page's "
+    "own figure over text that describes it.\n"
+    "  - A figure never replaces the answer: one or two sentences of "
+    "text accompany every picture.\n"
+    "  - Skip pictures for greetings, chitchat and one-line facts.\n"
+    "\n"
+    "## Never assume (AUTHORITATIVE)\n"
+    "Do not answer a factual question from memory when a lookup tool is "
+    "available. Order: knowledge tool first (if registered) → web tools "
+    "if knowledge had nothing → answer. Only greetings, chitchat and "
+    "arithmetic skip the lookup. Independent lookups go in ONE turn: "
+    "you may emit up to 10 tool calls at once (knowledge + web search, "
+    "or several fetches); dependent steps go one hop at a time.\n";
 
 // ============================================================================
 // MODELS dashboard auth — a session cookie distinct from the Bearer `api_key`
@@ -4840,6 +4942,10 @@ int main(int argc, char ** argv) {
     // bounded behaviour from the model itself ending its turn and from
     // the per-hop retry budgets inside chat_continue.
     ctx->engine.max_tool_hops(99999);
+    // Independent lookups in ONE turn: the engine runs every tool call the
+    // model emits (capped at 10, see Engine::parallel_tool_calls) and the
+    // chat template is told the model may batch them.
+    ctx->engine.parallel_tool_calls(true);
     // retry-on-incomplete defaults ON in libeasyai but be explicit here:
     // the webui relies on chat_continue's announce-pattern retry to
     // recover from "Let me search…" / "I'll look that up…" turns the
@@ -5139,6 +5245,9 @@ int main(int argc, char ** argv) {
                     "{childList:true,subtree:true,characterData:true});"
                 "});"
               "})();</script>";
+
+            // ----- visual replies: ```svg → inline figure (shared helper) --
+            inj << "<script>" << kEasyaiVisualJs << "</script>";
 
             // ----- fetch interceptor: stub unsupported endpoints AND inject
             //       sampling overrides from the tone dropdown ----------------
@@ -6115,6 +6224,11 @@ int main(int argc, char ** argv) {
                   // Re-paint metrics: the bundle re-mounts
                   // .chat-processing-info-detail on stream lifecycle.
                   "renderOverview();"
+                  // Complete ```svg blocks become inline figures
+                  // (kEasyaiVisualJs); processed blocks are skipped.
+                  "if(window.__easyaiRenderSvgFigures){"
+                    "try{window.__easyaiRenderSvgFigures(document);}catch(e){}"
+                  "}"
                 "},250);"
 
                 // --- per-message inline status chip -----------------------
@@ -7004,8 +7118,9 @@ int main(int argc, char ** argv) {
         {
             // Minimal inline webui — substitute the title placeholder we
             // baked into the kWebUI string.
-            ctx->webui_html = str_replace_all(kWebUI, "__EASYAI_TITLE__",
-                                              html_escape(title));
+            ctx->webui_html = str_replace_all(
+                str_replace_all(kWebUI, "__EASYAI_TITLE__", html_escape(title)),
+                "__EASYAI_VISUAL_JS__", kEasyaiVisualJs);
         }
 
         if (!args.webui_icon.empty()) {
@@ -7507,7 +7622,7 @@ int main(int argc, char ** argv) {
                 {"supports_tools",                true},
                 {"supports_tool_calls",           true},
                 {"supports_system_role",          true},
-                {"supports_parallel_tool_calls",  false},
+                {"supports_parallel_tool_calls",  true},    // up to 10 per turn
                 {"supports_preserve_reasoning",   true},   // pass <think>...</think> through
             };
             p["bos_token"]     = "";

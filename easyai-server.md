@@ -697,6 +697,30 @@ Old behaviour rules carry over: `RULE 1` (execute or answer, never
 just announce), `web(action="search") → web(action="fetch")`
 mandatory, citations stick to the URL actually fetched.
 
+Three rules added on 2026-10-04 (web appendix of the static prompt,
+`kWebUIAppendix`, plus the shared library guidance):
+
+- **Be visual.** The web UI renders inline SVG and images, so whenever a
+  picture conveys more than words — architecture, data flow, protocol or
+  state machine, timeline, comparison, layout, pinout, waveform — the
+  model draws it: a fenced ```` ```svg ```` block with one complete,
+  self-contained `<svg>` (viewBox, no script, no external refs, readable
+  on dark and light). Technical aspects get a diagram by default. When a
+  web search or fetch returned an image URL that shows the thing being
+  explained, the model shows it with the image tag `![caption](url)` —
+  only URLs that appeared in a tool result this turn. Text always
+  accompanies a figure; greetings and one-line facts get no picture.
+- **Never assume.** A factual question is never answered from memory
+  while a lookup tool is registered: knowledge tool first, web tools if
+  knowledge had nothing, then answer. Only greetings, chitchat and
+  arithmetic skip the lookup. The library's "stable facts need no
+  verification" clause was removed to match.
+- **Batch independent calls.** The server enables
+  `Engine::parallel_tool_calls(true)`: lookups that do not depend on each
+  other go in one turn, up to **10 tool calls at once** (the engine runs
+  the first 10 and logs the rest). `/props` reports
+  `supports_parallel_tool_calls:true`.
+
 Operators who want a different persona pass `--system "<text>"`
 (`[SERVER] system_inline`) or `-s persona.txt` (`[SERVER]
 system_file`) — Deep is the default, not a hardcoded identity.

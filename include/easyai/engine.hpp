@@ -144,7 +144,7 @@ class Engine {
     Engine & tool_choice_auto    ();
     Engine & tool_choice_required();
     Engine & tool_choice_none    ();
-    Engine & parallel_tool_calls (bool enable);    // default false
+    Engine & parallel_tool_calls (bool enable);    // default false; on = run every call of a turn (max 10, extras dropped)
     Engine & verbose       (bool on);              // default false
 
     // Agentic-loop safety cap: how many tool round-trips chat() will run

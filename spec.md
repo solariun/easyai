@@ -547,6 +547,76 @@ decide their own policy. Polling `/health` (3 s) was chosen over a push
 channel: the state changes once per operator action and the probe is
 lock-free.
 
+## Visual replies, never-assume, parallel tool calls (AUTHORITATIVE — 2026-10-04)
+
+**Plain words.** Gustavo wants the web chat to be visual (draw diagrams,
+show pictures from the web), the model to stop answering from memory when
+it can look things up, and to let it fire several lookups at once.
+
+**Rules.**
+
+1. **Web appendix** (`kWebUIAppendix`, server static prompt, web only):
+   `## Be visual` — draw an SVG whenever a picture conveys more; technical
+   aspects get a diagram by default; fenced ```` ```svg ```` block, one
+   complete `<svg>` with viewBox, no script / external refs / foreignObject,
+   readable on dark and light, under ~120 lines; image tag
+   `![caption](url)` for image URLs that appeared in a tool result this
+   turn, never invented; text always accompanies a figure; no pictures for
+   greetings / one-liners. `## Never assume` — knowledge → web → answer;
+   up to 10 tool calls per turn.
+2. **Library guidance** (`src/preamble.cpp`, shared with the CLI):
+   base prompt now says "greetings, chitchat and arithmetic" skip tools and
+   "for anything factual, NEVER ASSUME"; the knowledge-cutoff block no
+   longer exempts "stable facts" from verification; the information
+   pipeline opens with "even one you think you know"; WEB-only sessions
+   read "WEB first — never answer a factual question from memory while web
+   tools are available"; new `BATCH INDEPENDENT CALLS` paragraph (up to 10
+   at once, dependent steps one hop at a time); STOP SIGNAL counts
+   *rounds*, not calls.
+3. **Engine**: `parallel_tool_calls(true)` runs every call of a turn;
+   `kMaxParallelToolCalls = 10` — extra calls are dropped with an
+   `easyai::log::error` line naming the counts. Default stays `false`
+   for library users; the server sets `true` and `/props` reports
+   `supports_parallel_tool_calls:true`.
+4. **Rendering** (`kEasyaiVisualJs`, injected into the bundle and baked
+   into the minimal UI): a `<pre><code>` whose text is one complete
+   `<svg>…</svg>` becomes `<figure class="easyai-svg-fig">` with the
+   sanitised SVG and the source in a collapsed `<details>`. Sanitiser:
+   parse as `image/svg+xml`, reject parser errors, drop `script`,
+   `foreignObject`, `iframe`, `object`, `embed`, `link`, `meta`, `style`,
+   `image`, `animate`, `set`; keep `use` only for `#fragment` hrefs; strip
+   `on*`, non-fragment `href`/`xlink:href`, and `style` attributes with
+   `url(`/`expression`/`@import`; force `width=100%` and a viewBox. Bundle:
+   run on the existing 250 ms tick, processed blocks skipped; minimal UI:
+   run inside `renderMD` after highlight.js. Markdown images already
+   render as `<img>` in both UIs; CSS caps them at the column width.
+
+```mermaid
+flowchart LR
+    M[model reply] -->|```svg block| P[pre > code]
+    P -->|complete svg| S[sanitise: parse, drop bad tags, strip handlers]
+    S -->|ok| F[figure + collapsed source]
+    S -->|parser error| P
+    M -->|![caption](url)| I[img, max-width 100%]
+```
+
+**Proof (2026-10-04).** `--show-system-prompt` carries `## Be visual`,
+`## Never assume`, `BATCH INDEPENDENT CALLS`, "WEB first", "NEVER ASSUME".
+`/props.chat_template_caps.supports_parallel_tool_calls == true`. Modern
+page: 13 injected scripts, 0 syntax errors, helper present; minimal page:
+2 scripts, 0 errors, helper present, placeholder substituted. Full build
+green, ctest 1/1. Not verified here: the figure rendering in a real
+browser (no browser tool in this session).
+
+**Decisions.** The visual rules live in the server's web appendix only,
+because the CLI renders in a terminal. The never-assume rule changes the
+shared library text because a contradicting sentence ("anything you
+already know — no tool needed") would have left the model with two
+authoritative instructions. Tool calls beyond 10 are dropped rather than
+queued: a model that emits dozens is looping, and the log line makes it
+visible. SVG is sanitised client-side instead of trusting the model: the
+model's output is untrusted content in the page.
+
 ## Backend::Config extensions (2026-05-27)
 
 `LocalBackend::Config` and `RemoteBackend::Config` gained two fields,

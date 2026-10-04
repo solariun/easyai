@@ -2288,6 +2288,9 @@ std::string Engine::chat_continue() {
     // don't pay the indirection cost.
     const int kMaxIncompleteRetries = std::max(0, p_->max_incomplete_retries);
     constexpr size_t kAnnounceFloor      = 80;  // bytes — sub-tweet replies
+    // Parallel tool calls accepted from ONE assistant turn; extra calls are
+    // dropped with a log line so a runaway model cannot queue hundreds.
+    constexpr size_t kMaxParallelToolCalls = 10;
     int thought_retries    = 0;
     int incomplete_retries = 0;
     std::string final_text;
@@ -2605,6 +2608,13 @@ std::string Engine::chat_continue() {
         // success (tool dispatch) resets.
         incomplete_retries = 0;
 
+        if (p_->parallel_tool_calls && msg.tool_calls.size() > kMaxParallelToolCalls) {
+            easyai::log::error(
+                "[easyai] hop %d: model emitted %zu tool calls in one turn — "
+                "running the first %zu, dropping the rest\n",
+                hop, msg.tool_calls.size(), kMaxParallelToolCalls);
+            msg.tool_calls.resize(kMaxParallelToolCalls);
+        }
         // Run each tool call; append a tool message for each result.
         for (const auto & tc : msg.tool_calls) {
             const Tool * tool = p_->find_tool(tc.name);
