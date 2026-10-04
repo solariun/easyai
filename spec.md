@@ -579,8 +579,10 @@ it can look things up, and to let it fire several lookups at once.
    for library users; the server sets `true` and `/props` reports
    `supports_parallel_tool_calls:true`.
 4. **Rendering** (`kEasyaiVisualJs`, injected into the bundle and baked
-   into the minimal UI): a `<pre><code>` whose text is one complete
-   `<svg>…</svg>` becomes `<figure class="easyai-svg-fig">` with the
+   into the minimal UI): any `<pre>` or `<p>` whose whole text is one
+   complete `<svg>…</svg>` — whatever fence language the model used
+   (svg, xml, html, none), and raw SVG the markdown renderer escaped into
+   a paragraph — becomes `<figure class="easyai-svg-fig">` with the
    sanitised SVG and the source in a collapsed `<details>`. Sanitiser:
    parse as `image/svg+xml`, reject parser errors, drop `script`,
    `foreignObject`, `iframe`, `object`, `embed`, `link`, `meta`, `style`,
@@ -599,6 +601,20 @@ flowchart LR
     S -->|parser error| P
     M -->|![caption](url)| I[img, max-width 100%]
 ```
+
+**Field test and revision (Gustavo, 2026-10-04 evening).** First deploy:
+"info about X.25" came back text-only, "diagrams" too, and "an SVG"
+produced a block labelled `xml` that was cut off before `</svg>` (the
+model wrote "since I am an AI text model…"). Revision: the `## Be visual`
+block now states that the UI renders SVG as a drawing and the model is not
+text-only here; WHEN is mandatory with trigger words and "text-only or
+xml/html-labelled code is a FAILURE"; WHAT lists a shape per case; HOW
+pins the exact fence word, the `<svg>` opening, a palette readable on
+both themes, a ~40-element / ~80-line budget so the figure completes, and
+"always close `</svg>` and the fence". The renderer was widened to any
+`<pre>`/`<p>` holding a complete SVG regardless of fence language, and the
+bundle's code-block wrapper (language label + copy button) is replaced
+with the figure.
 
 **Proof (2026-10-04).** `--show-system-prompt` carries `## Be visual`,
 `## Never assume`, `BATCH INDEPENDENT CALLS`, "WEB first", "NEVER ASSUME".

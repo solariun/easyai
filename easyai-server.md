@@ -700,16 +700,27 @@ mandatory, citations stick to the URL actually fetched.
 Three rules added on 2026-10-04 (web appendix of the static prompt,
 `kWebUIAppendix`, plus the shared library guidance):
 
-- **Be visual.** The web UI renders inline SVG and images, so whenever a
-  picture conveys more than words — architecture, data flow, protocol or
-  state machine, timeline, comparison, layout, pinout, waveform — the
-  model draws it: a fenced ```` ```svg ```` block with one complete,
-  self-contained `<svg>` (viewBox, no script, no external refs, readable
-  on dark and light). Technical aspects get a diagram by default. When a
-  web search or fetch returned an image URL that shows the thing being
-  explained, the model shows it with the image tag `![caption](url)` —
-  only URLs that appeared in a tool result this turn. Text always
-  accompanies a figure; greetings and one-line facts get no picture.
+- **Be visual — you CAN show pictures.** The prompt tells the model
+  plainly that this UI renders its SVG as a drawing (it is not a
+  text-only model here) and treats figures as a tool that enriches the
+  answer. WHEN is mandatory: any explanation of a protocol, architecture,
+  process, format, workflow, algorithm, topology, timeline, comparison or
+  scenario gets text plus at least one SVG figure ("tell me about X.25"
+  gets a layer/flow diagram unasked); the words diagram / picture /
+  figure / drawing / image / visual / draw / show / illustrate / SVG make
+  a figure compulsory, and text-only or code labelled xml/html is named a
+  failure. WHAT lists the shape per case (frame layout → proportional
+  boxes, flow → boxes and arrows or a sequence diagram, state machine,
+  stack, comparison columns, timeline, a concrete case drawn step by
+  step). HOW is exact: fence ```` ```svg ```` (never xml/html), one
+  complete `<svg xmlns viewBox="0 0 800 H" width="100%">`, mid-tone
+  palette readable on dark and light, no full-canvas background, at most
+  ~40 elements / ~80 lines so it always completes, always close `</svg>`
+  and the fence, no script / external refs / foreignObject / image, a
+  sentence before and after. Image URLs that appeared in a tool result
+  this turn are shown with `![caption](url)`. The renderer accepts any
+  `<pre>` or `<p>` whose whole text is one complete `<svg>…</svg>`,
+  whatever fence language was used; an unfinished SVG renders nothing.
 - **Never assume.** A factual question is never answered from memory
   while a lookup tool is registered: knowledge tool first, web tools if
   knowledge had nothing, then answer. Only greetings, chitchat and

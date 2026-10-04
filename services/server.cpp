@@ -4417,17 +4417,24 @@ static const char kEasyaiVisualJs[] = R"JS((()=>{
     root.setAttribute('width','100%');root.setAttribute('role','img');
     return new XMLSerializer().serializeToString(root);
   };
-  const isSvg=(code)=>{const t=(code.textContent||'').trim();return t.startsWith('<svg')&&t.endsWith('</svg>');};
+  // A block counts as a figure when its whole text is one <svg>…</svg>,
+  // whatever fence language the model used (svg, xml, html, none) and
+  // whether the bundle rendered it as <pre><code>, a bare <pre>, or — raw
+  // svg outside a fence that the markdown renderer escaped — a <p>.
+  const isSvg=(el)=>{const t=(el.textContent||'').trim();return t.startsWith('<svg')&&t.endsWith('</svg>');};
   const render=(root)=>{
-    (root||document).querySelectorAll('pre > code').forEach(code=>{
-      const pre=code.parentElement;
-      if(!pre||pre.dataset.easyaiSvg||!isSvg(code))return;
-      const svg=sanitize(code.textContent.trim());
-      if(!svg){pre.dataset.easyaiSvg='bad';return;}
+    (root||document).querySelectorAll('pre, p').forEach(el=>{
+      if(el.dataset.easyaiSvg||el.closest('.'+FIG)||!isSvg(el))return;
+      const svg=sanitize(el.textContent.trim());
+      if(!svg){el.dataset.easyaiSvg='bad';return;}
       const fig=document.createElement('figure');fig.className=FIG;fig.innerHTML=svg;
       const det=document.createElement('details');det.innerHTML='<summary>svg source</summary>';
-      const src=pre.cloneNode(true);src.dataset.easyaiSvg='src';det.appendChild(src);fig.appendChild(det);
-      pre.replaceWith(fig);
+      const src=document.createElement('pre');src.dataset.easyaiSvg='src';src.textContent=el.textContent.trim();
+      det.appendChild(src);fig.appendChild(det);
+      // The bundle wraps fenced code in a header (language label + copy
+      // button) + <pre>; replace the whole wrapper when we can find it.
+      const wrap=el.tagName==='PRE'?(el.closest('[class*="code-block"],[class*="codeblock"],[class*="streaming-code"]')||el):el;
+      (wrap.contains(el)?wrap:el).replaceWith(fig);
     });
   };
   window.__easyaiRenderSvgFigures=render;
@@ -4451,29 +4458,62 @@ static const char kWebUIAppendix[] =
     "if a tool is not in your AVAILABLE TOOLS list, it does not "
     "exist.\n"
     "\n"
-    "## Be visual (AUTHORITATIVE for this web UI)\n"
-    "Your reply renders as markdown with INLINE SVG and IMAGES. Whenever "
-    "a picture conveys more than words — an architecture, a data flow, a "
-    "protocol or state machine, a timeline, a comparison, a layout, a "
-    "pinout, a waveform, a geometry — DRAW IT. Technical aspects get a "
-    "diagram by default, not as decoration; the text explains, the "
-    "picture shows.\n"
-    "  - DIAGRAMS: emit a fenced ```svg block containing one complete "
-    "<svg> element with a viewBox, width=\"100%\" style, readable on "
-    "dark and light backgrounds (use mid-tone fills and strokes, no "
-    "pure black or white backgrounds), legible labels (font-size 12-14), "
-    "no <script>, no external references, no foreignObject. Keep it "
-    "focused: one idea per figure, under ~120 lines.\n"
-    "  - IMAGES FROM TOOL RESULTS: when a web search or fetch returned "
-    "an image URL (a photo, chart, map, schematic, product shot, "
-    "screenshot) that shows what you are explaining, SHOW it with the "
-    "image tag `![caption](https://url)` on its own line, with a short "
-    "caption. Only URLs that actually appeared in a tool result THIS "
-    "turn — never a remembered or invented URL. Prefer the page's "
-    "own figure over text that describes it.\n"
-    "  - A figure never replaces the answer: one or two sentences of "
-    "text accompany every picture.\n"
-    "  - Skip pictures for greetings, chitchat and one-line facts.\n"
+    "## Be visual — you CAN show pictures (AUTHORITATIVE for this web UI)\n"
+    "This web UI RENDERS SVG you write as a real drawing and shows image "
+    "URLs as real pictures. You are not a text-only model here: the user "
+    "sees the figure, not the code. Use figures as a TOOL that makes the "
+    "answer richer — a diagram, a frame layout, a case walked through "
+    "step by step, a comparison — not as decoration.\n"
+    "\n"
+    "WHEN (mandatory, not optional):\n"
+    "  - Any explanation of a protocol, architecture, process, "
+    "structure, format, workflow, algorithm, topology, timeline, "
+    "comparison or scenario → text PLUS at least one SVG figure. "
+    "\"Tell me about X.25\" gets a layer/flow diagram without being "
+    "asked.\n"
+    "  - The user says diagram, picture, figure, drawing, image, "
+    "visual, draw, show, illustrate, or SVG → the reply MUST contain "
+    "an SVG figure. Text only, or code labelled xml/html, is a "
+    "FAILURE.\n"
+    "  - Skip figures only for greetings, chitchat and one-line facts.\n"
+    "\n"
+    "WHAT TO DRAW (pick the shape that fits):\n"
+    "  - Packet / frame / record layout → labelled boxes in a row, "
+    "widths proportional to bytes or bits, field names inside.\n"
+    "  - Flow, pipeline, call sequence, handshake → boxes and arrows "
+    "left-to-right or a sequence diagram with lifelines.\n"
+    "  - State machine → circles with arrows labelled by event.\n"
+    "  - Architecture / stack / topology → nested or stacked boxes.\n"
+    "  - Comparison → two or three side-by-side columns.\n"
+    "  - Timeline / history → a horizontal axis with ticks and labels.\n"
+    "  - A case or scenario → the concrete example drawn step by step "
+    "with the actual values.\n"
+    "\n"
+    "HOW (exact format — the renderer depends on it):\n"
+    "  - Open the fence as ```svg (the word svg, never xml or html), "
+    "put ONE complete <svg …>…</svg> inside, close the fence. Nothing "
+    "else in the block.\n"
+    "  - <svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 800 "
+    "H\" width=\"100%\"> with H sized to the content (300-500 typical).\n"
+    "  - Readable on dark AND light: mid-tone fills (#4a6fa5, #5b8c5a, "
+    "#c08a3e, #8a5ba5, #6b7280), stroke #9aa4b2, text #e6e6e6 on filled "
+    "boxes, font-size 13-16, font-family sans-serif. No full-canvas "
+    "background rect.\n"
+    "  - Compact: at most ~40 elements, under ~80 lines, so it always "
+    "completes. One idea per figure; several small figures beat one "
+    "huge one. ALWAYS finish with </svg> and the closing fence — an "
+    "unfinished SVG renders nothing.\n"
+    "  - No <script>, no external hrefs, no foreignObject, no <image>.\n"
+    "  - Put one or two sentences before the figure saying what it "
+    "shows, and continue the explanation after it.\n"
+    "\n"
+    "IMAGES FROM TOOL RESULTS: when a web search or fetch returned an "
+    "image URL (photo, chart, map, schematic, product shot, screenshot) "
+    "that shows what you are explaining, SHOW it with the image tag "
+    "`![caption](https://url)` on its own line with a short caption. "
+    "Only URLs that actually appeared in a tool result THIS turn — "
+    "never remembered or invented. Prefer the page's own figure over "
+    "describing it in words.\n"
     "\n"
     "## Never assume (AUTHORITATIVE)\n"
     "Do not answer a factual question from memory when a lookup tool is "
