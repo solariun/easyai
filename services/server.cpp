@@ -4433,27 +4433,12 @@ static const char kEasyaiVisualJs[] = R"JS((()=>{
     }catch(e){}
     return null;
   };
-  // A full-canvas background rect (the model's habit) kills dark-theme
-  // readability; drop a direct-child rect that covers the whole canvas.
-  const dropCanvasRect=(root)=>{
-    const vb=(root.getAttribute('viewBox')||'').trim().split(/[\s,]+/).map(parseFloat);
-    const W=vb.length===4?vb[2]:parseFloat(root.getAttribute('width')),
-          H=vb.length===4?vb[3]:parseFloat(root.getAttribute('height'));
-    for(const c of Array.from(root.children)){
-      if(c.nodeName.toLowerCase()!=='rect')continue;
-      const x=parseFloat(c.getAttribute('x')||'0'),y=parseFloat(c.getAttribute('y')||'0');
-      const w=c.getAttribute('width')||'',h=c.getAttribute('height')||'';
-      const full=(v,ref)=>v==='100%'||(ref>0&&Math.abs(parseFloat(v)-ref)<1);
-      if(x===0&&y===0&&full(w,W)&&full(h,H))c.remove();
-    }
-  };
   const sanitize=(src)=>{
     const root=parseSvg(decodeEntities(src));
     if(!root)return null;
     scrubAttrs(root);walk(root);
     const w=parseFloat(root.getAttribute('width')),h=parseFloat(root.getAttribute('height'));
     if(!root.getAttribute('viewBox')&&w>0&&h>0)root.setAttribute('viewBox','0 0 '+w+' '+h);
-    dropCanvasRect(root);
     root.removeAttribute('width');root.removeAttribute('height');
     root.setAttribute('width','100%');root.setAttribute('role','img');
     return new XMLSerializer().serializeToString(root);
@@ -4489,12 +4474,6 @@ static const char kEasyaiVisualJs[] = R"JS((()=>{
   const mmCache=new Map();       // text -> svg string | 'bad'
   const mmSeen=new Map();        // text -> first time seen (ms)
   let mmLoad=null, mmSeq=0;
-  const isDark=()=>{
-    const h=document.documentElement;
-    if(h.classList.contains('dark')||h.getAttribute('data-theme')==='dark')return true;
-    if(h.classList.contains('light')||h.getAttribute('data-theme')==='light')return false;
-    return !!(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches);
-  };
   const loadMermaid=()=>{
     if(window.mermaid)return Promise.resolve(window.mermaid);
     if(mmLoad)return mmLoad;
@@ -4502,7 +4481,7 @@ static const char kEasyaiVisualJs[] = R"JS((()=>{
       const s=document.createElement('script');s.src=MM_SRC;s.async=true;
       s.onload=()=>{
         try{window.mermaid.initialize({startOnLoad:false,securityLevel:'strict',
-          theme:isDark()?'dark':'neutral',fontFamily:'sans-serif',
+          theme:'default',themeVariables:{background:'#ffffff'},fontFamily:'sans-serif',
           flowchart:{htmlLabels:false},sequence:{useMaxWidth:true}});}catch(e){}
         res(window.mermaid);
       };
@@ -4550,8 +4529,9 @@ static const char kEasyaiVisualJs[] = R"JS((()=>{
   window.__easyaiRenderFigures=renderAll;
   if(!document.getElementById('__easyaiSvgFigStyle')){
     const st=document.createElement('style');st.id='__easyaiSvgFigStyle';
-    st.textContent='.'+FIG+'{margin:.6rem 0;padding:.5rem;border:1px solid rgba(128,128,128,.35);border-radius:.5rem;background:rgba(128,128,128,.06)}'
-      +'.'+FIG+' svg{display:block;max-width:100%;height:auto;margin:0 auto}'
+    st.textContent='.'+FIG+'{margin:.6rem 0;padding:.6rem;border:1px solid rgba(128,128,128,.35);border-radius:.5rem;'
+        +'background:#ffffff !important;color:#1f2937 !important;color-scheme:light;filter:none !important}'
+      +'.'+FIG+' svg{display:block;max-width:100%;height:auto;margin:0 auto;background:#ffffff !important;color:#1f2937}'
       +'.'+FIG+' details{margin-top:.3rem;font-size:.7rem;opacity:.7}'
       +'.'+FIG+' details pre{margin-top:.3rem;max-height:14rem;overflow:auto}'
       +'.msg.assistant .content img,[aria-label="Assistant message with actions"] img{max-width:100%;height:auto;border-radius:.5rem;margin:.4rem 0}';
@@ -4619,10 +4599,11 @@ static const char kWebUIAppendix[] =
     "right here — do not tell the user to paste it elsewhere.\n"
     "  - <svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 800 "
     "H\" width=\"100%\"> with H sized to the content (300-500 typical).\n"
-    "  - Readable on dark AND light: mid-tone fills (#4a6fa5, #5b8c5a, "
-    "#c08a3e, #8a5ba5, #6b7280), stroke #9aa4b2, text #e6e6e6 on filled "
-    "boxes, font-size 13-16, font-family sans-serif. No full-canvas "
-    "background rect.\n"
+    "  - Figures are shown on a WHITE background whatever the page "
+    "theme: dark text (#1f2937), strokes #374151, light fills (#dbeafe, "
+    "#dcfce7, #fef3c7, #ede9fe, #fee2e2) or mid-tone fills with white "
+    "text, font-size 13-16, font-family sans-serif. No background rect "
+    "needed.\n"
     "  - Compact: at most ~40 elements, under ~80 lines, so it always "
     "completes. One idea per figure; several small figures beat one "
     "huge one. ALWAYS finish with </svg> and the closing fence — an "

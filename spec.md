@@ -591,8 +591,7 @@ it can look things up, and to let it fire several lookups at once.
    into the minimal UI). **Mermaid**: a `<pre>`/`<p>` whose text starts
    with a Mermaid diagram keyword (or carries `language-mermaid`) is
    rendered through mermaid@11, lazy-loaded from jsdelivr on first use,
-   `securityLevel:'strict'`, `htmlLabels:false`, theme `dark`/`neutral`
-   from the page; because a Mermaid block has no closing marker, it is
+   `securityLevel:'strict'`, `htmlLabels:false`, theme `default` (light); because a Mermaid block has no closing marker, it is
    rendered only after its text has been unchanged for 1200 ms, the SVG
    is cached by text (UIs that rebuild on every token mount it
    synchronously on the next pass), parse failures are cached as bad.
@@ -604,9 +603,7 @@ it can look things up, and to let it fire several lookups at once.
    `&rarr;`, `&nbsp;`, `&mdash;`, which XML does not define), parsed as
    `image/svg+xml`, and on a parser error re-parsed with the lenient
    `text/html` parser (the `<svg>` lands in the SVG namespace either
-   way). A direct-child `<rect>` at 0,0 covering the whole canvas (the
-   model's white-background habit) is dropped for dark-theme
-   readability. Then: any `<pre>` or `<p>` whose whole text is one
+   way). Then: any `<pre>` or `<p>` whose whole text is one
    complete `<svg>…</svg>` — whatever fence language the model used
    (svg, xml, html, none), and raw SVG the markdown renderer escaped into
    a paragraph — becomes `<figure class="easyai-svg-fig">` with the
@@ -660,6 +657,15 @@ symbols as UTF-8 characters and use only the three XML entities.
 Reproduced outside the browser with the same two steps: strict parse of
 the original fails on `&rarr;`, parse after decoding succeeds, the
 900×550 background rect is dropped and the content rect kept.
+
+**White figure box (Gustavo, 2026-10-04).** Every SVG and Mermaid figure
+is shown inside a WHITE box (`.easyai-svg-fig {background:#fff;
+color:#1f2937}`) whatever the page theme; Mermaid uses its light
+`default` theme; the model's own canvas rect is kept as drawn (the
+earlier canvas-rect drop was removed — it only existed for dark pages);
+the HOW palette now targets white: dark text, light fills or mid-tone
+fills with white text. Reason: diagrams are designed for paper-white and
+one consistent background beats theme-dependent readability.
 
 **Proof of the revision.** `--show-system-prompt` now opens with the
 prelude line; `preamble::build()` driven directly with `visual_ui=true`

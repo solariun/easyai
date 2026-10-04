@@ -710,7 +710,9 @@ Three rules added on 2026-10-04 (web appendix of the static prompt,
   mid-prompt. Both UIs render **SVG and Mermaid**: Mermaid is lazy-loaded
   from the CDN on first use, rendered with `securityLevel:'strict'` once
   the block's text has been stable for 1.2 s (streaming has no closing
-  marker), themed dark/neutral to match the page. The rules treat
+  marker). Every figure, SVG or Mermaid, sits in a **white box** whatever
+  the page theme (Mermaid uses its light theme), so diagrams read like
+  paper. The rules treat
   figures as a tool that enriches the answer. WHEN is mandatory: any explanation of a protocol, architecture,
   process, format, workflow, algorithm, topology, timeline, comparison or
   scenario gets text plus at least one SVG figure ("tell me about X.25"
@@ -721,8 +723,8 @@ Three rules added on 2026-10-04 (web appendix of the static prompt,
   boxes, flow → boxes and arrows or a sequence diagram, state machine,
   stack, comparison columns, timeline, a concrete case drawn step by
   step). HOW is exact: fence ```` ```svg ```` (never xml/html), one
-  complete `<svg xmlns viewBox="0 0 800 H" width="100%">`, mid-tone
-  palette readable on dark and light, no full-canvas background, at most
+  complete `<svg xmlns viewBox="0 0 800 H" width="100%">`, a palette for
+  a white background (dark text, light fills), at most
   ~40 elements / ~80 lines so it always completes, always close `</svg>`
   and the fence, no script / external refs / foreignObject / image, a
   sentence before and after; Mermaid (`flowchart`, `sequenceDiagram`,
@@ -732,9 +734,8 @@ Three rules added on 2026-10-04 (web appendix of the static prompt,
   tool result this turn are shown with `![caption](url)`. The renderer accepts any
   `<pre>` or `<p>` whose whole text is one complete `<svg>…</svg>`,
   whatever fence language was used; HTML entities such as `&rarr;` are
-  decoded before the XML parse (with a lenient HTML-parser fallback), a
-  full-canvas background rect is dropped, and an unfinished SVG renders
-  nothing.
+  decoded before the XML parse (with a lenient HTML-parser fallback), and
+  an unfinished SVG renders nothing.
 - **Never assume.** A factual question is never answered from memory
   while a lookup tool is registered: knowledge tool first, web tools if
   knowledge had nothing, then answer. Only greetings, chitchat and
