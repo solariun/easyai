@@ -700,10 +700,18 @@ mandatory, citations stick to the URL actually fetched.
 Three rules added on 2026-10-04 (web appendix of the static prompt,
 `kWebUIAppendix`, plus the shared library guidance):
 
-- **Be visual — you CAN show pictures.** The prompt tells the model
-  plainly that this UI renders its SVG as a drawing (it is not a
-  text-only model here) and treats figures as a tool that enriches the
-  answer. WHEN is mandatory: any explanation of a protocol, architecture,
+- **Be visual — you CAN show pictures.** The capability statement is
+  the FIRST line of the static prompt (`kWebUIPrelude`: "a fenced
+  ```svg block appears as a drawing, a fenced ```mermaid block as a
+  diagram, a markdown image as a picture; you can draw; never describe
+  yourself as text-only") and is repeated as a `# VISUAL REMINDER` block
+  at the tail of every request's preamble (`preamble::Options::visual_ui`),
+  because models that believe they are "text-based" ignore rules buried
+  mid-prompt. Both UIs render **SVG and Mermaid**: Mermaid is lazy-loaded
+  from the CDN on first use, rendered with `securityLevel:'strict'` once
+  the block's text has been stable for 1.2 s (streaming has no closing
+  marker), themed dark/neutral to match the page. The rules treat
+  figures as a tool that enriches the answer. WHEN is mandatory: any explanation of a protocol, architecture,
   process, format, workflow, algorithm, topology, timeline, comparison or
   scenario gets text plus at least one SVG figure ("tell me about X.25"
   gets a layer/flow diagram unasked); the words diagram / picture /
@@ -717,8 +725,11 @@ Three rules added on 2026-10-04 (web appendix of the static prompt,
   palette readable on dark and light, no full-canvas background, at most
   ~40 elements / ~80 lines so it always completes, always close `</svg>`
   and the fence, no script / external refs / foreignObject / image, a
-  sentence before and after. Image URLs that appeared in a tool result
-  this turn are shown with `![caption](url)`. The renderer accepts any
+  sentence before and after; Mermaid (`flowchart`, `sequenceDiagram`,
+  `stateDiagram-v2`, `classDiagram`, `erDiagram`, `gantt`, `pie`,
+  `timeline`) is accepted and rendered in place — the model must not
+  tell the user to paste it elsewhere. Image URLs that appeared in a
+  tool result this turn are shown with `![caption](url)`. The renderer accepts any
   `<pre>` or `<p>` whose whole text is one complete `<svg>…</svg>`,
   whatever fence language was used; an unfinished SVG renders nothing.
 - **Never assume.** A factual question is never answered from memory

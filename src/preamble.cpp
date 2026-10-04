@@ -178,6 +178,23 @@ std::string build(const Options & opt) {
         out << "\n\n" << cite_sources_block(has_memory);
     }
 
+    // Visual reminder — stable text, placed just before the volatile
+    // memory vocabulary so it sits at the tail (recency) without
+    // disturbing the cached prefix.
+    if (opt.visual_ui) {
+        out << "\n\n# VISUAL REMINDER (web UI — you CAN draw)\n"
+               "This chat renders a fenced ```svg block as a real drawing "
+               "and a fenced ```mermaid block as a rendered diagram. You are "
+               "NOT a text-only model here — never say so, never suggest "
+               "the user paste code into another viewer. A technical "
+               "explanation, or any request for a diagram / picture / "
+               "figure / drawing / graphic / visual, MUST include at least "
+               "one figure: SVG preferred (full control), Mermaid accepted "
+               "(flowchart, sequenceDiagram, stateDiagram-v2, classDiagram, "
+               "erDiagram, gantt, pie, timeline). Complete the block "
+               "(</svg> or the closing fence) before continuing.\n";
+    }
+
     // Memory vocabulary — TAIL of the preamble on purpose (see the
     // KV-cache comment above).  The renderer is cached by directory
     // mtime; cost on a hot path is one stat() per request.

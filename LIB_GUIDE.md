@@ -186,7 +186,7 @@ order makes it obvious how to override exactly what you want.
 ├──────────────────────────────────────────────────────────────┤
 │ 4. DYNAMIC PREAMBLE                                           │
 │    preamble::build({inject_datetime, knowledge_cutoff,        │
-│                     memory_root, cite_sources, has_memory})   │
+│                     memory_root, cite_sources, has_memory, visual_ui})   │
 ├──────────────────────────────────────────────────────────────┤
 │ 5. TOOLS CATALOGUE                                            │
 │    Local sessions:  preamble::build_session_info(tools)       │

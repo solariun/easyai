@@ -114,6 +114,13 @@ struct Options {
     // whether the knowledge/RAG tool is actually wired up this session.
     // Ignored when cite_sources=false.
     bool has_memory = false;
+
+    // The consumer renders ```svg and ```mermaid blocks as pictures (the
+    // easyai-server web UI). Emits a short VISUAL REMINDER block near the
+    // tail of the preamble — the recency position models actually obey —
+    // so the full "Be visual" rules in the static prompt are not forgotten
+    // behind the datetime / knowledge / citation blocks.
+    bool visual_ui = false;
 };
 
 // Build the AUTHORITATIVE preamble. Returns a string that should

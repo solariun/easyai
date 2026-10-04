@@ -617,9 +617,6 @@ function renderMD(s){
           try { window.hljs.highlightElement(b); } catch {}
         });
       }
-      if (window.__easyaiRenderSvgFigures) {
-        try { window.__easyaiRenderSvgFigures(tmp); } catch {}
-      }
       return tmp.innerHTML;
     } catch (e) {
       console.warn('markdown fallback', e);
@@ -911,6 +908,11 @@ class AssistantTurn {
 
     this.contentEl.innerHTML = renderMD(cleaned) +
         (this._done ? '' : '<span class="cursor"></span>');
+    // ```svg → inline figure now; ```mermaid → figure once the block has
+    // settled (async, cached by text — see kEasyaiVisualJs).
+    if (window.__easyaiRenderFigures) {
+      try { window.__easyaiRenderFigures(this.contentEl); } catch {}
+    }
     chatEl.scrollTop = chatEl.scrollHeight;
   }
 
@@ -1881,6 +1883,8 @@ static std::string build_authoritative_preamble(const ServerCtx & ctx,
         // cite-sources tied to that same condition so its emission is
         // unchanged.
         /* cite_sources     = */ inject_datetime || !memory_root.empty(),
+        /* has_memory       = */ false,            // derived from memory_root
+        /* visual_ui        = */ true,             // web UI renders svg/mermaid
     });
 }
 
@@ -4437,7 +4441,76 @@ static const char kEasyaiVisualJs[] = R"JS((()=>{
       (wrap.contains(el)?wrap:el).replaceWith(fig);
     });
   };
+  // ---- Mermaid: lazy-load from CDN on first use, render complete blocks.
+  // Completeness has no closing marker, so a block is rendered once its
+  // text has been stable for MM_SETTLE_MS (streaming keeps changing it).
+  // Rendered SVG is cached by text, so UIs that rebuild their DOM on every
+  // token mount the figure synchronously on the next pass.
+  const MM_SRC='https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+  const MM_RE=/^(graph|flowchart|sequenceDiagram|stateDiagram(-v2)?|classDiagram|erDiagram|gantt|pie|journey|mindmap|timeline|gitGraph|xychart-beta|quadrantChart|block-beta|sankey-beta|requirementDiagram|C4Context)\b/;
+  const MM_SETTLE_MS=1200;
+  const mmCache=new Map();       // text -> svg string | 'bad'
+  const mmSeen=new Map();        // text -> first time seen (ms)
+  let mmLoad=null, mmSeq=0;
+  const isDark=()=>{
+    const h=document.documentElement;
+    if(h.classList.contains('dark')||h.getAttribute('data-theme')==='dark')return true;
+    if(h.classList.contains('light')||h.getAttribute('data-theme')==='light')return false;
+    return !!(window.matchMedia&&matchMedia('(prefers-color-scheme: dark)').matches);
+  };
+  const loadMermaid=()=>{
+    if(window.mermaid)return Promise.resolve(window.mermaid);
+    if(mmLoad)return mmLoad;
+    mmLoad=new Promise((res,rej)=>{
+      const s=document.createElement('script');s.src=MM_SRC;s.async=true;
+      s.onload=()=>{
+        try{window.mermaid.initialize({startOnLoad:false,securityLevel:'strict',
+          theme:isDark()?'dark':'neutral',fontFamily:'sans-serif',
+          flowchart:{htmlLabels:false},sequence:{useMaxWidth:true}});}catch(e){}
+        res(window.mermaid);
+      };
+      s.onerror=()=>{mmLoad=null;rej(new Error('mermaid load failed'));};
+      (document.head||document.documentElement).appendChild(s);
+    });
+    return mmLoad;
+  };
+  const isMermaid=(el)=>{
+    const t=(el.textContent||'').trim();
+    if(MM_RE.test(t))return true;
+    const c=el.querySelector&&el.querySelector('code');
+    return !!(c&&/language-mermaid/.test(c.className));
+  };
+  const mountFig=(el,svg,source,label)=>{
+    const fig=document.createElement('figure');fig.className=FIG;fig.innerHTML=svg;
+    const s=fig.querySelector('svg');
+    if(s){s.removeAttribute('height');s.style.maxWidth='100%';s.style.height='auto';s.style.display='block';s.style.margin='0 auto';}
+    const det=document.createElement('details');det.innerHTML='<summary>'+label+' source</summary>';
+    const src=document.createElement('pre');src.dataset.easyaiSvg='src';src.textContent=source;
+    det.appendChild(src);fig.appendChild(det);
+    const wrap=el.tagName==='PRE'?(el.closest('[class*="code-block"],[class*="codeblock"],[class*="streaming-code"]')||el):el;
+    (wrap.contains(el)?wrap:el).replaceWith(fig);
+  };
+  const renderMermaid=(root)=>{
+    (root||document).querySelectorAll('pre, p').forEach(el=>{
+      if(el.dataset.easyaiSvg||el.closest('.'+FIG)||!isMermaid(el))return;
+      const text=(el.textContent||'').trim();
+      const cached=mmCache.get(text);
+      if(cached==='bad')return;
+      if(cached){mountFig(el,cached,text,'mermaid');return;}
+      const now=Date.now();
+      if(!mmSeen.has(text)){mmSeen.set(text,now);return;}
+      if(now-mmSeen.get(text)<MM_SETTLE_MS)return;
+      if(mmCache.has(text))return;           // render in flight
+      mmCache.set(text,undefined);
+      loadMermaid().then(mm=>mm.render('easyai-mm-'+(++mmSeq),text)).then(r=>{
+        mmCache.set(text,r.svg);
+        if(el.isConnected&&!el.dataset.easyaiSvg)mountFig(el,r.svg,text,'mermaid');
+      }).catch(()=>{mmCache.set(text,'bad');});
+    });
+  };
+  const renderAll=(root)=>{render(root);renderMermaid(root);};
   window.__easyaiRenderSvgFigures=render;
+  window.__easyaiRenderFigures=renderAll;
   if(!document.getElementById('__easyaiSvgFigStyle')){
     const st=document.createElement('style');st.id='__easyaiSvgFigStyle';
     st.textContent='.'+FIG+'{margin:.6rem 0;padding:.5rem;border:1px solid rgba(128,128,128,.35);border-radius:.5rem;background:rgba(128,128,128,.06)}'
@@ -4448,6 +4521,16 @@ static const char kEasyaiVisualJs[] = R"JS((()=>{
     (document.head||document.documentElement).appendChild(st);
   }
 })();)JS";
+
+// First line of the web static prompt: the identity fix. Models that
+// believe they are "text-based" refuse to draw however detailed the rules
+// further down are, so the capability statement leads the prompt and is
+// repeated at the tail of the per-request preamble (Options::visual_ui).
+static const char kWebUIPrelude[] =
+    "You are chatting through a web UI that RENDERS what you write: a "
+    "fenced ```svg block appears as a drawing, a fenced ```mermaid block "
+    "as a diagram, a markdown image as a picture. You can draw. Never "
+    "describe yourself as text-only or text-based.\n\n";
 
 static const char kWebUIAppendix[] =
     "\n\n## Interface — Web UI\n"
@@ -4490,9 +4573,13 @@ static const char kWebUIAppendix[] =
     "with the actual values.\n"
     "\n"
     "HOW (exact format — the renderer depends on it):\n"
-    "  - Open the fence as ```svg (the word svg, never xml or html), "
-    "put ONE complete <svg …>…</svg> inside, close the fence. Nothing "
-    "else in the block.\n"
+    "  - SVG (preferred, full control): open the fence as ```svg (the "
+    "word svg, never xml or html), put ONE complete <svg …>…</svg> "
+    "inside, close the fence. Nothing else in the block.\n"
+    "  - Mermaid (accepted): open the fence as ```mermaid with one "
+    "diagram (flowchart LR/TD, sequenceDiagram, stateDiagram-v2, "
+    "classDiagram, erDiagram, gantt, pie, timeline). It is rendered "
+    "right here — do not tell the user to paste it elsewhere.\n"
     "  - <svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 800 "
     "H\" width=\"100%\"> with H sized to the content (300-500 typical).\n"
     "  - Readable on dark AND light: mid-tone fills (#4a6fa5, #5b8c5a, "
@@ -4956,7 +5043,8 @@ int main(int argc, char ** argv) {
     // with tool guidance auto-derived from ctx->default_tools.
     if (default_system.empty()) {
         auto view = easyai::preamble::ToolsetView::from_tools(ctx->default_tools);
-        default_system = easyai::preamble::build_builtin_system_prompt(view);
+        default_system = kWebUIPrelude;
+        default_system += easyai::preamble::build_builtin_system_prompt(view);
         default_system += kWebUIAppendix;
     }
 
@@ -6266,8 +6354,8 @@ int main(int argc, char ** argv) {
                   "renderOverview();"
                   // Complete ```svg blocks become inline figures
                   // (kEasyaiVisualJs); processed blocks are skipped.
-                  "if(window.__easyaiRenderSvgFigures){"
-                    "try{window.__easyaiRenderSvgFigures(document);}catch(e){}"
+                  "if(window.__easyaiRenderFigures){"
+                    "try{window.__easyaiRenderFigures(document);}catch(e){}"
                   "}"
                 "},250);"
 

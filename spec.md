@@ -40,7 +40,7 @@ point. See `LIB_GUIDE.md` for the prose; the contract:
 | `.system(text)` | Replace the BASE prompt verbatim — lib default suppressed. |
 | `.no_builtin_system()` | Drop the lib's default BASE; combine with `.system_append(...)` to author from scratch. |
 | `.system_append(text)` / `.system_append(callable)` | Concatenated after the BASE in call order. Dynamic form recomputed on every `refresh_system()`. |
-| `.preamble_options(opt)` | Override per-turn `preamble::Options` (date/time, cutoff, memory_root, cite_sources). |
+| `.preamble_options(opt)` | Override per-turn `preamble::Options` (date/time, cutoff, memory_root, cite_sources, visual_ui). |
 | `.with_default_tools(bool)` | Toggle the canonical toolset (datetime + web + tool_lookup baseline, plus gated fs/bash/python/memory/external). On by default. |
 | `.add_tool(Tool)` | Append a custom tool; its `Tool::system_addendum` is collected. |
 | `.init(err)` | Builds backend + tools + system. Once per session. |
@@ -555,6 +555,15 @@ it can look things up, and to let it fire several lookups at once.
 
 **Rules.**
 
+0. **Identity first and last.** `kWebUIPrelude` is the FIRST text of the
+   server's static prompt: the UI renders ```svg as a drawing, ```mermaid
+   as a diagram, markdown images as pictures; "you can draw; never
+   describe yourself as text-only". `preamble::Options::visual_ui`
+   (server sets true) emits a `# VISUAL REMINDER` block at the tail of
+   every request's preamble, just before the volatile memory vocabulary
+   so the cached prefix is untouched. Reason: the field test showed the
+   model's self-image ("since I am a text-based AI") overrides any rule
+   placed mid-prompt; the first and last positions are the ones obeyed.
 1. **Web appendix** (`kWebUIAppendix`, server static prompt, web only):
    `## Be visual` — draw an SVG whenever a picture conveys more; technical
    aspects get a diagram by default; fenced ```` ```svg ```` block, one
@@ -579,7 +588,18 @@ it can look things up, and to let it fire several lookups at once.
    for library users; the server sets `true` and `/props` reports
    `supports_parallel_tool_calls:true`.
 4. **Rendering** (`kEasyaiVisualJs`, injected into the bundle and baked
-   into the minimal UI): any `<pre>` or `<p>` whose whole text is one
+   into the minimal UI). **Mermaid**: a `<pre>`/`<p>` whose text starts
+   with a Mermaid diagram keyword (or carries `language-mermaid`) is
+   rendered through mermaid@11, lazy-loaded from jsdelivr on first use,
+   `securityLevel:'strict'`, `htmlLabels:false`, theme `dark`/`neutral`
+   from the page; because a Mermaid block has no closing marker, it is
+   rendered only after its text has been unchanged for 1200 ms, the SVG
+   is cached by text (UIs that rebuild on every token mount it
+   synchronously on the next pass), parse failures are cached as bad.
+   `window.__easyaiRenderFigures(root)` runs both renderers: the bundle
+   on its 250 ms tick, the minimal UI right after it sets the message
+   HTML (on the attached element, since Mermaid resolves asynchronously).
+   **SVG**: any `<pre>` or `<p>` whose whole text is one
    complete `<svg>…</svg>` — whatever fence language the model used
    (svg, xml, html, none), and raw SVG the markdown renderer escaped into
    a paragraph — becomes `<figure class="easyai-svg-fig">` with the
@@ -615,6 +635,21 @@ both themes, a ~40-element / ~80-line budget so the figure completes, and
 `<pre>`/`<p>` holding a complete SVG regardless of fence language, and the
 bundle's code-block wrapper (language label + copy button) is replaced
 with the figure.
+
+**Second field test (Gustavo, 2026-10-04 night).** "create a diagram,
+graphical for me" → "since I am a text-based AI, the best way is
+Mermaid.js syntax… most markdown viewers will render this" plus a
+```mermaid block. Two conclusions: the identity belief is the blocker,
+and Mermaid is the model's reflex. Revision: prelude + tail reminder
+(rule 0) and Mermaid rendering (rule 4) so the reflex also yields a
+picture; SVG stays the stated preference.
+
+**Proof of the revision.** `--show-system-prompt` now opens with the
+prelude line; `preamble::build()` driven directly with `visual_ui=true`
+emits `# VISUAL REMINDER` 609 bytes from the end of a 4629-byte preamble
+and omits it with `visual_ui=false`; modern and minimal pages both carry
+the Mermaid-capable helper with 0 script syntax errors; full build green,
+ctest 1/1.
 
 **Proof (2026-10-04).** `--show-system-prompt` carries `## Be visual`,
 `## Never assume`, `BATCH INDEPENDENT CALLS`, "WEB first", "NEVER ASSUME".
