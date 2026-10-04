@@ -731,7 +731,10 @@ Three rules added on 2026-10-04 (web appendix of the static prompt,
   tell the user to paste it elsewhere. Image URLs that appeared in a
   tool result this turn are shown with `![caption](url)`. The renderer accepts any
   `<pre>` or `<p>` whose whole text is one complete `<svg>…</svg>`,
-  whatever fence language was used; an unfinished SVG renders nothing.
+  whatever fence language was used; HTML entities such as `&rarr;` are
+  decoded before the XML parse (with a lenient HTML-parser fallback), a
+  full-canvas background rect is dropped, and an unfinished SVG renders
+  nothing.
 - **Never assume.** A factual question is never answered from memory
   while a lookup tool is registered: knowledge tool first, web tools if
   knowledge had nothing, then answer. Only greetings, chitchat and

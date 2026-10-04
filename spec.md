@@ -599,7 +599,14 @@ it can look things up, and to let it fire several lookups at once.
    `window.__easyaiRenderFigures(root)` runs both renderers: the bundle
    on its 250 ms tick, the minimal UI right after it sets the message
    HTML (on the attached element, since Mermaid resolves asynchronously).
-   **SVG**: any `<pre>` or `<p>` whose whole text is one
+   **SVG**: the text is first passed through `decodeEntities` (every
+   named entity except `amp lt gt quot apos` is decoded — models write
+   `&rarr;`, `&nbsp;`, `&mdash;`, which XML does not define), parsed as
+   `image/svg+xml`, and on a parser error re-parsed with the lenient
+   `text/html` parser (the `<svg>` lands in the SVG namespace either
+   way). A direct-child `<rect>` at 0,0 covering the whole canvas (the
+   model's white-background habit) is dropped for dark-theme
+   readability. Then: any `<pre>` or `<p>` whose whole text is one
    complete `<svg>…</svg>` — whatever fence language the model used
    (svg, xml, html, none), and raw SVG the markdown renderer escaped into
    a paragraph — becomes `<figure class="easyai-svg-fig">` with the
@@ -643,6 +650,16 @@ Mermaid.js syntax… most markdown viewers will render this" plus a
 and Mermaid is the model's reflex. Revision: prelude + tail reminder
 (rule 0) and Mermaid rendering (rule 4) so the reflex also yields a
 picture; SVG stays the stated preference.
+
+**Third field test (Gustavo, 2026-10-04 night).** Mermaid rendered, a
+900×550 SVG did not. Cause: `&rarr;` inside a `<text>` — an HTML entity
+that XML does not define — so the strict parser failed and the block was
+marked bad. Fix: entity decoding + HTML-parser fallback (above), the
+canvas-rect drop, and a HOW line telling the model to write arrows and
+symbols as UTF-8 characters and use only the three XML entities.
+Reproduced outside the browser with the same two steps: strict parse of
+the original fails on `&rarr;`, parse after decoding succeeds, the
+900×550 background rect is dropped and the content rect kept.
 
 **Proof of the revision.** `--show-system-prompt` now opens with the
 prelude line; `preamble::build()` driven directly with `visual_ui=true`

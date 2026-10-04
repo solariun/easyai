@@ -4410,13 +4410,50 @@ static const char kEasyaiVisualJs[] = R"JS((()=>{
       scrubAttrs(c);walk(c);
     }
   };
+  // Models write HTML entities (&rarr; &nbsp; &mdash;) that XML does not
+  // define; decode every named entity except the five XML ones.
+  const XML_ENT=new Set(['amp','lt','gt','quot','apos']);
+  const decodeEntities=(src)=>src.replace(/&([a-zA-Z][a-zA-Z0-9]*);/g,(m,n)=>{
+    if(XML_ENT.has(n))return m;
+    const t=document.createElement('textarea');t.innerHTML=m;const v=t.value;
+    return v===m?m:v.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  });
+  // Strict XML first; if that fails (stray entity, unclosed tag), the
+  // lenient HTML parser still yields an <svg> in the SVG namespace.
+  const parseSvg=(src)=>{
+    try{
+      const d=new DOMParser().parseFromString(src,'image/svg+xml');
+      const r=d.documentElement;
+      if(r&&r.nodeName.toLowerCase()==='svg'&&!d.querySelector('parsererror'))return r;
+    }catch(e){}
+    try{
+      const d=new DOMParser().parseFromString(src,'text/html');
+      const r=d.querySelector('svg');
+      if(r&&r.namespaceURI==='http://www.w3.org/2000/svg')return r;
+    }catch(e){}
+    return null;
+  };
+  // A full-canvas background rect (the model's habit) kills dark-theme
+  // readability; drop a direct-child rect that covers the whole canvas.
+  const dropCanvasRect=(root)=>{
+    const vb=(root.getAttribute('viewBox')||'').trim().split(/[\s,]+/).map(parseFloat);
+    const W=vb.length===4?vb[2]:parseFloat(root.getAttribute('width')),
+          H=vb.length===4?vb[3]:parseFloat(root.getAttribute('height'));
+    for(const c of Array.from(root.children)){
+      if(c.nodeName.toLowerCase()!=='rect')continue;
+      const x=parseFloat(c.getAttribute('x')||'0'),y=parseFloat(c.getAttribute('y')||'0');
+      const w=c.getAttribute('width')||'',h=c.getAttribute('height')||'';
+      const full=(v,ref)=>v==='100%'||(ref>0&&Math.abs(parseFloat(v)-ref)<1);
+      if(x===0&&y===0&&full(w,W)&&full(h,H))c.remove();
+    }
+  };
   const sanitize=(src)=>{
-    let doc;try{doc=new DOMParser().parseFromString(src,'image/svg+xml');}catch(e){return null;}
-    const root=doc.documentElement;
-    if(!root||root.nodeName.toLowerCase()!=='svg'||doc.querySelector('parsererror'))return null;
+    const root=parseSvg(decodeEntities(src));
+    if(!root)return null;
     scrubAttrs(root);walk(root);
     const w=parseFloat(root.getAttribute('width')),h=parseFloat(root.getAttribute('height'));
     if(!root.getAttribute('viewBox')&&w>0&&h>0)root.setAttribute('viewBox','0 0 '+w+' '+h);
+    dropCanvasRect(root);
     root.removeAttribute('width');root.removeAttribute('height');
     root.setAttribute('width','100%');root.setAttribute('role','img');
     return new XMLSerializer().serializeToString(root);
@@ -4590,7 +4627,9 @@ static const char kWebUIAppendix[] =
     "completes. One idea per figure; several small figures beat one "
     "huge one. ALWAYS finish with </svg> and the closing fence — an "
     "unfinished SVG renders nothing.\n"
-    "  - No <script>, no external hrefs, no foreignObject, no <image>.\n"
+    "  - No <script>, no external hrefs, no foreignObject, no <image>. "
+    "Only the XML entities &amp; &lt; &gt; — write arrows and symbols "
+    "as plain UTF-8 characters (→ ← ↔ • °), never &rarr; or &nbsp;.\n"
     "  - Put one or two sentences before the figure saying what it "
     "shows, and continue the explanation after it.\n"
     "\n"
