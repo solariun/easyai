@@ -667,6 +667,22 @@ the HOW palette now targets white: dark text, light fills or mid-tone
 fills with white text. Reason: diagrams are designed for paper-white and
 one consistent background beats theme-dependent readability.
 
+**Fit and zoom (Gustavo, 2026-10-07).** Figures were clipped: the model's
+`width`/`height`/`viewBox` rarely cover what it drew, and Mermaid pins a
+`max-width` on its SVG. `mountFig` (shared by the SVG and Mermaid paths)
+now, once the figure is in the DOM, calls `getBBox()` on the root `<svg>`
+and rewrites the `viewBox` to the measured drawing plus 8 units of
+padding (`preserveAspectRatio="xMidYMid meet"`, `overflow:visible`),
+strips the model's `width`/`height`, and shows the SVG at 100% of the
+column with `height:auto`. A toolbar above every figure offers
+**−** / **+** (×1.25 per step, 0.5×–6×), **1:1** (fit to width) and
+**⤢** (open the SVG full size in a new tab via a Blob URL); zooming
+scales the SVG's rendered width inside a scrollable box capped at 80vh.
+`getBBox()` needs an attached element, so the SVG path also mounts
+through `mountFig` and the minimal UI keeps calling the renderer on the
+attached message element. Degenerate boxes (0 width/height) leave the
+viewBox untouched.
+
 **Proof of the revision.** `--show-system-prompt` now opens with the
 prelude line; `preamble::build()` driven directly with `visual_ui=true`
 emits `# VISUAL REMINDER` 609 bytes from the end of a 4629-byte preamble

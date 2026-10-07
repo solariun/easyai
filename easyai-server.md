@@ -712,7 +712,11 @@ Three rules added on 2026-10-04 (web appendix of the static prompt,
   the block's text has been stable for 1.2 s (streaming has no closing
   marker). Every figure, SVG or Mermaid, sits in a **white box** whatever
   the page theme (Mermaid uses its light theme), so diagrams read like
-  paper. The rules treat
+  paper. Once mounted, the drawing is measured (`getBBox`) and the
+  `viewBox` rewritten to cover it, so nothing the model drew past its own
+  canvas is clipped and the figure always shows whole at 100% of the
+  column; a toolbar above each figure gives **−** / **+** zoom, **1:1**
+  fit, and **⤢** open full size in a new tab. The rules treat
   figures as a tool that enriches the answer. WHEN is mandatory: any explanation of a protocol, architecture,
   process, format, workflow, algorithm, topology, timeline, comparison or
   scenario gets text plus at least one SVG figure ("tell me about X.25"

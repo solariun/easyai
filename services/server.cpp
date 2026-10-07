@@ -4453,14 +4453,7 @@ static const char kEasyaiVisualJs[] = R"JS((()=>{
       if(el.dataset.easyaiSvg||el.closest('.'+FIG)||!isSvg(el))return;
       const svg=sanitize(el.textContent.trim());
       if(!svg){el.dataset.easyaiSvg='bad';return;}
-      const fig=document.createElement('figure');fig.className=FIG;fig.innerHTML=svg;
-      const det=document.createElement('details');det.innerHTML='<summary>svg source</summary>';
-      const src=document.createElement('pre');src.dataset.easyaiSvg='src';src.textContent=el.textContent.trim();
-      det.appendChild(src);fig.appendChild(det);
-      // The bundle wraps fenced code in a header (language label + copy
-      // button) + <pre>; replace the whole wrapper when we can find it.
-      const wrap=el.tagName==='PRE'?(el.closest('[class*="code-block"],[class*="codeblock"],[class*="streaming-code"]')||el):el;
-      (wrap.contains(el)?wrap:el).replaceWith(fig);
+      mountFig(el,svg,el.textContent.trim(),'svg');
     });
   };
   // ---- Mermaid: lazy-load from CDN on first use, render complete blocks.
@@ -4496,15 +4489,49 @@ static const char kEasyaiVisualJs[] = R"JS((()=>{
     const c=el.querySelector&&el.querySelector('code');
     return !!(c&&/language-mermaid/.test(c.className));
   };
+  // The model's width/height/viewBox rarely match what it drew (content
+  // past the canvas edge is clipped) and Mermaid pins a max-width. Once
+  // the figure is in the DOM, measure the real drawing and make the
+  // viewBox cover it with a little padding, so the whole picture always
+  // shows at 100% of the column.
+  const VB_PAD=8;
+  const fitViewBox=(s)=>{
+    let bb;try{bb=s.getBBox();}catch(e){return;}
+    if(!bb||!(bb.width>0)||!(bb.height>0))return;
+    s.setAttribute('viewBox',(bb.x-VB_PAD)+' '+(bb.y-VB_PAD)+' '+(bb.width+2*VB_PAD)+' '+(bb.height+2*VB_PAD));
+    s.setAttribute('preserveAspectRatio','xMidYMid meet');
+    s.style.overflow='visible';
+  };
+  // Zoom: scale the rendered width; the figure box scrolls when zoomed in.
+  const ZOOM_STEP=1.25, ZOOM_MIN=0.5, ZOOM_MAX=6;
+  const addZoom=(fig,s)=>{
+    let zoom=1;
+    const bar=document.createElement('div');bar.className=FIG+'-bar';
+    const mk=(txt,title,fn)=>{const b=document.createElement('button');b.type='button';b.textContent=txt;b.title=title;
+      b.addEventListener('click',(e)=>{e.preventDefault();e.stopPropagation();fn();});bar.appendChild(b);return b;};
+    const lbl=document.createElement('span');
+    const apply=()=>{s.style.width=(zoom*100)+'%';s.style.maxWidth='none';lbl.textContent=Math.round(zoom*100)+'%';};
+    mk('\u2212','zoom out',()=>{zoom=Math.max(ZOOM_MIN,zoom/ZOOM_STEP);apply();});
+    bar.appendChild(lbl);
+    mk('+','zoom in',()=>{zoom=Math.min(ZOOM_MAX,zoom*ZOOM_STEP);apply();});
+    mk('1:1','fit to width',()=>{zoom=1;apply();});
+    mk('\u2922','open full size in a new tab',()=>{
+      try{const blob=new Blob([new XMLSerializer().serializeToString(s)],{type:'image/svg+xml'});
+          window.open(URL.createObjectURL(blob),'_blank','noopener');}catch(e){}
+    });
+    apply();fig.insertBefore(bar,fig.firstChild);
+  };
   const mountFig=(el,svg,source,label)=>{
-    const fig=document.createElement('figure');fig.className=FIG;fig.innerHTML=svg;
-    const s=fig.querySelector('svg');
-    if(s){s.removeAttribute('height');s.style.maxWidth='100%';s.style.height='auto';s.style.display='block';s.style.margin='0 auto';}
+    const fig=document.createElement('figure');fig.className=FIG;
+    const box=document.createElement('div');box.className=FIG+'-box';box.innerHTML=svg;fig.appendChild(box);
+    const s=box.querySelector('svg');
+    if(s){s.removeAttribute('height');s.removeAttribute('width');s.style.height='auto';s.style.display='block';s.style.margin='0 auto';}
     const det=document.createElement('details');det.innerHTML='<summary>'+label+' source</summary>';
     const src=document.createElement('pre');src.dataset.easyaiSvg='src';src.textContent=source;
     det.appendChild(src);fig.appendChild(det);
     const wrap=el.tagName==='PRE'?(el.closest('[class*="code-block"],[class*="codeblock"],[class*="streaming-code"]')||el):el;
     (wrap.contains(el)?wrap:el).replaceWith(fig);
+    if(s){fitViewBox(s);addZoom(fig,s);}
   };
   const renderMermaid=(root)=>{
     (root||document).querySelectorAll('pre, p').forEach(el=>{
@@ -4529,9 +4556,14 @@ static const char kEasyaiVisualJs[] = R"JS((()=>{
   window.__easyaiRenderFigures=renderAll;
   if(!document.getElementById('__easyaiSvgFigStyle')){
     const st=document.createElement('style');st.id='__easyaiSvgFigStyle';
-    st.textContent='.'+FIG+'{margin:.6rem 0;padding:.6rem;border:1px solid rgba(128,128,128,.35);border-radius:.5rem;'
+    st.textContent='.'+FIG+'{position:relative;margin:.6rem 0;padding:.6rem;border:1px solid rgba(128,128,128,.35);border-radius:.5rem;'
         +'background:#ffffff !important;color:#1f2937 !important;color-scheme:light;filter:none !important}'
-      +'.'+FIG+' svg{display:block;max-width:100%;height:auto;margin:0 auto;background:#ffffff !important;color:#1f2937}'
+      +'.'+FIG+'-box{overflow:auto;max-height:80vh}'
+      +'.'+FIG+' svg{display:block;width:100%;height:auto;margin:0 auto;background:#ffffff !important;color:#1f2937}'
+      +'.'+FIG+'-bar{display:flex;gap:.25rem;align-items:center;justify-content:flex-end;margin:0 0 .4rem;font-size:.72rem;color:#4b5563;font-family:-apple-system,system-ui,sans-serif}'
+      +'.'+FIG+'-bar button{border:1px solid #d1d5db;background:#f9fafb;color:#1f2937;border-radius:.3rem;padding:.1rem .45rem;font-size:.75rem;line-height:1.2;cursor:pointer;min-width:1.7rem}'
+      +'.'+FIG+'-bar button:hover{background:#e5e7eb}'
+      +'.'+FIG+'-bar span{min-width:2.6rem;text-align:center;font-variant-numeric:tabular-nums}'
       +'.'+FIG+' details{margin-top:.3rem;font-size:.7rem;opacity:.7}'
       +'.'+FIG+' details pre{margin-top:.3rem;max-height:14rem;overflow:auto}'
       +'.msg.assistant .content img,[aria-label="Assistant message with actions"] img{max-width:100%;height:auto;border-radius:.5rem;margin:.4rem 0}';
