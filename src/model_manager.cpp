@@ -1109,7 +1109,7 @@ void Manager::render_local_tab(std::vector<std::string> & f) {
                            : def        ? (fg(th.accent)  + "○" + RESET())
                            :              " ";
         std::string nm = js(mm, "name");
-        if (!js(mm, "link_target").empty()) nm += " → " + js(mm, "link_target");   // chain, truncated by fit()
+        if (!js(mm, "link_target").empty()) nm += " (symlink → " + js(mm, "link_target") + ")";   // chain, truncated by fit()
         time_t mt = (time_t) ji(mm, "mtime");
         char date[16] = "—"; if (mt > 0) { struct tm tmv; localtime_r(&mt, &tmv); std::strftime(date, sizeof date, "%Y-%m-%d", &tmv); }
         std::string row = " " + marker + " "

@@ -437,7 +437,7 @@ async function loadLocal(){
         via <span class="mono">${esch(base(d.default_link))}</span>. Restart the service, or <b>Run</b> the default, to make them agree.</div>`;
     let rows=d.models.map(m=>`<tr data-f="${enc(m.name)}">
       <td onclick="localDetail('${esch(m.name)}',this.parentNode)">
-        <div>${esch(m.name)}${m.link_target?' <span class="muted small mono" title="symlink chain; the file on the right is the one that loads">→ '+esch(m.link_target.split(' → ').map(base).join(' → '))+'</span>':''}
+        <div>${esch(m.name)}${m.link_target?' <span class="muted small mono" title="this entry is a symlink; the file on the right is the one that loads">symlink → '+esch(m.link_target.split(' → ').map(base).join(' → '))+'</span>':''}
           ${m.link_target&&!m.size_bytes?' <span class="pill too_tight" title="the link points at a file that is not there">broken link</span>':''}
           ${m.is_current?' <span class="pill good" title="loaded in memory now">running</span>':''}
           ${m.is_default?' <span class="pill perfect" title="what --model resolves to; loaded on the next start">default</span>':''}</div>
