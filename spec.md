@@ -1514,7 +1514,10 @@ flowchart LR
    entry, hops joined by ` → ` (max 8 hops), so a stray
    `Qwen.gguf → ai.gguf → gemma.gguf` reads as a second name for gemma
    and not as Qwen weights (the AI box had exactly that: a Qwen-named
-   link at the Gemma size, flagged running). Link rows offer **Unlink**
+   link at the Gemma size, flagged running). The chain is a yellow chip
+   (`pill marginal`, "symlink → …") on the row and in the detail panel
+   (`link_target` is in the detail JSON too), Gustavo's call on
+   2026-10-15: a link is important information, not a muted note. Link rows offer **Unlink**
    instead of Delete, always enabled: it removes the link only
    (`fs::remove` does not follow symlinks), the target file stays.
    Found while writing the test: `safe_in_dir` canonicalised the leaf

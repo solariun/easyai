@@ -1037,6 +1037,22 @@ std::string base_name(const std::string & path) {
     size_t s = path.find_last_of('/');
     return s == std::string::npos ? path : path.substr(s + 1);
 }
+// Follow the whole symlink chain so "Qwen.gguf → ai.gguf → gemma.gguf"
+// reads as what it is: a second name for gemma, not Qwen weights.
+// Empty when the entry is not a link.
+std::string link_chain(fs::path p) {
+    constexpr int kMaxLinkHops = 8;
+    std::string chain;
+    std::error_code lec;
+    for (int hop = 0; hop < kMaxLinkHops && fs::is_symlink(p, lec) && !lec; ++hop) {
+        fs::path t = fs::read_symlink(p, lec);
+        if (lec) break;
+        if (!chain.empty()) chain += " → ";
+        chain += t.string();
+        p = t.is_absolute() ? t : p.parent_path() / t;
+    }
+    return chain;
+}
 bool safe_in_dir(const std::string & dir, const std::string & filename, fs::path & out, std::string & err) {
     if (filename.empty() || filename.find('/') != std::string::npos ||
         filename.find('\\') != std::string::npos || filename.find("..") != std::string::npos) {
@@ -1084,20 +1100,7 @@ std::vector<ModelsEngine::LocalModel> ModelsEngine::list_local() {
         std::error_code rec; fs::path rp = fs::weakly_canonical(e.path(), rec);
         m.is_current = !curp.empty() && rp == curp;
         m.is_default = !defp.empty() && rp == defp;
-        // Follow the whole symlink chain so "Qwen.gguf → ai.gguf → gemma.gguf"
-        // reads as what it is: a second name for gemma, not Qwen weights.
-        {
-            constexpr int kMaxLinkHops = 8;
-            fs::path p = e.path();
-            std::error_code lec;
-            for (int hop = 0; hop < kMaxLinkHops && fs::is_symlink(p, lec) && !lec; ++hop) {
-                fs::path t = fs::read_symlink(p, lec);
-                if (lec) break;
-                if (!m.link_target.empty()) m.link_target += " → ";
-                m.link_target += t.string();
-                p = t.is_absolute() ? t : p.parent_path() / t;
-            }
-        }
+        m.link_target = link_chain(e.path());
         out.push_back(std::move(m));
     }
     std::sort(out.begin(), out.end(), [](const LocalModel & a, const LocalModel & b) { return a.name < b.name; });
@@ -1208,6 +1211,7 @@ std::string ModelsEngine::local_model_json(const std::string & filename, const s
     };
     ordered_json out = {
         {"name", filename}, {"display_name", m.name}, {"is_current", is_current}, {"is_default", is_default},
+        {"link_target", link_chain(path)},
         {"gguf_readable", g.ok},
         {"params", params},
         {"fit", fit_to_json(r)},
