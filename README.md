@@ -96,6 +96,11 @@ landing on it for the first time) sees what shipped recently.
 
 ### 2026-10-15 — llama.cpp chat-API port, pinned installer
 
+- `/models` Local and Downloads tabs and the TUI manager now show
+  **running** (in memory) and **default** (what `ai.gguf` points at for
+  the next start) as separate marks, show symlink targets, and warn when
+  the two differ after a Run or a Slink.
+
 - Ported to llama.cpp `fd55cb98f` (chat parser takes a `common_chat_input`,
   the PEG arena travels as a value, the rendered prompt is parts with
   `str()`). The Linux installer now checks out that sha for llama.cpp and

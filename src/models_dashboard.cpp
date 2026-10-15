@@ -964,10 +964,11 @@ GgufMeta read_gguf_meta(const std::string & path) {
 // ===========================================================================
 ModelsEngine::ModelsEngine(std::string download_dir, const config::Ini * ini,
                            std::function<std::string()> current_model, int catalog_size,
-                           std::string data_dir)
+                           std::string data_dir, std::function<std::string()> default_model)
     : download_dir_(std::move(download_dir)),
       ini_(ini),
       current_model_(std::move(current_model)),
+      default_model_(std::move(default_model)),
       catalog_size_(std::min(std::max(catalog_size, 1), 1000)),   // one HF listing page
       data_dir_(data_dir.empty() ? download_dir_ : std::move(data_dir)),
       hf_cache_(std::make_unique<HfCache>()) {
@@ -1058,6 +1059,12 @@ std::vector<ModelsEngine::LocalModel> ModelsEngine::list_local() {
     if (download_dir_.empty() || !fs::is_directory(download_dir_, ec)) return out;
     std::string cur = current_model_ ? current_model_() : "";
     std::error_code cec; fs::path curp = cur.empty() ? fs::path() : fs::weakly_canonical(cur, cec);
+    // The --model path (ai.gguf symlink by convention) names what the next
+    // start loads. The engine resolves that symlink once at load time, so
+    // after a Slink or a hot-swap "running" and "default" legitimately differ.
+    std::string def = default_model_ ? default_model_() : "";
+    std::error_code dec; fs::path defp = def.empty() ? fs::path() : fs::weakly_canonical(def, dec);
+    if (dec) defp.clear();
     for (const auto & e : fs::directory_iterator(download_dir_, ec)) {
         if (ec) break;
         std::error_code fe;
@@ -1074,6 +1081,9 @@ std::vector<ModelsEngine::LocalModel> ModelsEngine::list_local() {
         }
         std::error_code rec; fs::path rp = fs::weakly_canonical(e.path(), rec);
         m.is_current = !curp.empty() && rp == curp;
+        m.is_default = !defp.empty() && rp == defp;
+        std::error_code lec;
+        if (fs::is_symlink(e.path(), lec) && !lec) m.link_target = fs::read_symlink(e.path(), lec).string();
         out.push_back(std::move(m));
     }
     std::sort(out.begin(), out.end(), [](const LocalModel & a, const LocalModel & b) { return a.name < b.name; });
@@ -1084,8 +1094,22 @@ std::string ModelsEngine::local_models_json() {
     auto models = list_local();
     ordered_json arr = ordered_json::array();
     for (const auto & m : models)
-        arr.push_back({ {"name", m.name}, {"size_bytes", m.size_bytes}, {"mtime", m.mtime}, {"is_current", m.is_current} });
-    return ordered_json({ {"dir", download_dir_}, {"models", arr} }).dump();
+        arr.push_back({ {"name", m.name}, {"size_bytes", m.size_bytes}, {"mtime", m.mtime},
+                        {"is_current", m.is_current}, {"is_default", m.is_default},
+                        {"link_target", m.link_target} });
+    // running = what the engine holds in memory; default = what --model
+    // resolves to now (next start). Both as real paths so the page can say
+    // "restart to switch" when they differ.
+    std::string cur = current_model_ ? current_model_() : "";
+    std::string def = default_model_ ? default_model_() : "";
+    std::error_code ec1, ec2;
+    std::string def_target = def.empty() ? "" : fs::weakly_canonical(def, ec1).string();
+    if (ec1) def_target.clear();
+    std::string cur_real = cur.empty() ? "" : fs::weakly_canonical(cur, ec2).string();
+    if (ec2) cur_real = cur;
+    return ordered_json({ {"dir", download_dir_}, {"models", arr},
+                          {"running", cur_real},
+                          {"default_link", def}, {"default_target", def_target} }).dump();
 }
 
 std::string ModelsEngine::local_model_json(const std::string & filename, const std::string & query) {
@@ -1154,6 +1178,9 @@ std::string ModelsEngine::local_model_json(const std::string & filename, const s
     std::error_code cec; fs::path curp = cur.empty() ? fs::path() : fs::weakly_canonical(cur, cec);
     std::error_code rec2; fs::path rp = fs::weakly_canonical(path, rec2);
     bool is_current = !curp.empty() && rp == curp;
+    std::string def = default_model_ ? default_model_() : "";
+    std::error_code dec; fs::path defp = def.empty() ? fs::path() : fs::weakly_canonical(def, dec);
+    bool is_default = !dec && !defp.empty() && rp == defp;
 
     ordered_json params = {
         {"architecture", g.arch}, {"quantization", m.quantization},
@@ -1166,7 +1193,7 @@ std::string ModelsEngine::local_model_json(const std::string & filename, const s
         {"is_moe", m.is_moe}, {"file_size_bytes", g.file_size},
     };
     ordered_json out = {
-        {"name", filename}, {"display_name", m.name}, {"is_current", is_current},
+        {"name", filename}, {"display_name", m.name}, {"is_current", is_current}, {"is_default", is_default},
         {"gguf_readable", g.ok},
         {"params", params},
         {"fit", fit_to_json(r)},

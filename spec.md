@@ -1481,3 +1481,61 @@ cannot tell a special token typed by the user from one emitted by the
 model; the old string API had the same limit. Using the new
 `common_chat_session` (tokenised input, prefill echo) is a larger change
 left for a later port.
+
+## Running vs default in the local model list (AUTHORITATIVE — 2026-10-15)
+
+**Plain words.** Two different things look like "the model" on the AI box:
+the file the engine holds in memory, and the file the `ai.gguf` symlink
+(`--model`) points at, which is what the next start loads. The engine
+resolves the symlink once at load time (`Engine::load` follows it to the
+real file), so after a **Slink** or a **Run (this session)** the two drift
+apart on purpose. The page used to show only "running", so a box that
+booted on Qwen3 and was then re-linked to Gemma2 showed Qwen3 as running
+and nothing on `ai.gguf` / Gemma2, which read as a bug. Both truths are
+now shown, on every file they apply to.
+
+```mermaid
+flowchart LR
+  E["engine.model_path()\n(real file loaded at boot or hot-swap)"] -->|canonical ==| R["pill: running ●"]
+  L["--model path (ai.gguf)\nresolved now"] -->|canonical ==| D["pill: default ○"]
+  F[(each .gguf in download_dir)] --> R
+  F --> D
+  R -.differ.-> N["note: running X ≠ default Y\nrestart or Run the default"]
+  D -.differ.-> N
+```
+
+**Rules.**
+
+1. `GET /models/api/local` → `{dir, models:[{name, size_bytes, mtime,
+   is_current, is_default, link_target}], running, default_link,
+   default_target}`. `is_current`: the file's canonical path equals the
+   engine's model path. `is_default`: it equals the canonical path of the
+   configured `--model`. `link_target`: `readlink` of the entry when the
+   entry is itself a symlink (so `ai.gguf → gemma.gguf` is visible).
+   `running` and `default_target` are real paths; `default_link` is the
+   `--model` path as configured.
+2. `GET /models/api/local/detail` carries the same `is_current` and
+   `is_default`.
+3. `ModelsEngine` takes a second getter `default_model` (the server passes
+   `args.model_path`); absent getter → no file is default.
+4. Web `/models` Local and Downloads tabs: pill **running** (green) and
+   pill **default** (blue), link rows show `→ target`, and a note above the
+   table when `running ≠ default_target` saying which is which and that a
+   restart or a Run of the default makes them agree. The detail panel
+   shows both pills. Run / Delete stay disabled on the running file only.
+5. TUI `--llm-manager` Local tab: `●` running, `○` default, `◉` both, with
+   a legend line and the same mismatch note.
+
+**Decisions.** Showing the link target rather than hiding `ai.gguf` from
+the list: the link is the operator's handle and seeing where it points is
+the whole question. Not auto-reloading the default: a Run is a deliberate
+session choice; the note tells the operator how to resolve it.
+
+**Proof.** New ctest `local_models` (`tests/test_local_models.cpp`, 14
+checks) builds a temp dir with `gemma.gguf`, `qwen.gguf`, `ai.gguf →
+gemma`, then moves the link and the engine path independently and checks
+every flag on every file. Live server on the toy model: boot with
+`ai.gguf → gemma` marks `ai.gguf` and `gemma.gguf` running+default,
+`qwen.gguf` neither; after `ln -sfn qwen.gguf ai.gguf` the listing reports
+`running gemma.gguf`, `default qwen.gguf`, `ai.gguf` default only. jsc
+syntax check of the page script clean.

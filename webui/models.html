@@ -429,16 +429,24 @@ async function loadLocal(){
     $('#localDir').textContent=d.dir;
     if(!d.models.length){let e='<div class="empty">No .gguf files in the model directory yet.</div>';
       $('#localWrap').innerHTML=e;$('#dlLocalWrap').innerHTML=e;return;}
+    const base=p=>(p||'').split('/').pop();
+    let note='';
+    if(d.running&&d.default_target&&d.running!==d.default_target)
+      note=`<div class="empty small" style="text-align:left"><span class="pill good">running</span> <b>${esch(base(d.running))}</b> is in memory
+        (hot-swapped or the link moved); <span class="pill perfect">default</span> on the next start is <b>${esch(base(d.default_target))}</b>
+        via <span class="mono">${esch(base(d.default_link))}</span>. Restart the service, or <b>Run</b> the default, to make them agree.</div>`;
     let rows=d.models.map(m=>`<tr data-f="${enc(m.name)}">
       <td onclick="localDetail('${esch(m.name)}',this.parentNode)">
-        <div>${esch(m.name)} ${m.is_current?'<span class="pill good">running</span>':''}</div>
+        <div>${esch(m.name)}${m.link_target?' <span class="muted small mono">→ '+esch(base(m.link_target))+'</span>':''}
+          ${m.is_current?' <span class="pill good" title="loaded in memory now">running</span>':''}
+          ${m.is_default?' <span class="pill perfect" title="what --model resolves to; loaded on the next start">default</span>':''}</div>
         <div class="muted small">${new Date(m.mtime*1000).toLocaleDateString()}</div></td>
       <td class="num" onclick="localDetail('${esch(m.name)}',this.parentNode)">${fmtBytes(m.size_bytes)}</td>
       <td class="num" style="white-space:nowrap">
         <button class="btn small acc" onclick="runModel('${esch(m.name)}')" ${m.is_current?'disabled':''}>Run</button>
         <button class="btn small" onclick="slinkModel('${esch(m.name)}')" title="Set as default model (symlink); effective next start">Slink</button>
         <button class="btn small danger" onclick="delModel('${esch(m.name)}')" ${m.is_current?'disabled':''}>Delete</button></td></tr>`).join('');
-    let html=`<table><thead><tr><th>File</th><th class="num">Size</th><th class="num">Actions</th></tr></thead><tbody>${rows}</tbody></table>`;
+    let html=note+`<table><thead><tr><th>File</th><th class="num">Size</th><th class="num">Actions</th></tr></thead><tbody>${rows}</tbody></table>`;
     $('#localWrap').innerHTML=html;$('#dlLocalWrap').innerHTML=html;
   }catch(e){$('#localWrap').innerHTML='<div class="empty">'+esch(e.message)+'</div>';}
 }
@@ -524,7 +532,8 @@ async function localDetail(file,tr){
       ${Object.entries(d.ini_profile.values).map(([k,v])=>`<span class="k">${esch(k)}</span><span class="v">${esch(String(v))}</span>`).join('')}
       </div></div>`:'<div class="sect"><h3>INI profile</h3><div class="muted small">No matching [MODEL_*] section — engine defaults apply.</div></div>';
     $('#localDetail').innerHTML=`
-      <h2>${esch(d.display_name||file)} ${d.is_current?'<span class="pill good">running</span>':''}</h2>
+      <h2>${esch(d.display_name||file)} ${d.is_current?'<span class="pill good" title="loaded in memory now">running</span>':''}
+        ${d.is_default?'<span class="pill perfect" title="what --model resolves to; loaded on the next start">default</span>':''}</h2>
       <div class="muted small mono">${esch(file)}</div>
       <div style="margin-top:8px"><span class="pill ${f.fit_level}">${f.fit_label}</span>
         <span class="pill ghost">${f.run_mode_label}</span></div>

@@ -186,8 +186,13 @@ the server's `api_key` Bearer auth on `/v1/*`.
 
 ### Local models tab
 
-- A table of every `.gguf` in `download_dir`, with size, date, and a **running**
-  badge on the active model.
+- A table of every `.gguf` in `download_dir`, with size, date, a **running**
+  badge on the file the engine holds in memory and a **default** badge on
+  the file the `--model` symlink (`ai.gguf`) resolves to, i.e. what the
+  next start loads. Symlink rows show their target (`ai.gguf → gemma…`).
+  When the two differ (after a Run or a Slink) a note above the table
+  names both and says a restart, or a Run of the default, makes them
+  agree. Same table in the Downloads tab.
 - Click one to open the **parameter panel**: architecture, parameters,
   quantization, context length, layers, heads (q/kv), embedding, vocab, experts
   (for MoE), file size — read directly from the GGUF header — plus the computed
@@ -239,6 +244,10 @@ Running and the boot default are **decoupled** — a Run never touches the symli
   the choice via the symlink.
 
 No process restart; the dashboard stays live and reflects the running model.
+The engine resolves `ai.gguf` once at load, so after a Slink the **running**
+badge stays on the old file and **default** moves to the new one until a
+restart (`GET /models/api/local` returns `running`, `default_link`,
+`default_target` and per-file `is_current` / `is_default` / `link_target`).
 
 **From the empty state.** When the server started without a usable model
 (missing file, broken `ai.gguf` link, no `--model`), it is still running:

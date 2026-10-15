@@ -7956,7 +7956,8 @@ int main(int argc, char ** argv) {
         ctx->models = std::make_unique<easyai::ModelsEngine>(
             dl_dir, &ini_config,
             [ctxp]() -> std::string { return ctxp->engine.model_path(); },
-            args.catalog_size, args.data_dir);
+            args.catalog_size, args.data_dir,
+            [&args]() -> std::string { return args.model_path; });
         std::fprintf(stderr,
             "[easyai-server] models: %s\n"
             "                download dir: %s\n"

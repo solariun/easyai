@@ -1086,14 +1086,28 @@ void Manager::render_local_tab(std::vector<std::string> & f) {
     if (n == 0) { f.push_back(""); f.push_back(fg(th.muted) + "  (no local models — use the Downloads tab)" + RESET()); return; }
     int namew = std::max(20, cols - 2 - 3 - 12 - 13);
     f.push_back("  " + fg(th.muted) + fit("name", namew) + " " + fit("size", 11) + " " + fit("modified", 12) + RESET());
-    int h = body_h() - 1;
+    {
+        // ● running (in memory)  ○ default (--model link, next start)  ◉ both
+        std::string run = js(local, "running"), def = js(local, "default_target");
+        auto base = [](const std::string & p) { auto k = p.find_last_of('/'); return k == std::string::npos ? p : p.substr(k + 1); };
+        std::string legend = "  " + fg(th.success) + "●" + RESET() + fg(th.muted) + " running  " + RESET()
+                           + fg(th.accent) + "○" + RESET() + fg(th.muted) + " default (next start)" + RESET();
+        if (!run.empty() && !def.empty() && run != def)
+            legend += fg(th.warning) + "  running " + base(run) + " ≠ default " + base(def) + " — restart or run the default" + RESET();
+        f.push_back(legend);
+    }
+    int h = body_h() - 2;   // dir + column header + legend lines
     clamp_sel(sel_local, top_local, n);
     for (int i = 0; i < h && top_local + i < n; ++i) {
         int idx = top_local + i;
         const json & mm = m[idx];
-        bool cur = jb(mm, "is_current");
+        bool cur = jb(mm, "is_current");    // in memory now
+        bool def = jb(mm, "is_default");    // what --model resolves to (next start)
         bool selrow = (idx == sel_local);
-        std::string marker = cur ? (fg(th.success) + "●" + RESET()) : " ";
+        std::string marker = cur && def ? (fg(th.success) + "◉" + RESET())
+                           : cur        ? (fg(th.success) + "●" + RESET())
+                           : def        ? (fg(th.accent)  + "○" + RESET())
+                           :              " ";
         std::string nm = js(mm, "name");
         time_t mt = (time_t) ji(mm, "mtime");
         char date[16] = "—"; if (mt > 0) { struct tm tmv; localtime_r(&mt, &tmv); std::strftime(date, sizeof date, "%Y-%m-%d", &tmv); }

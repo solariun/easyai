@@ -56,7 +56,9 @@ public:
         std::string   name;
         std::uint64_t size_bytes = 0;
         std::int64_t  mtime      = 0;      // unix seconds
-        bool          is_current = false;  // == the model the engine is serving
+        bool          is_current = false;  // == the model the engine is serving (in memory)
+        bool          is_default = false;  // == what the --model path resolves to (next start)
+        std::string   link_target;         // set when the entry is itself a symlink
     };
 
     // A downloadable .gguf inside a HuggingFace repo.
@@ -82,6 +84,10 @@ public:
     //                 [MODEL_*] profile lookups); may be null.
     // current_model — getter returning the absolute path of the model the
     //                 engine is currently serving (to flag the active model).
+    // default_model — getter returning the --model path as configured (the
+    //                 ai.gguf symlink by convention): what the next start
+    //                 loads. Flags "default" separately from "running", so a
+    //                 hot-swapped or re-linked box shows both truths.
     //
     // The Recommend tab sources models LIVE from the HuggingFace listing API
     // (/api/models?filter=gguf) rather than a bundled catalog: each result is
@@ -97,7 +103,8 @@ public:
     // the 1-hour refresh clock survives. Empty → falls back to download_dir.
     ModelsEngine(std::string download_dir, const config::Ini * ini,
                  std::function<std::string()> current_model, int catalog_size = 1000,
-                 std::string data_dir = "");
+                 std::string data_dir = "",
+                 std::function<std::string()> default_model = {});
     ~ModelsEngine();
 
     ModelsEngine(const ModelsEngine &)             = delete;
@@ -159,6 +166,7 @@ private:
     std::string                   download_dir_;
     const config::Ini *           ini_ = nullptr;
     std::function<std::string()>  current_model_;
+    std::function<std::string()>  default_model_;
     int                           catalog_size_ = 1000;  // per listing: most-downloaded + most-recent GGUF repos
     std::string                   data_dir_;             // where the catalog cache is persisted
     std::string                   status_;
