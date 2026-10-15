@@ -168,6 +168,13 @@ the server's `api_key` Bearer auth on `/v1/*`.
 - **Filters** — search, minimum fit, use case, **quantization** (Auto = best
   fitting, or force a specific quant), sort, limit. **Refresh list** rebuilds the
   snapshot from HuggingFace.
+- **Finder mode** — typing a search turns the tab from a recommender into a
+  finder: every HuggingFace match is shown, most downloaded first, with fit as
+  an informational column (Min fit flips to **Any**, Sort to **Downloads**;
+  both are restored when the search is cleared, and you can still narrow).
+  Multi-word queries match in any order (`qwen3 unsloth`, `google gemma`); the
+  hint line under the toolbar reports the live match count or a snapshot-only
+  fallback.
 - **Table** — params, **quant**, **fit** (colour-coded), run mode, score, est.
   tok/s, memory utilisation, HF downloads. **Fit is judged at 128K context** (or
   the model's native context if smaller). Click a row → the detail drawer, which
@@ -200,7 +207,10 @@ Below the GGUF table. It manages the whisper model that serves
 - the whisper.cpp catalogue (`ggerganov/whisper.cpp`: tiny … large-v3-turbo,
   `.en` and `q5` variants) with sizes and a **Download** button; the
   download shares the GGUF manager's worker and progress bar.
-  `large-v3-turbo-q5_0` is marked recommended for pt-BR + en.
+  `large-v3-turbo-q5_0` is marked recommended for pt-BR + en; its provenance,
+  checksum, license and alternatives are in `models/stt/README.md`, and
+  `scripts/fetch_stt_model.sh` fetches it (checksum-verified) for a hand-run
+  server.
 
 ### Downloads tab
 
@@ -266,7 +276,7 @@ is set.
 | GET | `/models/api/auth` | `{authed, required, source, status, download_dir}` (open). |
 | POST | `/models/api/login` / `logout` | `{"password":"…"}` → sets / clears the cookie. |
 | GET | `/models/api/system` | Detected/simulated hardware. Query: `ram_gb`, `vram_gb`, `cpu_cores`. |
-| GET | `/models/api/models` | The scored model list. Query: `search`, `min_fit`, `use_case`, `sort` (`score`/`tps`/`params`/`mem`/`downloads`/`likes`), `limit`, + sim params. A non-empty `search` first queries HuggingFace live (full repo id incl. owner, most-downloaded first, 50–200 hits, cached 10 min per query) and then appends snapshot matches. Envelope also carries `refreshing`, `last_refresh`, `stale`, `live_search` (true when the live half answered; otherwise `error` says why the list is snapshot-only). |
+| GET | `/models/api/models` | The scored model list. Query: `search`, `min_fit` (`perfect`/`good`/`marginal`/`any`), `use_case`, `sort` (`score`/`tps`/`params`/`mem`/`downloads`/`likes`), `limit`, + sim params. **Two modes:** without `search` the defaults are `min_fit=marginal, sort=score` (recommend); with `search` they become `min_fit=any, sort=downloads` (finder) unless passed explicitly — `search_mode`, `min_fit`, `sort` in the envelope say which applied. Every whitespace-separated term must match (any order) against repo + name + owner + params; HuggingFace is queried live once per term (max 3, cached 10 min each, 50–200 hits) and snapshot matches are appended. Envelope also carries `refreshing`, `last_refresh`, `stale`, `live_search` (true when the live half answered; otherwise `error` says why the list is snapshot-only). |
 | POST | `/models/api/refresh` | Rebuild the static model list from HuggingFace (runs in the background). |
 | GET | `/models/api/hf/detail?repo=<repo>&context=&quant=` | Precise fit for a HF model — reads its remote GGUF header (HTTP range). Returns real params, the **available quants**, the fit, and a **hardware plan** at the chosen context (default 128K) + quant. |
 | POST | `/models/api/plan` | `{model, context, quant?, kv_quant?, ram_gb?, vram_gb?, cpu_cores?}` → min/recommended hardware + KV alternatives. |

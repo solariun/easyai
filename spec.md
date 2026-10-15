@@ -878,11 +878,99 @@ green, ctest 2/2 (`reasoning_effort`, `stt` with the real model). Not
 verified here: microphone capture in a real browser (no browser tool in
 this session).
 
+**Model file.** The recommended weight `ggml-large-v3-turbo-q5_0.bin`
+(574 MB, SHA-256 `394221709c…a7e2`, MIT, from `ggerganov/whisper.cpp`
+at HF commit `5359861`) is documented in `models/stt/README.md` with its
+provenance table and alternatives, and fetched by
+`scripts/fetch_stt_model.sh` (checksum-verified). The binary itself is
+not committed: GitHub rejects blobs over 100 MB, and Git LFS would
+spend the free 1 GB/month bandwidth on two clones, breaking the
+installer's own clone. Measured with it: the 11 s JFK sample in 1224 ms
+on Metal, punctuation included.
+
 **Limits.** No streaming / partial transcripts (push-to-talk only).
 Non-WAV uploads from external clients are refused. Browser microphone
 needs HTTPS or localhost (rule 7). `/api/chat` (Ollama generation) is
 still not served: the Ollama family lists only `/api/tags` and
 `/api/show`.
+
+## Model finder mode — TUI and web (AUTHORITATIVE — 2026-10-15)
+
+**Plain words.** Typing a search in the model list is a different job
+from asking for recommendations. A search must find the model, whether
+or not it fits this box; the fit stays visible as a column. Both the
+web `/models` Recommend tab and the `easyai-cli --llm-manager` Recommend
+tab now switch to that behaviour the moment a query is typed, and
+multi-word queries work.
+
+```mermaid
+flowchart LR
+  Q["search typed
+'qwen3 unsloth'"] --> D[url_decode
+%20 / + → space]
+  D --> T[split terms
+max 3]
+  T -->|one HF call per term,
+cached 10 min| HF[(HuggingFace
+filter=gguf)]
+  HF --> U[union, by downloads]
+  U --> F["all-terms match on
+repo + name + owner + params"]
+  F --> G{filters}
+  G -->|finder defaults| A["min_fit=any, sort=downloads
+(fit shown, not gated)"]
+  G -->|explicit min_fit / sort| N[narrowed]
+```
+
+**Rules.**
+
+1. **Two modes in `GET /models/api/models`.** No `search` → *recommend*:
+   defaults `min_fit=marginal`, `sort=score` (unchanged). `search`
+   present → *finder*: defaults `min_fit=any`, `sort=downloads`; a
+   client that passes `min_fit` / `sort` explicitly narrows as before.
+   `min_fit=any` (new value, rank 0) and `too_tight` both mean "show
+   all". The envelope reports `search_mode`, `min_fit`, `sort`.
+2. **Multi-term matching.** `search_terms_match(hay, query)`: every
+   whitespace-separated term must be a substring, any order; the
+   haystack is `repo + name + owner + params`, lowercased. HuggingFace's
+   `search=` is one substring over the repo id, so the live half asks
+   once per term (at most 3 terms, each cached by the existing 10-minute
+   search cache), takes the union sorted by downloads, then applies the
+   all-terms match.
+3. **Query strings are percent-decoded.** `parse_query` now decodes
+   `%XX` and `+`. Before this every search containing a space reached
+   the matcher as `qwen3%20unsloth` and returned nothing — the root
+   cause of "model finding" looking broken in both UIs.
+4. **Web UI.** Typing a query flips Min fit → `Any (show all)` and Sort
+   → `Downloads` once (previous values restored when the query is
+   cleared); the user can still narrow. A hint line under the toolbar
+   says "Finder: N matches for “q” on HuggingFace (live), most
+   downloaded first — fit is informational; set Min fit / Sort to
+   narrow", or "snapshot only" with the HF error.
+5. **TUI (`--llm-manager`, Recommend tab).** Same auto-switch on `/`
+   search (fit → `any`, sort → `downloads`, restored on clear); new `s`
+   key cycles sort (`score, downloads, likes, params, tps, mem`); the
+   header shows `finder` / `recommend`, the active sort, and the
+   live/snapshot note; list limit raised to 100. Fit option `all`
+   renamed `any` to match the API.
+
+**Decisions.** Finder defaults live on the server (absent parameter)
+and are mirrored in both UIs, so curl users get the finder behaviour
+too while the UIs stay explicit about what they send. Per-term HF
+queries instead of one query: HF has no multi-term search; three cached
+calls are cheaper than paging the whole index. The fit filter is not
+removed in finder mode, only defaulted off: narrowing a search by fit
+is still a legitimate ask.
+
+**Proof (2026-10-15).** `tests/test_model_search.cpp` (ctest
+`model_search`, 9 CHECKs: any order, extra spaces, owner/name prefix,
+missing term, empty query). Live server: `search=qwen3 unsloth` →
+`search_mode=finder, min_fit=any, sort=downloads, live=true, total=34`
+(top rows `unsloth/Qwen3.8-27B-GGUF too_tight`, `…Qwen3.5-4B-GGUF
+perfect`); same query with `min_fit=good` → 18; `google gemma` → 45;
+no search → `recommend, marginal, score`. Before the decode fix both
+multi-word queries returned 0 with `live=true`. models.html: 1 script,
+0 syntax errors, finder code present. Full build green, ctest 3/3.
 
 ## Backend::Config extensions (2026-05-27)
 

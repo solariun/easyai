@@ -160,7 +160,7 @@
       <label>Search<input id="f-search" placeholder="name / owner — live HuggingFace" style="width:190px"></label>
       <label>Min fit<select id="f-minfit">
         <option value="marginal">Marginal+</option><option value="good">Good+</option>
-        <option value="perfect">Perfect</option><option value="too_tight">Show all</option></select></label>
+        <option value="perfect">Perfect</option><option value="any">Any (show all)</option></select></label>
       <label>Use case<select id="f-usecase">
         <option value="all">All</option><option value="general">General</option><option value="coding">Coding</option>
         <option value="reasoning">Reasoning</option><option value="chat">Chat</option>
@@ -183,6 +183,7 @@
       <span class="spin"></span><b>Rebuilding the model list from HuggingFace…</b>
       <span class="muted small" style="margin-left:auto" id="refMeta"></span>
     </div>
+    <div id="finderHint" class="hide muted small" style="margin:-6px 0 12px"></div>
     <div class="row">
       <div class="grow panel" style="padding:0;overflow:hidden">
         <div id="modelsWrap"><div class="empty">Searching HuggingFace…</div></div>
@@ -286,12 +287,32 @@ async function loadSystem(){
 /* ---------- recommend ---------- */
 let modelsTimer=null;
 function debounceModels(){clearTimeout(modelsTimer);modelsTimer=setTimeout(loadModels,250);}
+/* Finder mode: a search shows every HuggingFace match (fit is a column, not a gate),
+   most downloaded first. Entering a search flips Min fit → Any and Sort → Downloads
+   once; the user can still narrow; clearing the search restores the recommend settings. */
+const FINDER={active:false,prev:null};
+function syncFinder(){
+  const q=$('#f-search').value.trim();
+  if(q&&!FINDER.active){FINDER.active=true;FINDER.prev={fit:$('#f-minfit').value,sort:$('#f-sort').value};
+    $('#f-minfit').value='any';$('#f-sort').value='downloads';}
+  else if(!q&&FINDER.active){FINDER.active=false;if(FINDER.prev){$('#f-minfit').value=FINDER.prev.fit;$('#f-sort').value=FINDER.prev.sort;}}
+}
+function showFinderHint(d){
+  const h=$('#finderHint');if(!h)return;
+  if(!FINDER.active){h.classList.add('hide');return;}
+  const q=$('#f-search').value.trim();
+  h.classList.remove('hide');
+  h.innerHTML=d.live_search
+    ?`Finder: <b>${fmtNum(d.total_models)}</b> matches for “${esch(q)}” on HuggingFace (live), most downloaded first — fit is informational; set Min fit / Sort to narrow.`
+    :`Finder: snapshot only for “${esch(q)}”${d.error?' — '+esch(d.error):''}.`;
+}
 let refreshTimer=null;
 function fmtAgo(sec){if(!sec)return 'never';let d=Math.max(0,Math.floor(Date.now()/1000-sec));
   if(d<60)return 'just now';if(d<3600)return Math.floor(d/60)+'m ago';if(d<86400)return Math.floor(d/3600)+'h ago';return Math.floor(d/86400)+'d ago';}
 function showRefresh(on,meta){$('#refreshBanner').classList.toggle('hide',!on);if(meta!==undefined)$('#refMeta').textContent=meta;let b=$('#refBtn');if(b)b.disabled=on;}
 function schedulePoll(){clearTimeout(refreshTimer);refreshTimer=setTimeout(loadModels,2000);}
 async function loadModels(){
+  syncFinder();
   let p=simQS();
   p.set('search',$('#f-search').value);p.set('min_fit',$('#f-minfit').value);
   p.set('use_case',$('#f-usecase').value);p.set('sort',$('#f-sort').value);p.set('limit',$('#f-limit').value);
@@ -300,6 +321,7 @@ async function loadModels(){
   try{
     let d=await api('/models/api/models?'+p);
     showRefresh(!!d.refreshing,'list updated '+fmtAgo(d.last_refresh));
+    showFinderHint(d);
     if(d.refreshing)schedulePoll();else clearTimeout(refreshTimer);
     if(!d.models.length){
       $('#modelsWrap').innerHTML=d.refreshing

@@ -789,6 +789,9 @@ struct Manager {
     std::string rec_search;
     int rec_minfit = 0;       // index into fit_opts
     int rec_usecase = 0;      // index into uc_opts
+    int rec_sort = 0;         // index into sort_opts
+    bool rec_finder = false;  // a search is active: fit "any" + sort downloads were auto-applied
+    int rec_prev_minfit = 0, rec_prev_sort = 0;   // restored when the search is cleared
 
     // download tab
     std::string dl_repo;
@@ -815,7 +818,10 @@ struct Manager {
     void set_err(const std::string & m) { err = m; }
 
     static const std::vector<std::string> & fit_opts() {
-        static const std::vector<std::string> v = { "good", "marginal", "perfect", "all" }; return v;
+        static const std::vector<std::string> v = { "good", "marginal", "perfect", "any" }; return v;
+    }
+    static const std::vector<std::string> & sort_opts() {
+        static const std::vector<std::string> v = { "score", "downloads", "likes", "params", "tps", "mem" }; return v;
     }
     static const std::vector<std::string> & uc_opts() {
         static const std::vector<std::string> v = { "all", "general", "coding", "reasoning", "chat", "multimodal", "embedding" }; return v;
@@ -835,9 +841,24 @@ struct Manager {
         local_loaded = true;
         clamp_sel(sel_local, top_local, local_rows());
     }
+    // Search = finder mode: every HuggingFace match, fit shown not gated,
+    // most downloaded first. Entering a search switches fit→any and
+    // sort→downloads once; clearing it restores the recommend settings.
+    void sync_finder() {
+        const bool want = !rec_search.empty();
+        if (want && !rec_finder) {
+            rec_prev_minfit = rec_minfit; rec_prev_sort = rec_sort;
+            rec_minfit = (int) fit_opts().size() - 1;   // "any"
+            rec_sort   = 1;                             // "downloads"
+        } else if (!want && rec_finder) {
+            rec_minfit = rec_prev_minfit; rec_sort = rec_prev_sort;
+        }
+        rec_finder = want;
+    }
     void fetch_recommend() {
         flash("loading catalogue…");
-        std::string p = "/models/api/models?limit=60&sort=score";
+        sync_finder();
+        std::string p = "/models/api/models?limit=100&sort=" + urlenc(sort_opts()[rec_sort]);
         p += "&min_fit=" + urlenc(fit_opts()[rec_minfit]);
         p += "&use_case=" + urlenc(uc_opts()[rec_usecase]);
         if (!rec_search.empty()) p += "&search=" + urlenc(rec_search);
@@ -1086,14 +1107,23 @@ void Manager::render_local_tab(std::vector<std::string> & f) {
 
 void Manager::render_recommend_tab(std::vector<std::string> & f) {
     bool refreshing = jb(recommend, "refreshing");
-    std::string head = "  filter: " + fg(th.accent) + fit(rec_search.empty() ? "(none)" : rec_search, 22) + RESET()
+    std::string head = "  " + (rec_finder ? fg(th.accent) + "finder" : fg(th.muted) + "recommend") + RESET()
+        + fg(th.muted) + "  search: " + RESET() + fg(th.accent) + fit(rec_search.empty() ? "(none)" : rec_search, 22) + RESET()
         + fg(th.muted) + "  fit≥" + RESET() + fg(th.accent) + fit_opts()[rec_minfit] + RESET()
-        + fg(th.muted) + "  use:" + RESET() + fg(th.accent) + uc_opts()[rec_usecase] + RESET();
+        + fg(th.muted) + "  use:" + RESET() + fg(th.accent) + uc_opts()[rec_usecase] + RESET()
+        + fg(th.muted) + "  sort:" + RESET() + fg(th.accent) + sort_opts()[rec_sort] + RESET();
     if (refreshing) head += fg(th.warning) + "   rebuilding from HuggingFace…" + RESET();
     f.push_back(head);
+    if (rec_finder) {
+        const bool live = jb(recommend, "live_search");
+        const std::string e = js(recommend, "error");
+        f.push_back("  " + fg(live ? th.muted : th.warning)
+            + (live ? std::to_string(ji(recommend, "total_models")) + " matches on HuggingFace (live) — fit is informational; 'f' / 's' narrow"
+                    : "snapshot only" + (e.empty() ? std::string() : ": " + e)) + RESET());
+    }
     const json & m = jobj(recommend, "models");
     int n = m.is_array() ? (int) m.size() : 0;
-    if (n == 0) { f.push_back(""); f.push_back(fg(th.muted) + "  (no matches — '/' search, 'f' fit, 'u' use-case, 'R' refresh)" + RESET()); return; }
+    if (n == 0) { f.push_back(""); f.push_back(fg(th.muted) + "  (no matches — '/' search, 'f' fit, 'u' use-case, 's' sort, 'R' refresh)" + RESET()); return; }
     int parw = 6, qw = 8, fitw = 9, mw = 11, scw = 5, tpsw = 6, dlw = 7;
     int namew = std::max(16, cols - 2 - (parw + qw + fitw + mw + scw + tpsw + dlw + 8));
     f.push_back("  " + fg(th.muted)
@@ -1181,7 +1211,7 @@ void Manager::render_overlay(std::vector<std::string> & f) {
             "  Local models",
             "    r  run / hot-swap      s  symlink as current      d  delete",
             "  Recommend",
-            "    /  search   f  min-fit   u  use-case   R  refresh catalogue",
+            "    /  search (finder: every HF match, fit informational)   f  min-fit   u  use-case   s  sort   R  refresh",
             "    d  (in detail) download best quant",
             "  Downloads",
             "    e  edit repo   l  list GGUF files   enter/d  download   c  cancel",
@@ -1212,7 +1242,7 @@ void Manager::render() {
     } else switch (tab) {
         case TAB_STATUS:    render_status_tab(f);    hint = "↑↓ scroll · r refresh"; break;
         case TAB_LOCAL:     render_local_tab(f);     hint = "↑↓ · enter detail · r run · s symlink · d delete"; break;
-        case TAB_RECOMMEND: render_recommend_tab(f); hint = "↑↓ · enter detail · / search · f fit · u use · R refresh"; break;
+        case TAB_RECOMMEND: render_recommend_tab(f); hint = "↑↓ · enter detail · / search · f fit · u use · s sort · R refresh"; break;
         case TAB_DOWNLOADS: render_downloads_tab(f); hint = "e repo · l list · enter download · c cancel"; break;
     }
     render_footer(f, hint);
@@ -1291,6 +1321,7 @@ void Manager::handle_key(const Key & k) {
             else if (k.type == Key::Char && k.text == "/") start_edit("search", rec_search, [this] { fetch_recommend(); });
             else if (k.type == Key::Char && (k.text == "f" || k.text == "F")) { rec_minfit = (rec_minfit + 1) % (int) fit_opts().size(); fetch_recommend(); }
             else if (k.type == Key::Char && (k.text == "u" || k.text == "U")) { rec_usecase = (rec_usecase + 1) % (int) uc_opts().size(); fetch_recommend(); }
+            else if (k.type == Key::Char && (k.text == "s" || k.text == "S")) { rec_sort = (rec_sort + 1) % (int) sort_opts().size(); fetch_recommend(); }
             else if (k.type == Key::Char && k.text == "R") refresh_catalog();
             break;
         }

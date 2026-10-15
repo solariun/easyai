@@ -116,6 +116,14 @@ landing on it for the first time) sees what shipped recently.
 - Library: `easyai::Stt` + model-free `decode_wav` / `resample_linear`
   (`tests/test_stt.cpp`, ctest `stt`). Build: `EASYAI_WITH_WHISPER`
   (default ON) picks up `../whisper.cpp` and links the ggml already built.
+- Recommended voice model `ggml-large-v3-turbo-q5_0` documented in
+  `models/stt/README.md` (source, commit, SHA-256, license, data) and
+  fetched by `scripts/fetch_stt_model.sh`; the installer downloads it and
+  links `stt.bin`. Enable with `--stt-model <file>` or `[STT] model = <file>`.
+- **Model finder** in `/models` and `easyai-cli --llm-manager`: a search
+  now shows every HuggingFace match (multi-word, any order), most
+  downloaded first, fit informational — and fixes the bug where any query
+  with a space returned nothing (query strings were not percent-decoded).
 
 ### 2026-05-27 — Unified library + `easyai::Session` (OpenAI-Python-SDK shape)
 

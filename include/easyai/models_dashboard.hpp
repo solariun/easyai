@@ -44,6 +44,11 @@ namespace config { struct Ini; }   // borrowed by the engine for [MODEL_*] looku
 
 struct HfHit;   // one HuggingFace listing hit (defined in models_dashboard.cpp)
 
+// Finder matching: every whitespace-separated term of `query_lower` must be
+// a substring of `hay_lower`, in any order ("qwen3 unsloth" finds
+// "unsloth/Qwen3-30B-A3B-GGUF"). Empty query matches everything.
+bool search_terms_match(const std::string & hay_lower, const std::string & query_lower);
+
 class ModelsEngine {
 public:
     // A .gguf file in the download directory.

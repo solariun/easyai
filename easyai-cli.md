@@ -193,7 +193,7 @@ Four tabs:
 | --- | --- |
 | **Status** | Live, auto-refreshing (~2 s) comprehensive status — identical to `--status`: server, running model, active sampling parameters, services & tools, hardware, catalogue, downloads, request metrics. |
 | **Local** | Installed `.gguf` files (the `●` marks the running model), with size and date. `enter` opens a detail panel (architecture, params, quant, fit score). Actions: `r` run / hot-swap (in-memory; reverts on restart), `s` set as default (points the `ai.gguf` symlink), `d` delete (confirms first). |
-| **Recommend** | HuggingFace recommendations ranked by hardware fit — params, best quant, fit label, run mode, score, est. tok/s, downloads. `/` search, `f` cycle min-fit, `u` cycle use-case, `R` rebuild the catalogue from HuggingFace, `enter` for detail (where `d` downloads the best quant). |
+| **Recommend** | HuggingFace recommendations ranked by hardware fit — params, best quant, fit label, run mode, score, est. tok/s, downloads. `/` search switches the tab to **finder mode**: every HuggingFace match (multi-word, any order), most downloaded first, fit shown but not gated — the header says `finder` and reports the live match count; clearing the search restores the recommend filters. `f` cycle min-fit (`good, marginal, perfect, any`), `u` cycle use-case, `s` cycle sort (`score, downloads, likes, params, tps, mem`), `R` rebuild the catalogue, `enter` for detail (where `d` downloads the best quant). |
 | **Downloads** | Active download with a live progress bar (`c` cancels). `e` enter a HuggingFace repo, `l` list its GGUF files, `enter`/`d` download the selected file. |
 
 Keys: `tab` / `shift+tab` / `1`–`4` switch tabs, `↑↓` and `pgup`/`pgdn`

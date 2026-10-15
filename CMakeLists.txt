@@ -413,6 +413,9 @@ if (EASYAI_BUILD_TESTS)
     add_executable(easyai-test-stt tests/test_stt.cpp)
     target_link_libraries(easyai-test-stt PRIVATE easyai)
     add_test(NAME stt COMMAND easyai-test-stt)
+    add_executable(easyai-test-model-search tests/test_model_search.cpp)
+    target_link_libraries(easyai-test-model-search PRIVATE easyai)
+    add_test(NAME model_search COMMAND easyai-test-model-search)
 endif()
 
 # ============================================================================

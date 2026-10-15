@@ -61,6 +61,22 @@ std::string to_upper(std::string s) {
     for (char & c : s) c = (char) std::toupper((unsigned char) c);
     return s;
 }
+}  // namespace
+
+bool search_terms_match(const std::string & hay, const std::string & query) {
+    std::size_t i = 0;
+    while (i < query.size()) {
+        while (i < query.size() && std::isspace((unsigned char) query[i])) ++i;
+        std::size_t j = i;
+        while (j < query.size() && !std::isspace((unsigned char) query[j])) ++j;
+        if (j > i && hay.find(query.substr(i, j - i)) == std::string::npos) return false;
+        i = j;
+    }
+    return true;
+}
+
+namespace {
+
 std::string to_lower(std::string s) {
     for (char & c : s) c = (char) std::tolower((unsigned char) c);
     return s;
@@ -88,6 +104,7 @@ constexpr std::int64_t kSearchTtlSec   = 600;    // live HF search results stay 
 constexpr std::size_t  kSearchCacheMax = 64;     // distinct live queries kept
 constexpr int          kSearchMinHits  = 50;     // live search asks HF for at least this many
 constexpr int          kSearchMaxHits  = 200;    // ... and at most this many (one HF page)
+constexpr int          kSearchMaxTerms = 3;      // HF matches one substring; ask once per term, filter locally
 constexpr std::uint32_t kFitContext    = 131072; // 128K — the context fit is judged at
 constexpr long         kGgufHeaderBytes = 16 * 1024 * 1024; // range-read budget for a remote GGUF header
 
@@ -117,6 +134,22 @@ std::string quant_from_filename(const std::string & name) {
 }
 
 // Parse "key=value&key2=value2" (already URL-decoded by httplib) into a map.
+// Percent-decoding ('+' = space): the server hands us the re-encoded query
+// string, so "qwen3 unsloth" arrives as "qwen3%20unsloth" or "qwen3+unsloth".
+std::string url_decode(const std::string & in) {
+    std::string out; out.reserve(in.size());
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '+') { out += ' '; continue; }
+        if (in[i] == '%' && i + 2 < in.size() && std::isxdigit((unsigned char) in[i + 1]) && std::isxdigit((unsigned char) in[i + 2])) {
+            out += (char) std::stoi(in.substr(i + 1, 2), nullptr, 16);
+            i += 2;
+            continue;
+        }
+        out += in[i];
+    }
+    return out;
+}
+
 std::map<std::string, std::string> parse_query(const std::string & q) {
     std::map<std::string, std::string> out;
     size_t pos = 0;
@@ -124,8 +157,8 @@ std::map<std::string, std::string> parse_query(const std::string & q) {
         size_t amp = q.find('&', pos);
         std::string pair = q.substr(pos, amp == std::string::npos ? std::string::npos : amp - pos);
         size_t eq = pair.find('=');
-        if (eq != std::string::npos) out[pair.substr(0, eq)] = pair.substr(eq + 1);
-        else if (!pair.empty())      out[pair] = "";
+        if (eq != std::string::npos) out[url_decode(pair.substr(0, eq))] = url_decode(pair.substr(eq + 1));
+        else if (!pair.empty())      out[url_decode(pair)] = "";
         if (amp == std::string::npos) break;
         pos = amp + 1;
     }
@@ -1991,12 +2024,18 @@ std::string ModelsEngine::models_json(const std::string & query) {
 
     std::string search  = to_lower(qget(q, "search"));
     std::string usecase = qget(q, "use_case", "all");
-    std::string sort    = qget(q, "sort", "score");
-    std::string min_fit = qget(q, "min_fit", "marginal");
+    // Two modes. Recommend (no search): rank what fits this box. Finder
+    // (search given): show every match — fit is a column, not a gate — most
+    // downloaded first. A client that wants to narrow a search passes
+    // min_fit / sort explicitly.
+    const bool finder   = !search.empty();
+    std::string sort    = qget(q, "sort",    finder ? "downloads" : "score");
+    std::string min_fit = qget(q, "min_fit", finder ? "any" : "marginal");
     bool include_tt = qget(q, "include_too_tight", "true") != "false";
     int limit = (int) qnum(q, "limit", qnum(q, "n", 50));
     if (limit <= 0) limit = 50;
-    int min_fit_rank = min_fit == "perfect" ? 4 : min_fit == "good" ? 3 : min_fit == "too_tight" ? 1 : 2;
+    int min_fit_rank = min_fit == "perfect" ? 4 : min_fit == "good" ? 3
+                     : (min_fit == "too_tight" || min_fit == "any") ? 0 : 2;
     std::string fquant = qget(q, "quant");                       // force a quant for scoring
     if (fquant == "auto" || fquant == "any") fquant.clear();
 
@@ -2012,9 +2051,25 @@ std::string ModelsEngine::models_json(const std::string & query) {
     // bounded window, HF's own index is not. Live hits go FIRST (they are
     // sorted by downloads), snapshot substring matches fill in after them.
     bool live = false;
-    if (!search.empty()) {
-        std::vector<HfHit> hits; std::string serr;
-        if (live_search(search, limit, hits, serr)) {
+    if (finder) {
+        // HuggingFace's `search=` is one substring over the repo id, so a
+        // multi-word query ("qwen3 unsloth") must go up one term at a time;
+        // the union comes back and the all-terms match below narrows it.
+        std::vector<std::string> terms;
+        for (std::size_t i = 0; i < search.size() && (int) terms.size() < kSearchMaxTerms;) {
+            while (i < search.size() && std::isspace((unsigned char) search[i])) ++i;
+            std::size_t j = i;
+            while (j < search.size() && !std::isspace((unsigned char) search[j])) ++j;
+            if (j > i) terms.push_back(search.substr(i, j - i));
+            i = j;
+        }
+        std::vector<HfHit> hits; std::string serr; bool any_ok = false;
+        for (const auto & t : terms) {
+            std::vector<HfHit> h;
+            if (live_search(t, limit, h, serr)) { any_ok = true; hits.insert(hits.end(), h.begin(), h.end()); }
+        }
+        std::stable_sort(hits.begin(), hits.end(), [](const HfHit & a, const HfHit & b) { return a.downloads > b.downloads; });
+        if (any_ok) {
             live = true;
             std::vector<CachedHf> merged; merged.reserve(hits.size() + snap.size());
             std::map<std::string, bool> seen;
@@ -2034,9 +2089,9 @@ std::string ModelsEngine::models_json(const std::string & query) {
     std::vector<FitRow> rows;
     for (auto & c : snap) {
         if (!c.ok) continue;
-        if (!search.empty()) {
-            std::string hay = to_lower(c.entry.name + " " + c.entry.provider + " " + c.entry.parameter_count);
-            if (hay.find(search) == std::string::npos) continue;
+        if (finder) {
+            std::string hay = to_lower(c.repo + " " + c.entry.name + " " + c.entry.provider + " " + c.entry.parameter_count);
+            if (!search_terms_match(hay, search)) continue;
         }
         if (usecase != "all" && infer_use_case(c.entry) != usecase) continue;
         FitRow r = score_model(c.entry, s, 0, "", fquant);
@@ -2062,6 +2117,9 @@ std::string ModelsEngine::models_json(const std::string & query) {
     env["returned_models"] = (int) rows.size();
     env["source"]          = "huggingface";
     env["live_search"]     = live;
+    env["search_mode"]     = finder ? "finder" : "recommend";
+    env["min_fit"]         = min_fit;
+    env["sort"]            = sort;
     env["refreshing"]      = refreshing_.load();
     env["last_refresh"]    = last;
     env["stale"]           = (now_sec() - last) > kSnapshotTtlSec;

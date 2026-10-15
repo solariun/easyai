@@ -327,7 +327,16 @@ flowchart LR
 Model choice: `large-v3-turbo-q5_0` (547 MB) is the recommended
 multilingual pick for pt-BR + en; `small` (466 MB) when the box is
 CPU-only and slow; `*.en` variants are English only. The Voice panel
-lists the whole whisper.cpp table with sizes.
+lists the whole whisper.cpp table with sizes. Provenance, checksum,
+license and data for the recommended file: `models/stt/README.md`;
+`scripts/fetch_stt_model.sh [name]` downloads it (checksum-verified)
+into `models/stt/` for a hand-run server:
+
+```bash
+scripts/fetch_stt_model.sh
+easyai-server -m ai.gguf --stt-model models/stt/ggml-large-v3-turbo-q5_0.bin
+# or in the INI:  [STT]  model = /abs/path/models/stt/ggml-large-v3-turbo-q5_0.bin
+```
 
 **Browser microphone needs a secure context.** Browsers expose
 `getUserMedia` only on `https://` or `localhost`. On a LAN host such as
