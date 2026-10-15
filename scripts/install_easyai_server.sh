@@ -79,6 +79,9 @@
 #                                                    # (only the template ships).
 #   ./install_easyai_server.sh --enable-now          # systemctl start now
 #   ./install_easyai_server.sh --enable-verbose      # bake --verbose into ExecStart (noisy)
+#   ./install_easyai_server.sh --llama-ref latest    # track llama.cpp main instead of the
+#                                                    #   tested pin (default: sha in llama_ref
+#                                                    #   below; also --whisper-ref)
 #   ./install_easyai_server.sh --no-whisper          # skip voice transcription (whisper.cpp)
 #   ./install_easyai_server.sh --stt-model small     # whisper model to download (default
 #                                                    #   large-v3-turbo-q5_0, 547 MB; "none" = skip)
@@ -194,7 +197,13 @@ easyai_repo="${easyai_repo:-https://github.com/solariun/easy.git}"
 llama_repo="${llama_repo:-https://github.com/ggml-org/llama.cpp.git}"
 whisper_repo="${whisper_repo:-https://github.com/ggml-org/whisper.cpp.git}"
 easyai_ref=""                                 # empty = main; pass --ref <sha|tag>
-llama_ref=""                                  # empty = main; pass --llama-ref
+# llama.cpp and whisper.cpp are pinned to the upstream commits easyai was
+# last built and tested against (see spec.md "llama.cpp API port"). Upstream
+# changes the common/chat API without notice; a floating main broke the
+# Linux build on 2026-10-15. --llama-ref latest / --whisper-ref latest track
+# upstream main instead (your build, your risk).
+llama_ref="fd55cb98fe29d3df0054d3f3e6e6f15958ea72ab"      # 2026-10-15; --llama-ref <sha|tag|latest>
+whisper_ref="0c7be696371069e0baa2515ed7aa08d5a5473aa6"    # 2026-10-12; --whisper-ref <sha|tag|latest>
 
 install_prefix="/usr"
 backend="auto"                                # auto|vulkan|cuda|hip|cpu
@@ -475,7 +484,8 @@ while [[ $# -gt 0 ]]; do
         --easyai-repo)      easyai_repo="$2"; shift 2 ;;
         --llama-repo)       llama_repo="$2"; shift 2 ;;
         --ref)              easyai_ref="$2"; shift 2 ;;
-        --llama-ref)        llama_ref="$2"; shift 2 ;;
+        --llama-ref)        llama_ref="$2"; [[ "$llama_ref" == "latest" ]] && llama_ref=""; shift 2 ;;
+        --whisper-ref)      whisper_ref="$2"; [[ "$whisper_ref" == "latest" ]] && whisper_ref=""; shift 2 ;;
         --prefix)           install_prefix="$2"; shift 2 ;;
         --backend)          backend="$2"; shift 2 ;;
         --gtt)              gtt_gb="$2"; shift 2 ;;
@@ -999,7 +1009,7 @@ fetch_repo "$llama_dir"  "$llama_repo"  "$llama_ref"
 # whisper.cpp (optional) likewise: ../whisper.cpp → easyai::Stt + the
 # server's /v1/audio/transcriptions. It links the ggml built for llama.cpp.
 if [[ $do_whisper -eq 1 ]]; then
-    fetch_repo "$whisper_dir" "$whisper_repo" ""
+    fetch_repo "$whisper_dir" "$whisper_repo" "$whisper_ref"
 fi
 fetch_repo "$easyai_dir" "$easyai_repo" "$easyai_ref"
 

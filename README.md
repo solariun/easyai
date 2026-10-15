@@ -94,6 +94,14 @@ A running log of user-facing changes. Latest first — keep this list
 current as features land so anyone returning to the repo (or
 landing on it for the first time) sees what shipped recently.
 
+### 2026-10-15 — llama.cpp chat-API port, pinned installer
+
+- Ported to llama.cpp `fd55cb98f` (chat parser takes a `common_chat_input`,
+  the PEG arena travels as a value, the rendered prompt is parts with
+  `str()`). The Linux installer now checks out that sha for llama.cpp and
+  `0c7be69` for whisper.cpp instead of floating main; `--llama-ref latest`
+  / `--whisper-ref latest` opt back into upstream main.
+
 ### 2026-10-15 — Voice transcription (whisper) + endpoint directory
 
 - **`POST /v1/audio/transcriptions`** — OpenAI-shaped speech-to-text on a

@@ -41,7 +41,7 @@ static std::string render(const char * tmpl, const std::string & level,
                           std::map<std::string, std::string> & remap) {
     auto t = common_chat_templates_init(nullptr, tmpl);
     auto in = inputs();
-    return easyai::apply_reasoning_effort(t.get(), in, level, remap).prompt;
+    return easyai::apply_reasoning_effort(t.get(), in, level, remap).prompt.str();
 }
 
 int main() {

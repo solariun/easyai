@@ -2307,13 +2307,10 @@ static void handle_chat_stream(ServerCtx & ctx,
                     "[easyai-server] chat_params render threw: %s — "
                     "falling back to generic parser\n", e.what());
             }
+            // The PEG arena carries the template's reasoning and tool-call
+            // rules; an empty arena makes common_chat_parse content-only.
             common_chat_parser_params parser_params(chat_p);
-            parser_params.parse_tool_calls = true;
-            parser_params.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
-            if (!chat_p.parser.empty()) {
-                try { parser_params.parser.load(chat_p.parser); }
-                catch (...) { /* will fall through to non-PEG parse */ }
-            }
+            parser_params.parser = chat_p.parser;
 
             std::string accumulated;
             common_chat_msg prev_msg;
@@ -2405,7 +2402,7 @@ static void handle_chat_stream(ServerCtx & ctx,
                 accumulated += piece;
                 common_chat_msg new_msg;
                 try {
-                    new_msg = common_chat_parse(accumulated,
+                    new_msg = common_chat_parse(common_chat_input(accumulated),
                                                 /*is_partial=*/true,
                                                 parser_params);
                 } catch (const std::exception &) {
@@ -2814,7 +2811,7 @@ static void handle_chat_stream(ServerCtx & ctx,
             // Final non-partial parse to flush any reasoning/content the
             // partial parses may have held back due to incomplete tags.
             try {
-                auto final_msg = common_chat_parse(accumulated,
+                auto final_msg = common_chat_parse(common_chat_input(accumulated),
                                                    /*is_partial=*/false,
                                                    parser_params);
                 final_msg.role = "assistant";

@@ -1411,3 +1411,68 @@ The `kPythonSandboxPreamble` injected before every `evaluate` snippet enforces T
 PermissionError messages point the model at the filesystem write tool registered this session (the exact callable name is read from the model's AVAILABLE TOOLS list — that way the error message stays correct whether the operator chose Split mode `write_file` or Unified mode `fs(action="write")`). Read-only opens inside the sandbox continue to work (legitimate "load CSV, compute, print result" flows are unaffected).
 
 **Documented residual:** Python's `__closure__` introspection on `builtins.open` recovers the unwrapped open from the closure cell, bypassing both checks. Same class as the existing `ctypes` / `_io.FileIO` / `subprocess` bypasses — adversarial intent is out of scope; defense is against accident. See SECURITY_AUDIT §23.2.
+
+## llama.cpp API port + pinned sibling checkouts (AUTHORITATIVE — 2026-10-15)
+
+**Plain words.** easyai compiles against the sibling checkout `../llama.cpp`
+(and `../whisper.cpp`). Upstream changed its chat API on 2026-10-14
+(`8b5436102 chat: refactor API`, `ff026f8c0 chat: replace output string
+with parts`) and the Linux installer, which cloned floating `main`, stopped
+building. easyai now follows that API, and the installer checks out the
+exact upstream commits easyai was built and tested against.
+
+```mermaid
+flowchart LR
+  T[chat template] -->|common_chat_templates_apply| P["common_chat_params\nprompt: parts, parser: PEG arena"]
+  P -->|prompt.str| TK[common_tokenize]
+  P -->|parser copied| PP[common_chat_parser_params]
+  G[generated text] -->|common_chat_input| PARSE[common_chat_parse]
+  PP --> PARSE
+  PARSE --> M["common_chat_msg\ncontent / reasoning_content / tool_calls"]
+```
+
+**Rules.**
+
+1. `common_chat_params::prompt` is a `common_chat_prompt` (template parts and
+   user-input parts). Any code that tokenises or prints the rendered prompt
+   uses `prompt.str()`.
+2. `common_chat_params::parser` is a `common_peg_arena` value, not a
+   serialised string. It is copied into `common_chat_parser_params::parser`;
+   there is no `load()`. An empty arena makes `common_chat_parse` a
+   content-only parser.
+3. `common_chat_parse` takes a `common_chat_input`. easyai wraps plain text
+   with `common_chat_input(text)` (token ids unknown, all `LLAMA_TOKEN_NULL`);
+   the lenient PEG parse behaves as before for both partial (streaming) and
+   final parses.
+4. `parse_tool_calls`, `reasoning_format`, `reasoning_in_content` no longer
+   exist on the parser params. Reasoning and tool-call extraction are encoded
+   in the arena the template produced, so `Engine::reasoning_format` keeps
+   acting through `common_chat_templates_inputs::reasoning_format` at render
+   time only.
+5. The installer defaults `llama_ref` to `fd55cb98fe29d3df0054d3f3e6e6f15958ea72ab`
+   (2026-10-15) and `whisper_ref` to `0c7be696371069e0baa2515ed7aa08d5a5473aa6`
+   (2026-10-12). `--llama-ref <sha|tag|latest>` / `--whisper-ref …` override;
+   `latest` means floating upstream main. A port to a newer llama.cpp
+   updates both the code and these two defaults in the same commit.
+
+**Decisions.** Pinning in the installer rather than vendoring: a submodule
+or vendored copy would double the repository size and still need the same
+bump discipline. Floating main (previous default) was rejected because an
+upstream API change breaks every fresh Linux install the same day, which
+is what happened here. `latest` is kept as an explicit opt-in for testing
+the next port.
+
+**Proof.** macOS: full build green against `fd55cb98f`, ctest 3/3
+(`reasoning_effort`, `stt`, `model_search`). Live server on the toy model
+with `qwen3-think.jinja`: non-stream `/v1/chat/completions` returns content,
+stream returns `reasoning_content` deltas separately from content, and
+`/v1/audio/transcriptions` transcribes `jfk.wav` unchanged. Linux: the
+pasted errors (`parse_tool_calls`, `common_peg_arena::load`,
+`common_chat_input`, `common_tokenize(common_chat_prompt)`) are the four
+sites rules 1–3 cover; Linux rebuild against the pinned sha pending on Gustavo's box.
+
+**Limits.** `common_chat_input(text)` carries no token ids, so the parser
+cannot tell a special token typed by the user from one emitted by the
+model; the old string API had the same limit. Using the new
+`common_chat_session` (tokenised input, prefill echo) is a larger change
+left for a later port.

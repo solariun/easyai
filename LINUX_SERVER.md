@@ -193,7 +193,11 @@ model downloaded at install (default `large-v3-turbo-q5_0`, 547 MB;
 `none` skips it, `/models` can fetch one later), `--no-whisper` leaves
 whisper.cpp out of the build, `--tls` generates a self-signed
 certificate for `<mdns-hostname>.local` and switches the service to
-`https://` (accept it once per browser).
+`https://` (accept it once per browser). The installer checks out the
+llama.cpp and whisper.cpp commits easyai was tested against (sha defaults
+at the top of the script, see spec.md "llama.cpp API port"); `--llama-ref
+latest` or `--whisper-ref latest` tracks upstream main instead, and
+`--upgrade` moves an existing checkout to the pinned sha.
 
 | Path | Owned by | Mode | Purpose |
 | --- | --- | --- | --- |

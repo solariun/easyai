@@ -1362,23 +1362,16 @@ struct Engine::Impl {
 
     // Parse model output into a structured chat message according to the
     // current chat template (handles native + PEG tool-call formats).
-    // The PEG arena is shipped as a serialized string in chat_params.parser;
-    // we load it into the parser_params before dispatching.
+    // chat_params.parser is the PEG arena built with the template (reasoning
+    // and tool-call rules included); copy it into the parser params.
     common_chat_msg parse_assistant(const std::string & raw, const common_chat_params & p) {
         common_chat_parser_params pp(p);
-        pp.parse_tool_calls = true;
-        if (!p.parser.empty()) {
-            try { pp.parser.load(p.parser); }
-            catch (const std::exception & e) {
-                std::fprintf(stderr,
-                    "[easyai] failed to load chat parser arena: %s\n", e.what());
-            }
-        }
+        pp.parser = p.parser;
         // 1) Try the official parser first.
         common_chat_msg msg;
         bool parser_threw = false;
         try {
-            msg = common_chat_parse(raw, /*is_partial=*/false, pp);
+            msg = common_chat_parse(common_chat_input(raw), /*is_partial=*/false, pp);
         } catch (const std::exception & e) {
             const size_t tail = std::min<size_t>(600, raw.size());
             std::fprintf(stderr,
@@ -2164,7 +2157,7 @@ std::string Engine::generate() {
     // only the suffix beyond n_past.)
     const llama_vocab * vocab = llama_model_get_vocab(p_->init->model());
     std::vector<llama_token> all =
-        common_tokenize(vocab, chat_p.prompt, /*add_special=*/n_past == 0,
+        common_tokenize(vocab, chat_p.prompt.str(), /*add_special=*/n_past == 0,
                         /*parse_special=*/true);
 
     if ((int) all.size() < n_past) {
