@@ -126,7 +126,12 @@ public:
 
     // ---- download manager (native libcurl → HuggingFace) ----
     bool hf_repo_files(const std::string & repo,
-                       std::vector<RepoFile> & out, std::string & err);
+                       std::vector<RepoFile> & out, std::string & err,
+                       bool gguf_only = true);
+    // One named file from a repo, no GGUF rules (whisper ggml-*.bin). Shares
+    // the worker and the progress object with start_download().
+    int  start_download_file(const std::string & repo, const std::string & path,
+                             std::string & err);
     int  start_download(const std::string & repo, const std::string & filename,
                         std::string & err);
     void           cancel_download();

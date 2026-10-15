@@ -175,31 +175,43 @@ model id:
 
 Ollama-mode clients work too — point them at
 `http://ai.local:80/api/tags` and pick the same model id. See §9 for
-the full endpoint table.
+the full endpoint table, or open `http://ai.local/models` → **Status**
+→ **Endpoints**: every route as a copy-ready URL for that host.
+
+Voice: anything that speaks the OpenAI audio API (`/v1/audio/transcriptions`)
+can send a WAV to the same base URL once `[STT] model` is set. The
+chat UI's mic chip needs `https://` (or `localhost`) — see
+`easyai-server.md` §1 `[STT]` for the TLS keys.
 
 ---
 
 ## 1. What gets installed where
 
 The installer (`scripts/install_easyai_server.sh`) follows the FHS
-roughly:
+roughly. Voice-related flags: `--stt-model <name>` picks the whisper
+model downloaded at install (default `large-v3-turbo-q5_0`, 547 MB;
+`none` skips it, `/models` can fetch one later), `--no-whisper` leaves
+whisper.cpp out of the build, `--tls` generates a self-signed
+certificate for `<mdns-hostname>.local` and switches the service to
+`https://` (accept it once per browser).
 
 | Path | Owned by | Mode | Purpose |
 | --- | --- | --- | --- |
 | `/usr/bin/easyai-server` | root:root | 755 | the binary |
 | `/usr/bin/easyai-cli` | root:root | 755 | OpenAI-shape client (talks to a remote server) |
 | `/usr/bin/easyai-local` | root:root | 755 | single-process REPL with a local model |
-| `/usr/lib/easyai/` | root:root | 755 | bundled `.so` files (libllama, libggml, libeasyai, …) |
+| `/usr/lib/easyai/` | root:root | 755 | bundled `.so` files (libllama, libggml, libwhisper, libeasyai, …) |
 | `/etc/easyai/` | root:easyai | 750 | operator configuration |
 | `/etc/easyai/system.txt_template` | root:easyai | 644 | system prompt template (refreshed on every `--upgrade`); copy to `system.txt` to activate a custom persona |
 | `/etc/easyai/system.txt` | root:easyai | 640 | **NOT installed by default** — created only by the operator (e.g. `sudo cp system.txt_template system.txt`); when present and `SERVER.system_file` is uncommented in `easyai.ini`, replaces the binary's built-in "Deep" prompt |
 | `/etc/easyai/api_key` | easyai:easyai | 600 | optional bearer-token gate |
+| `/etc/easyai/tls.crt`, `tls.key` | easyai:easyai | 644 / 600 | optional self-signed TLS pair (`--tls`): the box answers `https://`, which the chat's mic chip needs from other machines |
 | `/etc/easyai/external-tools/` | root:easyai | 750 | operator-defined tools (`EASYAI-*.tools`) |
 | `/etc/easyai/favicon[.ext]` | root:easyai | 644 | optional webui favicon |
 | `/var/lib/easyai/` | easyai:easyai | 750 | mutable agent state |
 | `/var/lib/easyai/rag/` | easyai:easyai | 750 | `memory` tool long-term store |
 | `/var/lib/easyai/workspace/` | easyai:easyai | 750 | sandbox for *_file and bash tools |
-| `/var/lib/easyai/models/` | easyai:easyai | 750 | the GGUF symlink target |
+| `/var/lib/easyai/models/` | easyai:easyai | 750 | the GGUF symlink target; also `ggml-*.bin` whisper models and the `stt.bin` symlink (`[STT] model`) |
 | `/etc/systemd/system/easyai-server.service` | root:root | 644 | the unit file |
 | `/etc/systemd/system/easyai-server.service.d/override.conf` | root:root | 644 | LimitMEMLOCK / LimitCORE / Environment overrides |
 
@@ -350,6 +362,7 @@ Sections:
 | `[SERVER]` | HTTP layer + paths + tool gating + MCP auth posture | active |
 | `[ENGINE]` | Model loading + inference tunables (context, ngl, KV, mlock, flash-attn, sampling, RoPE, split mode) | active |
 | `[MODEL_<pattern>]` | Per-model ENGINE overrides — same keys as `[ENGINE]`, matched by model filename substring | active |
+| `[STT]` | Voice transcription — whisper `model`, `language`, `threads` (see `easyai-server.md` §1) | active |
 | `[MCP_USER]` | Bearer-token auth for `/mcp` (one user per line, `name = token`) | active |
 | `[TOOLS]` | Per-tool ACL (`mcp_allowed = …, mcp_denied = …`) | reserved for future |
 
@@ -854,6 +867,7 @@ unchanged. Endpoints:
 | GET | `/v1/models` | OpenAI | OpenAI-shape list-models |
 | POST | `/v1/chat/completions` | OpenAI | the workhorse — streaming SSE, tools, sampling controls |
 | POST | `/v1/preset` | easyai | swap the ambient preset |
+| POST | `/v1/audio/transcriptions` | OpenAI | voice → text on whisper (`[STT] model`); multipart `file` WAV or raw `audio/wav`; `json` / `text` / `verbose_json` |
 | GET | `/v1/tools` | easyai | tool catalogue for the webui popover |
 | GET | `/api/tags` | Ollama | Ollama-shape list-models (LobeChat, OpenWebUI in Ollama mode, etc.) |
 | GET/POST | `/api/show` | Ollama | Ollama-shape model detail |

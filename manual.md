@@ -373,14 +373,18 @@ easyai expects llama.cpp as a sibling directory:
 ```
 develop/
 ├── easyai/        # this project
-└── llama.cpp/     # https://github.com/ggml-org/llama.cpp
+├── llama.cpp/     # https://github.com/ggml-org/llama.cpp
+└── whisper.cpp/   # optional — voice transcription (https://github.com/ggml-org/whisper.cpp)
 ```
 
-Clone llama.cpp if you haven't:
+Clone llama.cpp if you haven't (and whisper.cpp if you want
+`easyai::Stt` / the server's `/v1/audio/transcriptions`; it links the
+ggml already built for llama.cpp, so it costs no second backend):
 
 ```bash
 cd ~/develop
 git clone https://github.com/ggml-org/llama.cpp
+git clone https://github.com/ggml-org/whisper.cpp   # optional
 ```
 
 ### 1.2 Dependencies
@@ -521,7 +525,14 @@ prompt mid-session; `/reset` to wipe history.
 ./build/easyai-server -m models/qwen2.5-1.5b-instruct-q4_k_m.gguf
 ./build/easyai-server -m models/...gguf --sandbox ./work --allow-bash
 ./build/easyai-server -m models/...gguf -s system.txt
+./build/easyai-server -m models/...gguf --stt-model models/ggml-large-v3-turbo-q5_0.bin   # + voice
 ```
+
+With `--stt-model` the chat gets a mic chip and `POST
+/v1/audio/transcriptions` accepts WAV from any OpenAI-audio client
+(`curl -F file=@clip.wav http://localhost:8080/v1/audio/transcriptions`).
+The browser microphone needs `https://` or `localhost`; `--tls-cert` /
+`--tls-key` serve TLS from the same binary (see `easyai-server.md` §1).
 
 Without `-s`, the server boots up as **Deep** — an expert system
 engineer persona built into the default system prompt.  Deep

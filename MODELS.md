@@ -129,6 +129,12 @@ All keys live in `[SERVER]`; each has a matching CLI flag. Precedence is
 
 ---
 
+The **Status** tab also carries an **Endpoints** card: every route the
+server speaks (OpenAI-compatible, Ollama-compatible, Voice, MCP, Health,
+Web UI, Models API) as full URLs for this host, with method, auth
+posture and a copy button, plus the base URL to paste into OpenAI
+clients (`<origin>/v1`). Source: `GET /models/api/status` → `endpoints[]`.
+
 ## 4. The password gate
 
 The dashboard can download multi-gigabyte files, delete model files, and **swap
@@ -182,6 +188,19 @@ the server's `api_key` Bearer auth on `/v1/*`.
   exact keys/values that will apply), or a note that engine defaults apply.
 - **Run** hot-swaps to it (see §6); **Delete** removes it from disk (with
   confirmation; the running model can't be deleted).
+
+#### Voice transcription (STT) panel
+
+Below the GGUF table. It manages the whisper model that serves
+`POST /v1/audio/transcriptions` and the mic chip in the chat:
+
+- the running voice model (or why none is loaded), with **Unload**;
+- local `ggml-*.bin` files in `download_dir` with **Run**, **Run + slink**,
+  **Slink** (re-points `--stt-model`) and **Delete**;
+- the whisper.cpp catalogue (`ggerganov/whisper.cpp`: tiny … large-v3-turbo,
+  `.en` and `q5` variants) with sizes and a **Download** button; the
+  download shares the GGUF manager's worker and progress bar.
+  `large-v3-turbo-q5_0` is marked recommended for pt-BR + en.
 
 ### Downloads tab
 
@@ -260,6 +279,12 @@ is set.
 | POST | `/models/api/download` | `{"repo":"…","filename":"…"?}` → start a download (409 if one is running). |
 | GET | `/models/api/download/status` | `{id, repo, filename, state, downloaded_bytes, total_bytes, percent, error}`. |
 | POST | `/models/api/download/cancel` | Cancel the active download. |
+| GET | `/models/api/stt` | Voice model: `{available, loaded, model, model_path, configured_path, language, dir, local:[…], catalog:[{name, file, size_bytes, multilingual, recommended, note, downloaded}], download:{…}}`. |
+| POST | `/models/api/stt/download` | `{"name":"large-v3-turbo-q5_0"}` → fetch `ggml-<name>.bin` from `ggerganov/whisper.cpp` (409 if a download is running). |
+| POST | `/models/api/stt/run` | `{"name":"ggml-….bin", "link":false}` → hot-swap the voice model; `link:true` also re-points the `--stt-model` symlink. |
+| POST | `/models/api/stt/symlink` | `{"name":"…"}` → point `--stt-model` at that file (next start). |
+| POST | `/models/api/stt/unload` | Unload the voice model (route answers 503 until another is loaded). |
+| POST | `/models/api/stt/delete` | `{"name":"…"}` → delete one `ggml-*.bin` (409 for the running one). |
 
 Example:
 

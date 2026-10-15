@@ -38,6 +38,9 @@ option(EASYAI_INSTALL        "Generate install + find_package targets" ON)
 # AI box ships with the full tool set under $prefix/bin.
 option(EASYAI_BUILD_LLAMA_TOOLS "Also build llama.cpp tool binaries"   OFF)
 option(EASYAI_BUILD_TESTS       "Build the easyai unit tests (ctest)"    OFF)
+# Speech-to-text over the sibling ../whisper.cpp (links the ggml already
+# built for llama.cpp). Missing sibling → warning, Stt compiled out.
+option(EASYAI_WITH_WHISPER      "Build easyai::Stt against ../whisper.cpp" ON)
 
 # ----- 64-bit std::atomic probe ---------------------------------------------
 # Some service binaries declare `std::atomic<int64_t>` /
@@ -176,6 +179,7 @@ set(EASYAI_SOURCES
     src/cli_client.cpp
     src/agent.cpp
     src/session.cpp
+    src/stt.cpp
     # vendored httplib (see header comment above)
     ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor/cpp-httplib/httplib.cpp
 )
@@ -207,6 +211,31 @@ target_link_libraries(easyai PRIVATE
     "$<BUILD_INTERFACE:llama>"
     "$<BUILD_INTERFACE:llama-common>")
 target_compile_features(easyai PUBLIC cxx_std_17)
+
+# ------------------------------------------------------------------ whisper.cpp
+# Added AFTER llama.cpp so `TARGET ggml` already exists: whisper.cpp's own
+# CMake skips its bundled ggml in that case and links ours (Metal / CUDA /
+# Vulkan backends included). EXCLUDE_FROM_ALL keeps its examples and
+# tests out of the default build.
+if (EASYAI_WITH_WHISPER)
+    if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../whisper.cpp/CMakeLists.txt)
+        set(WHISPER_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+        set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(WHISPER_BUILD_SERVER   OFF CACHE BOOL "" FORCE)
+        set(WHISPER_ALL_WARNINGS   OFF CACHE BOOL "" FORCE)
+        if (NOT TARGET whisper)
+            add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../whisper.cpp
+                             ${CMAKE_BINARY_DIR}/_deps/whisper.cpp
+                             EXCLUDE_FROM_ALL)
+        endif()
+        target_link_libraries(easyai PRIVATE "$<BUILD_INTERFACE:whisper>")
+        target_include_directories(easyai PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../whisper.cpp/include)
+        target_compile_definitions(easyai PRIVATE EASYAI_HAVE_WHISPER=1)
+        message(STATUS "easyai: whisper.cpp found — Stt / POST /v1/audio/transcriptions enabled")
+    else()
+        message(WARNING "easyai: ../whisper.cpp not found — Stt compiled out (clone ggml-org/whisper.cpp next to easyai)")
+    endif()
+endif()
 
 if (EASYAI_WITH_CURL)
     find_package(CURL QUIET)
@@ -311,6 +340,14 @@ if (EASYAI_BUILD_SERVICES)
 
     add_executable(easyai-server services/server.cpp ${EASYAI_WEBUI_HEADERS})
     target_link_libraries(easyai-server PRIVATE easyai cpp-httplib llama-common ${EASYAI_ATOMIC_LIBS})
+    # --tls-cert/--tls-key: httplib::SSLServer lives behind this define. The
+    # library already builds httplib.cpp with it; the server TU needs the same
+    # view of the header to see the class (Request/Response/Server layouts do
+    # not change with it).
+    if (OpenSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
+        target_compile_definitions(easyai-server PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT=1)
+        target_link_libraries(easyai-server PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    endif()
 
     # easyai-server's VerboseServer subclass overrides the
     # httplib::Server::process_and_close_socket virtual to log per-TCP
@@ -373,6 +410,9 @@ if (EASYAI_BUILD_TESTS)
     add_executable(easyai-test-reasoning-effort tests/test_reasoning_effort.cpp)
     target_link_libraries(easyai-test-reasoning-effort PRIVATE easyai llama-common)
     add_test(NAME reasoning_effort COMMAND easyai-test-reasoning-effort)
+    add_executable(easyai-test-stt tests/test_stt.cpp)
+    target_link_libraries(easyai-test-stt PRIVATE easyai)
+    add_test(NAME stt COMMAND easyai-test-stt)
 endif()
 
 # ============================================================================
@@ -439,13 +479,17 @@ if (EASYAI_INSTALL)
             \"\${CMAKE_BINARY_DIR}/bin/libggml*.so*\"
             \"\${CMAKE_BINARY_DIR}/bin/libggml*.dylib\"
             \"\${CMAKE_BINARY_DIR}/bin/libllama*.so*\"
-            \"\${CMAKE_BINARY_DIR}/bin/libllama*.dylib\")
+            \"\${CMAKE_BINARY_DIR}/bin/libllama*.dylib\"
+            \"\${CMAKE_BINARY_DIR}/bin/libwhisper*.so*\"
+            \"\${CMAKE_BINARY_DIR}/bin/libwhisper*.dylib\")
         if (NOT _easyai_runtime_libs)
             file(GLOB _easyai_runtime_libs
                 \"${CMAKE_BINARY_DIR}/bin/libggml*.so*\"
                 \"${CMAKE_BINARY_DIR}/bin/libggml*.dylib\"
                 \"${CMAKE_BINARY_DIR}/bin/libllama*.so*\"
-                \"${CMAKE_BINARY_DIR}/bin/libllama*.dylib\")
+                \"${CMAKE_BINARY_DIR}/bin/libllama*.dylib\"
+            \"${CMAKE_BINARY_DIR}/bin/libwhisper*.so*\"
+            \"${CMAKE_BINARY_DIR}/bin/libwhisper*.dylib\")
         endif()
         foreach(_lib IN LISTS _easyai_runtime_libs)
             file(INSTALL DESTINATION

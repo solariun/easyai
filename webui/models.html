@@ -203,6 +203,14 @@
       </div>
       <div class="drawer panel" id="localDetail"><div class="empty">Select a local model to inspect its parameters and run it.</div></div>
     </div>
+    <!-- VOICE / STT -->
+    <div class="panel" style="padding:0;overflow:hidden;margin-top:16px">
+      <div style="padding:12px 14px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <b>Voice transcription (STT)</b><span class="muted small" id="sttMeta">whisper · POST /v1/audio/transcriptions</span>
+        <button class="btn small" style="margin-left:auto" onclick="loadStt()">Refresh</button>
+      </div>
+      <div id="sttWrap"><div class="empty">Loading…</div></div>
+    </div>
   </section>
 
   <!-- DOWNLOADS -->
@@ -412,6 +420,77 @@ async function loadLocal(){
     $('#localWrap').innerHTML=html;$('#dlLocalWrap').innerHTML=html;
   }catch(e){$('#localWrap').innerHTML='<div class="empty">'+esch(e.message)+'</div>';}
 }
+/* ---------- voice transcription (whisper) ---------- */
+let STT_TIMER=null;
+async function loadStt(){
+  clearTimeout(STT_TIMER);
+  let d;
+  try{d=await api('/models/api/stt');}
+  catch(e){$('#sttWrap').innerHTML='<div class="empty">'+esch(e.message)+'</div>';return;}
+  const dl=d.download||{};
+  const dlActive=dl.state==='downloading'&&/^ggml-.*\.bin$/.test(dl.filename||'');
+  $('#sttMeta').textContent=(d.loaded?'running: '+d.model:'no voice model loaded')+' · language '+(d.language||'auto')+' · '+esch(d.dir||'');
+  let head;
+  if(!d.available)head='<div class="empty">This build has no whisper.cpp — clone ggml-org/whisper.cpp next to easyai and rebuild.</div>';
+  else if(d.loaded)head=`<div style="padding:10px 14px" class="small"><span class="pill good">running</span> <b>${esch(d.model)}</b>
+      <span class="muted mono small">${esch(d.model_path)}</span>
+      <button class="btn small" style="margin-left:10px" onclick="sttUnload()">Unload</button></div>`;
+  else head=`<div style="padding:10px 14px" class="small"><span class="pill too_tight">not loaded</span> ${esch(d.error||'pick a model below')}
+      ${d.configured_path?'<span class="muted mono small"> · --stt-model '+esch(d.configured_path)+'</span>':''}</div>`;
+  const local=(d.local||[]).map(m=>`<tr>
+      <td><div>${esch(m.name)} ${m.is_current?'<span class="pill good">running</span>':''}</div>
+        <div class="muted small">${new Date(m.mtime*1000).toLocaleDateString()}</div></td>
+      <td class="num">${fmtBytes(m.size_bytes)}</td>
+      <td class="num" style="white-space:nowrap">
+        <button class="btn small acc" onclick="sttRun('${esch(m.name)}')" ${m.is_current?'disabled':''}>Run</button>
+        <button class="btn small" onclick="sttRun('${esch(m.name)}',true)" ${m.is_current?'disabled':''} title="Run now AND set as the default voice model (symlink)">Run + slink</button>
+        <button class="btn small" onclick="sttSlink('${esch(m.name)}')" title="Point --stt-model at this file; effective next start">Slink</button>
+        <button class="btn small danger" onclick="sttDelete('${esch(m.name)}')" ${m.is_current?'disabled':''}>Delete</button></td></tr>`).join('');
+  const localTbl=local?`<table><thead><tr><th>Local file</th><th class="num">Size</th><th class="num">Actions</th></tr></thead><tbody>${local}</tbody></table>`
+    :'<div class="empty">No ggml-*.bin whisper files in the model directory yet — download one below.</div>';
+  const cat=(d.catalog||[]).map(c=>`<tr>
+      <td><div>${esch(c.name)} ${c.recommended?'<span class="pill good">recommended</span>':''} ${c.multilingual?'':'<span class="pill ghost">en only</span>'}</div>
+        <div class="muted small">${esch(c.note||'')}</div></td>
+      <td class="num">${fmtBytes(c.size_bytes)}</td>
+      <td class="num">${c.downloaded?'<span class="muted small">downloaded</span>'
+        :(dlActive&&dl.filename===c.file?`<span class="small"><span class="spin"></span> ${f2(dl.percent,0)}%</span>`
+        :`<button class="btn small acc" onclick="sttDownload('${esch(c.name)}')" ${dl.state==='downloading'?'disabled':''}>Download</button>`)}</td></tr>`).join('');
+  const catTbl=`<table><thead><tr><th>Catalogue · ${esch(d.repo||'')}</th><th class="num">Size</th><th class="num"></th></tr></thead><tbody>${cat}</tbody></table>`;
+  const dlLine=dlActive?`<div style="padding:8px 14px" class="small"><span class="spin"></span> ${esch(dl.filename)} · ${fmtBytes(dl.downloaded_bytes)} / ${fmtBytes(dl.total_bytes)} · ${f2(dl.percent,1)}%
+      <div class="bar" style="margin-top:6px"><i style="width:${f2(dl.percent,1)}%"></i></div></div>`
+    :(dl.state==='error'&&/^ggml-/.test(dl.filename||'')?`<div style="padding:8px 14px;color:var(--bad)" class="small">download error: ${esch(dl.error)}</div>`:'');
+  $('#sttWrap').innerHTML=head+dlLine+localTbl+catTbl;
+  if(dlActive)STT_TIMER=setTimeout(loadStt,1500);
+}
+async function sttDownload(name){
+  toast('Downloading ggml-'+name+'.bin …');
+  try{await api('/models/api/stt/download',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});loadStt();}
+  catch(e){toast(e.message,true);}
+}
+async function sttRun(name,link){
+  const msg=link?'Run "'+name+'" for voice now AND set it as the default voice model (symlink)?':'Load "'+name+'" as the voice model now? Does not change the boot default — use Slink for that.';
+  if(!confirm(msg))return;
+  toast('Loading '+name+' …');
+  try{let r=await api('/models/api/stt/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,link:!!link})});
+    if(link&&!r.linked)toast('Voice model running, but symlink failed: '+(r.link_error||'unknown'),true);
+    else toast('Voice model: '+r.model+(link?' (set as default)':''));
+    loadStt();}catch(e){toast(e.message,true);}
+}
+async function sttSlink(name){
+  if(!confirm('Point --stt-model at "'+name+'"? Effective on the next restart; the running voice model is unchanged.'))return;
+  try{await api('/models/api/stt/symlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    toast(name+' set as default voice model');loadStt();}catch(e){toast(e.message,true);}
+}
+async function sttUnload(){
+  if(!confirm('Unload the voice model? The mic chip in the chat stops working until another is loaded.'))return;
+  try{await api('/models/api/stt/unload',{method:'POST'});toast('Voice model unloaded');loadStt();}catch(e){toast(e.message,true);}
+}
+async function sttDelete(name){
+  if(!confirm('Delete "'+name+'" from disk?'))return;
+  try{await api('/models/api/stt/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    toast(name+' deleted');loadStt();}catch(e){toast(e.message,true);}
+}
+
 async function localDetail(file,tr){
   $$('#localWrap tr.sel').forEach(x=>x.classList.remove('sel'));if(tr)tr.classList.add('sel');
   $('#localDetail').innerHTML='<div class="empty"><span class="spin"></span></div>';
@@ -514,6 +593,7 @@ function fmtDur(s){s=Math.max(0,Math.floor(s||0));let d=Math.floor(s/86400),h=Ma
   if(d)return d+'d '+h+'h';if(h)return h+'h '+m+'m';if(m)return m+'m '+sec+'s';return sec+'s';}
 function feat(on,label,warn){return `<span class="feat ${on?'on':''} ${warn?'warn':''}"><span class="d"></span>${esch(label)}</span>`;}
 function kvrows(pairs){return pairs.map(([k,v])=>`<span class="k">${esch(k)}</span><span class="v">${v}</span>`).join('');}
+function copyText(t){try{navigator.clipboard.writeText(t).then(()=>toast('copied: '+t),()=>toast('copy failed — select the text manually',true));}catch(e){toast('copy failed — select the text manually',true);}}
 function stcard(title,body){return `<div class="panel stcard"><h3>${title}</h3>${body}</div>`;}
 function scheduleStatus(){clearTimeout(STATUS_TIMER);
   const onTab=$('#tab-status')&&!$('#tab-status').classList.contains('hide');
@@ -558,7 +638,8 @@ async function loadStatus(){
   const services=`<div class="chips">
     ${feat(true,'MCP')}${feat(sc.mcp_auth,'MCP auth',true)}${feat(sc.api_auth,'API auth')}${feat(sc.models_auth,'/models gate')}
     ${feat(sc.memory_rag,'RAG')}${feat(sc.allow_fs,'fs',true)}${feat(sc.allow_bash,'bash',true)}${feat(sc.google_search,'google')}
-    ${feat(sc.metrics,'metrics')}${feat(sc.datetime_injection,'datetime')}${feat(sc.verbose,'verbose')}</div>
+    ${feat(sc.metrics,'metrics')}${feat(sc.datetime_injection,'datetime')}${feat(sc.verbose,'verbose')}
+    ${feat(sc.stt_loaded,'voice STT')}${feat(sc.tls,'TLS')}</div>
     <div class="kv" style="margin-top:8px">${kvrows([
       ['WebUI',esch(sc.webui_mode||'–')],['Knowledge cutoff',esch(sc.knowledge_cutoff||'–')],
       ['Sandbox',esch(sc.sandbox||'—')],['Memory dir',esch(sc.memory_dir||'—')],
@@ -590,6 +671,26 @@ async function loadStatus(){
   else dlBody='<div class="muted small">idle — no active download</div>';
   const dlCard=stcard('Download',dlBody);
 
+  const fams=[];const byFam={};
+  for(const ep of (d.endpoints||[])){if(!byFam[ep.family]){byFam[ep.family]=[];fams.push(ep.family);}byFam[ep.family].push(ep);}
+  const authPill=a=>a==='open'?'<span class="pill ghost">open</span>':`<span class="pill">${esch(a)}</span>`;
+  const epRows=fams.map(f=>`<div class="muted small" style="margin:10px 0 4px;text-transform:uppercase;letter-spacing:.04em">${esch(f)}</div>`+
+    byFam[f].map(ep=>{const url=location.origin+ep.path;
+      return `<div class="toolrow" style="${ep.enabled?'':'opacity:.45'}"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="mono small" style="min-width:3.2em;color:var(--acc)">${esch(ep.method)}</span>
+        <span class="mono small">${esch(url)}</span>
+        <button class="btn small" title="Copy URL" onclick="copyText('${esch(url)}')">copy</button>
+        ${authPill(ep.auth)}${ep.enabled?'':'<span class="pill ghost">off</span>'}</div>
+        <div class="muted small">${esch(ep.description||'')}</div></div>`;}).join('')).join('');
+  const base=location.origin;
+  const endpointsCard=stcard('Endpoints <span class="muted">(connect other tools here)</span>',`<div class="kv">${kvrows([
+      ['OpenAI base URL',`<span class="mono small">${esch(base)}/v1</span> <button class="btn small" onclick="copyText('${esch(base)}/v1')">copy</button>`],
+      ['Ollama host',`<span class="mono small">${esch(base)}</span> <button class="btn small" onclick="copyText('${esch(base)}')">copy</button>`],
+      ['Voice (STT)',`<span class="mono small">${esch(base)}/v1/audio/transcriptions</span>${sc.stt_loaded?' <span class="pill good">'+esch(sc.stt_model||'')+'</span>':' <span class="pill ghost">no model</span>'}`],
+      ['API auth',sc.api_auth?'Authorization: Bearer &lt;api_key&gt; on /v1/* and /api/*':'open (set [SERVER] api_key to require a token)'],
+      ['Scheme',sc.tls?'https (TLS on)':'http (microphone needs https or localhost — see --tls-cert)'],
+    ])}</div><div class="toollist" style="margin-top:6px">${epRows||'<div class="muted small">no directory from server</div>'}</div>`);
+
   const la=mt.load_avg||[];
   const metricsCard=stcard('Request metrics',`<div class="kv">${kvrows([
     ['Requests',fmtNum(mt.requests)],['Errors',fmtNum(mt.errors)],['Tool calls',fmtNum(mt.tool_calls)],
@@ -601,7 +702,7 @@ async function loadStatus(){
 
   $('#statusWrap').innerHTML=`<div class="stgrid">`+
     `<div class="stcol">${serverCard}${modelCard}${paramsCard}</div>`+
-    `<div class="stcol">${servicesCard}</div>`+
+    `<div class="stcol">${endpointsCard}${servicesCard}</div>`+
     `<div class="stcol">${hwCard}${catCard}${dlCard}${metricsCard}</div>`+
     `</div>`;
   scheduleStatus();
@@ -611,6 +712,7 @@ async function loadStatus(){
 function switchTab(t){$$('nav.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));
   $$('main > section').forEach(s=>s.classList.toggle('hide',s.id!=='tab-'+t));
   if(t==='local'||t==='downloads')loadLocal();
+  if(t==='local')loadStt();
   if(t==='downloads')pollDl();
   if(t==='status')loadStatus(); else clearTimeout(STATUS_TIMER);}
 $$('nav.tabs button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));

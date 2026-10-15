@@ -27,7 +27,7 @@ the lib surface.
 |----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
 | `easyai-local`       | Local-only REPL: loads a GGUF in-process via `easyai::Engine` (driven through `easyai::Session`). Drop-in `llama-cli` replacement — one-shot scripting (`-p`), tools, presets, optional `<think>` strip, sandboxed `*_file` tools, opt-in `bash` tool. |
 | `easyai-cli`         | Agentic OpenAI-protocol client — no local model.  Full-screen chat **TUI** (opencode-style look & feel: markdown, live tool rows with diffs, `/`-command + `@`-file completion, themes — default for interactive terminals; `--plain` for the legacy line REPL), `--shell` (hybrid AI shell), or `-p` one-shot.  Full sampling control (`--temperature`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--frequency-penalty`, `--presence-penalty`, `--seed`, `--max-tokens`, `--stop`), plan tool, server-management subcommands (`--list-models`, `--list-tools`, `--health`, `--props`, `--metrics`, `--set-preset`).  HTTPS via OpenSSL; `--insecure-tls` / `--ca-cert` for dev/internal CAs.  Full doc: [`easyai-cli.md`](easyai-cli.md). |
-| `easyai-server`      | Drop-in `llama-server` replacement: OpenAI-compat HTTP **with full SSE streaming**, embedded SvelteKit webui, Bearer auth, Prometheus `/metrics`, KV-cache controls, flash-attn, mlock.  Built-in **[MODELS dashboard](MODELS.md)** (`/models`) — native hardware-aware model recommendations, local-model parameters + in-process hot-swap, and a GGUF download manager, password-gated.  Speaks MCP, OpenAI, Ollama from one process.  Full doc: [`easyai-server.md`](easyai-server.md). |
+| `easyai-server`      | Drop-in `llama-server` replacement: OpenAI-compat HTTP **with full SSE streaming**, embedded SvelteKit webui, Bearer auth, Prometheus `/metrics`, KV-cache controls, flash-attn, mlock.  Built-in **[MODELS dashboard](MODELS.md)** (`/models`) — native hardware-aware model recommendations, local-model parameters + in-process hot-swap, a GGUF download manager and a whisper voice-model panel, password-gated.  Speaks MCP, OpenAI, Ollama and OpenAI audio (`/v1/audio/transcriptions`, mic chip in the chat) from one process; optional TLS.  Full doc: [`easyai-server.md`](easyai-server.md). |
 | `easyai-mcp-server`  | **Standalone Model Context Protocol provider — no model loaded.** Same tool catalogue as `easyai-server` (built-ins + knowledge tools + external-tools), exposed over `POST /mcp` with a configurable cpp-httplib worker pool (`--threads`) and an in-flight `tools/call` cap (`--max-concurrent-calls`) for thousands-of-clients deployments.  Full doc: [`easyai-mcp-server.md`](easyai-mcp-server.md). |
 | `easyai-library-demo`| Five-line `easyai::Session` template — pair with [`LIB_GUIDE.md`](LIB_GUIDE.md).  The smallest "build an agent, register a tool, chat" program in the repo. |
 | `easyai-agent`       | A demo agent showing every built-in tool plus an inline custom tool.                                                                                |
@@ -93,6 +93,29 @@ Full catalogue and safety model: **[`AI_TOOLS.md`](AI_TOOLS.md)**.
 A running log of user-facing changes. Latest first — keep this list
 current as features land so anyone returning to the repo (or
 landing on it for the first time) sees what shipped recently.
+
+### 2026-10-15 — Voice transcription (whisper) + endpoint directory
+
+- **`POST /v1/audio/transcriptions`** — OpenAI-shaped speech-to-text on a
+  [whisper.cpp](https://github.com/ggml-org/whisper.cpp) model loaded next
+  to the chat model (`[STT] model` / `--stt-model`). WAV in (multipart or
+  raw `audio/wav`), `json` / `text` / `verbose_json` out. Own lock, so a
+  transcription never waits behind a chat generation.
+- **Mic chip in the chat** (bundle and minimal webui): click to record,
+  click to stop; the browser converts to 16 kHz WAV, the server
+  transcribes, the text lands in the prompt box for you to check. Needs
+  `https://` or `localhost` — new `--tls-cert` / `--tls-key` serve TLS
+  from the same binary.
+- **`/models` → Local models → Voice transcription**: download from the
+  whisper.cpp catalogue, Run / Run + slink / Slink / Delete, same flow
+  as GGUFs.
+- **`/models` → Status → Endpoints**: every route the server speaks
+  (OpenAI, Ollama, Voice, MCP, Health, Web UI, Models API) as
+  copy-ready URLs with auth posture — connect any other tool by
+  pasting.
+- Library: `easyai::Stt` + model-free `decode_wav` / `resample_linear`
+  (`tests/test_stt.cpp`, ctest `stt`). Build: `EASYAI_WITH_WHISPER`
+  (default ON) picks up `../whisper.cpp` and links the ggml already built.
 
 ### 2026-05-27 — Unified library + `easyai::Session` (OpenAI-Python-SDK shape)
 
@@ -2295,7 +2318,8 @@ Operators who want a different persona pass `--system "<text>"` or
 ```
 develop/
 ├── easyai/        # this project
-└── llama.cpp/     # cloned next to it (https://github.com/ggml-org/llama.cpp)
+├── llama.cpp/     # cloned next to it (https://github.com/ggml-org/llama.cpp)
+└── whisper.cpp/   # optional, voice transcription (https://github.com/ggml-org/whisper.cpp)
 ```
 
 ```bash

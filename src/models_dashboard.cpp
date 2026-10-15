@@ -1488,7 +1488,7 @@ std::string ModelsEngine::hf_detail_json(const std::string & repo, const std::st
 #endif
 }
 
-bool ModelsEngine::hf_repo_files(const std::string & repo, std::vector<RepoFile> & out, std::string & err) {
+bool ModelsEngine::hf_repo_files(const std::string & repo, std::vector<RepoFile> & out, std::string & err, bool gguf_only) {
     out.clear();
 #if !defined(EASYAI_HAVE_CURL)
     (void) repo; err = "server built without libcurl"; return false;
@@ -1503,13 +1503,42 @@ bool ModelsEngine::hf_repo_files(const std::string & repo, std::vector<RepoFile>
         for (const auto & e : j) {
             if (e.value("type", std::string()) != "file") continue;
             std::string path = e.value("path", std::string());
-            if (!ends_with_ci(path, ".gguf")) continue;
+            if (gguf_only && !ends_with_ci(path, ".gguf")) continue;
             RepoFile f; f.path = path; f.size_bytes = e.value("size", (std::uint64_t) 0);
             out.push_back(std::move(f));
         }
     } catch (const std::exception & e) { err = std::string("parse: ") + e.what(); return false; }
     if (out.empty()) err = "no .gguf files in " + repo;
     return !out.empty();
+#endif
+}
+
+int ModelsEngine::start_download_file(const std::string & repo, const std::string & path, std::string & err) {
+#if !defined(EASYAI_HAVE_CURL)
+    (void) repo; (void) path; err = "server built without libcurl"; return -1;
+#else
+    std::lock_guard<std::mutex> start_lk(dl_start_mu_);
+    { std::lock_guard<std::mutex> lk(dl_mu_); if (st_.state == "downloading") { err = "a download is already in progress"; return -1; } }
+    if (path.empty() || path.find('/') != std::string::npos || path.find("..") != std::string::npos) { err = "invalid filename"; return -1; }
+
+    std::vector<RepoFile> files;
+    if (!hf_repo_files(repo, files, err, /* gguf_only */ false)) return -1;
+    RepoFile target; bool found = false;
+    for (auto & f : files) if (base_name(f.path) == path) { target = f; found = true; break; }
+    if (!found) { err = path + " not found in " + repo; return -1; }
+
+    fs::path dest; std::string verr;
+    if (!safe_in_dir(download_dir_, path, dest, verr)) { err = verr; return -1; }
+    std::error_code ec;
+    if (fs::exists(dest, ec)) { err = "already downloaded: " + path + " — delete it first"; return -1; }
+
+    if (worker_.joinable()) worker_.join();
+    int id;
+    { std::lock_guard<std::mutex> lk(dl_mu_); cancel_.store(false); id = ++next_id_;
+      st_ = DownloadStatus{}; st_.id = id; st_.repo = repo; st_.filename = path; st_.state = "downloading"; }
+    worker_ = std::thread(&ModelsEngine::download_worker, this, id, repo, std::vector<RepoFile>{target});
+    easyai::log::write("[models] download #%d %s/%s -> %s\n", id, repo.c_str(), path.c_str(), download_dir_.c_str());
+    return id;
 #endif
 }
 

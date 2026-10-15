@@ -5,7 +5,7 @@
 # What this script does:
 #   1. Installs build deps (CMake/Ninja/git/pkg-config + libcurl) and the
 #      backend SDK that matches your hardware (Vulkan / CUDA / ROCm-HIP).
-#   2. Clones llama.cpp + easyai (or uses existing sibling dirs).
+#   2. Clones llama.cpp + whisper.cpp + easyai (or uses existing sibling dirs).
 #   3. Builds easyai (libeasyai + easyai-local + easyai-cli + easyai-server
 #      + easyai-agent + easyai-recipes + easyai-chat) with the selected
 #      GPU backend.
@@ -79,6 +79,11 @@
 #                                                    # (only the template ships).
 #   ./install_easyai_server.sh --enable-now          # systemctl start now
 #   ./install_easyai_server.sh --enable-verbose      # bake --verbose into ExecStart (noisy)
+#   ./install_easyai_server.sh --no-whisper          # skip voice transcription (whisper.cpp)
+#   ./install_easyai_server.sh --stt-model small     # whisper model to download (default
+#                                                    #   large-v3-turbo-q5_0, 547 MB; "none" = skip)
+#   ./install_easyai_server.sh --tls                 # self-signed https (browser microphone on
+#                                                    #   a LAN host needs https or localhost)
 #   ./install_easyai_server.sh --no-llama-tools      # skip the llama.cpp tool
 #                                                    # binaries (llama-cli,
 #                                                    # llama-server,
@@ -184,8 +189,10 @@ set -euo pipefail
 src_root="${src_root:-$HOME/opt}"
 easyai_dir="$src_root/easyai"
 llama_dir="$src_root/llama.cpp"
+whisper_dir="$src_root/whisper.cpp"
 easyai_repo="${easyai_repo:-https://github.com/solariun/easy.git}"
 llama_repo="${llama_repo:-https://github.com/ggml-org/llama.cpp.git}"
+whisper_repo="${whisper_repo:-https://github.com/ggml-org/whisper.cpp.git}"
 easyai_ref=""                                 # empty = main; pass --ref <sha|tag>
 llama_ref=""                                  # empty = main; pass --llama-ref
 
@@ -271,6 +278,11 @@ tdp_watts=54                                  # STAPM / PPT-SLOW / PPT-FAST
 tdp_tctl=95                                   # Tctl junction temp cap in °C.
                                               # 95 = chip max; lower throttles
                                               # earlier. Override --tdp-tctl.
+do_whisper=1                                  # clone ../whisper.cpp so the
+                                              # server gets voice transcription
+                                              # (POST /v1/audio/transcriptions,
+                                              # mic chip). --no-whisper skips
+                                              # it; the route then answers 503.
 do_llama_tools=1                              # also build + install
                                               # llama.cpp's CLI tools
                                               # (llama-cli, llama-server,
@@ -292,6 +304,16 @@ service_group="easyai"
 service_home="/var/lib/easyai"
 service_model_dir="$service_home/models"
 service_model_link="ai.gguf"
+service_stt_link="stt.bin"                    # [STT] model symlink; /models → Voice → Slink re-points it
+stt_model="large-v3-turbo-q5_0"               # whisper model downloaded at install into
+                                              # $service_model_dir as ggml-<name>.bin and
+                                              # linked as stt.bin. "none" = no download
+                                              # (pick one later from /models). --stt-model.
+stt_hf_repo="ggerganov/whisper.cpp"
+do_tls=0                                      # --tls: generate a self-signed certificate
+                                              # (CN=<mdns-hostname>.local) under $config_dir
+                                              # and enable [SERVER] tls_cert/tls_key so the
+                                              # chat's mic chip works from other machines.
 service_workspace="$service_home/workspace"
 service_data_dir="$service_home/data"          # /models dashboard catalog cache (easyai_hf_catalog.json)
 service_host="0.0.0.0"
@@ -447,7 +469,7 @@ model_src=""                                  # required when --no-model NOT pas
 # ---------- arg parsing -----------------------------------------------------
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --src-root)         src_root="$2"; easyai_dir="$src_root/easyai"; llama_dir="$src_root/llama.cpp"; shift 2 ;;
+        --src-root)         src_root="$2"; easyai_dir="$src_root/easyai"; llama_dir="$src_root/llama.cpp"; whisper_dir="$src_root/whisper.cpp"; shift 2 ;;
         --easyai-dir)       easyai_dir="$2"; shift 2 ;;
         --llama-dir)        llama_dir="$2"; shift 2 ;;
         --easyai-repo)      easyai_repo="$2"; shift 2 ;;
@@ -468,6 +490,11 @@ while [[ $# -gt 0 ]]; do
         --no-avahi)         do_avahi=0; shift ;;
         --no-presets)       do_presets=0; shift ;;
         --no-llama-tools)   do_llama_tools=0; shift ;;
+        --no-whisper)       do_whisper=0; shift ;;
+        --with-whisper)     do_whisper=1; shift ;;
+        --stt-model)        stt_model="$2"; shift 2 ;;
+        --tls)              do_tls=1; shift ;;
+        --no-tls)           do_tls=0; shift ;;
         --with-llama-tools) do_llama_tools=1; shift ;;
         --no-lemonade)      do_lemonade=0; shift ;;
         --with-lemonade)    do_lemonade=1; shift ;;
@@ -657,6 +684,7 @@ case "$preset" in
     auto|deterministic|precise|balanced|creative|wild) ;;
     *) die "--preset: must be one of auto|deterministic|precise|balanced|creative|wild, got: $(printf '%q' "$preset")" ;;
 esac
+[[ "$stt_model" =~ ^[A-Za-z0-9._-]+$ ]] || die "--stt-model: letters, digits, . _ - only, got: $(printf '%q' "$stt_model")"
 case "$reasoning_effort" in
     auto|low|medium|high|xhigh|max|minimal) ;;
     *) die "--reasoning-effort: must be one of auto|low|medium|high|xhigh|max|minimal, got: $(printf '%q' "$reasoning_effort")" ;;
@@ -753,6 +781,8 @@ printf '    webui_password   = %s   (gates /models dashboard%s)\n' \
     "${webui_password:-<empty — /models is open>}" \
     "$([[ "$webui_password" == "0000" ]] && echo " — DEFAULT 0000, change for non-LAN" || echo "")"
 printf '    api_key          = %s\n' "$([[ -n "$api_key" ]] && echo "<set>" || echo "<none — server is open>")"
+printf '    whisper (voice)  = %s\n' "$([[ $do_whisper -eq 1 ]] && echo "ON — $whisper_dir, [STT] model = $service_model_dir/$service_stt_link (download: $stt_model)" || echo "off (--with-whisper to enable)")"
+printf '    tls              = %s\n' "$([[ $do_tls -eq 1 ]] && echo "self-signed, CN=$mdns_hostname.local → https://$mdns_hostname.local:$service_port" || echo "off (--tls for the browser microphone on the LAN)")"
 printf '    model_src        = %s\n' "${model_src:-<none — pass --model PATH>}"
 printf '    flags            = install:%s build:%s groups:%s limits:%s kernel:%s\n' \
     "$do_install" "$do_build" "$do_groups" "$do_limits" "$do_kernel"
@@ -966,9 +996,14 @@ fetch_repo() {
 
 # llama.cpp must sit next to easyai (CMakeLists looks at ../llama.cpp).
 fetch_repo "$llama_dir"  "$llama_repo"  "$llama_ref"
+# whisper.cpp (optional) likewise: ../whisper.cpp → easyai::Stt + the
+# server's /v1/audio/transcriptions. It links the ggml built for llama.cpp.
+if [[ $do_whisper -eq 1 ]]; then
+    fetch_repo "$whisper_dir" "$whisper_repo" ""
+fi
 fetch_repo "$easyai_dir" "$easyai_repo" "$easyai_ref"
 
-# Symlink llama.cpp as a sibling of easyai if they aren't already.
+# Symlink llama.cpp (and whisper.cpp) as siblings of easyai if they aren't already.
 expected_llama="$(dirname "$easyai_dir")/llama.cpp"
 if [[ "$llama_dir" != "$expected_llama" ]]; then
     if [[ ! -e "$expected_llama" ]]; then
@@ -978,11 +1013,21 @@ if [[ "$llama_dir" != "$expected_llama" ]]; then
         warn "$expected_llama exists and is not a symlink; leaving it alone"
     fi
 fi
+expected_whisper="$(dirname "$easyai_dir")/whisper.cpp"
+if [[ $do_whisper -eq 1 && "$whisper_dir" != "$expected_whisper" ]]; then
+    if [[ ! -e "$expected_whisper" ]]; then
+        log "symlinking $whisper_dir → $expected_whisper"
+        ln -s "$whisper_dir" "$expected_whisper"
+    elif [[ ! -L "$expected_whisper" ]]; then
+        warn "$expected_whisper exists and is not a symlink; leaving it alone"
+    fi
+fi
 
 # ---------- build easyai ----------------------------------------------------
 if [[ $do_build -eq 1 ]]; then
     log "configuring easyai build (backend=$backend_resolved)"
-    cmake_flags=( -DCMAKE_BUILD_TYPE=Release -DEASYAI_BUILD_SERVICES=ON )
+    cmake_flags=( -DCMAKE_BUILD_TYPE=Release -DEASYAI_BUILD_SERVICES=ON
+                  -DEASYAI_WITH_WHISPER=$([[ $do_whisper -eq 1 ]] && echo ON || echo OFF) )
     if [[ $do_llama_tools -eq 1 ]]; then
         cmake_flags+=( -DEASYAI_BUILD_LLAMA_TOOLS=ON )
     fi
@@ -1089,6 +1134,7 @@ if [[ $do_build -eq 1 ]]; then
     done < <(find "$easyai_dir/build" \
                   \( -name 'libllama*.so*' -o -name 'libggml*.so*' \
                   -o -name 'libllama-common*.so*' -o -name 'libllava*.so*' \
+                  -o -name 'libwhisper*.so*' \
                   -o -name 'libcpp-httplib*.so*' \) -print 2>/dev/null)
     log "copied $copied shared library entries"
 
@@ -1482,6 +1528,17 @@ model           = $service_model_dir/$service_model_link
 host            = $service_host
 port            = $service_port
 # alias           = $service_alias
+
+# TLS: serve https from the same binary. Browsers expose the microphone
+# (the chat's voice chip) only on https:// or localhost, so a LAN host
+# needs this — or Chrome's unsafely-treat-insecure-origin-as-secure flag.
+# Self-signed is fine on a LAN (accept it once in the browser):
+#   openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \\
+#     -keyout $config_dir/tls.key -out $config_dir/tls.crt \\
+#     -subj "/CN=ai.local" -addext "subjectAltName=DNS:ai.local"
+#   chown $service_user:$service_group $config_dir/tls.key && chmod 600 $config_dir/tls.key
+$([[ $do_tls -eq 1 ]] && echo "tls_cert        = $config_dir/tls.crt" || echo "# tls_cert        = $config_dir/tls.crt")
+$([[ $do_tls -eq 1 ]] && echo "tls_key         = $config_dir/tls.key" || echo "# tls_key         = $config_dir/tls.key")
 sandbox         = $service_workspace
 
 # system_file: path to a custom persona that REPLACES the binary's
@@ -1571,6 +1628,20 @@ metrics_interval = 300
 # expose port 80 on a public IP, switch to 'on' and populate
 # [MCP_USER] below with a strong token (openssl rand -hex 32).
 mcp_auth        = off
+
+# ============================================================
+# [STT] — voice transcription (whisper.cpp)
+# ============================================================
+# Serves POST /v1/audio/transcriptions (OpenAI audio shape) and the mic
+# chip in the chat. \`model\` is a whisper ggml-*.bin — here a symlink the
+# /models dashboard (Local models → Voice transcription) re-points when
+# you Download + Run + slink one. A missing file is NOT fatal: the server
+# starts, /health reports stt_loaded=false, the route answers 503.
+# Recommended for pt-BR + en on a small box: large-v3-turbo-q5_0 (547 MB).
+[STT]
+$([[ $do_whisper -eq 1 ]] && echo "model           = $service_model_dir/$service_stt_link" || echo "# model           = $service_model_dir/$service_stt_link   (build had --no-whisper)")
+language        = auto
+# threads         = 0
 
 # ============================================================
 # [ENGINE] — model loading and inference tunables
@@ -2138,6 +2209,62 @@ if [[ $do_service -eq 1 && $do_model -eq 1 && -n "$model_src" ]]; then
     sudo ln -sfn "$(basename "$model_src")" "$service_model_dir/$service_model_link"
 fi
 
+# ---------- voice model (whisper) --------------------------------------------
+# Download ggml-<name>.bin from HuggingFace into the models dir and point the
+# [STT] symlink at it, unless a link already exists (an operator's choice from
+# /models → Voice → Slink survives a re-run). "none" skips the download; the
+# server still starts and /models can fetch one later.
+if [[ $do_service -eq 1 && $do_whisper -eq 1 && "$stt_model" != "none" ]]; then
+    stt_file="ggml-$stt_model.bin"
+    stt_dest="$service_model_dir/$stt_file"
+    stt_link="$service_model_dir/$service_stt_link"
+    sudo install -d -m755 -o "$service_user" -g "$service_group" "$service_model_dir"
+    if [[ -f "$stt_dest" ]]; then
+        log "voice model already present: $stt_dest"
+    else
+        log "downloading whisper model $stt_file (from $stt_hf_repo) → $stt_dest"
+        if sudo curl -fL --retry 3 --progress-bar -o "$stt_dest.part" \
+                "https://huggingface.co/$stt_hf_repo/resolve/main/$stt_file"; then
+            sudo mv "$stt_dest.part" "$stt_dest"
+            sudo chown "$service_user":"$service_group" "$stt_dest"
+            sudo chmod 640 "$stt_dest"
+        else
+            sudo rm -f "$stt_dest.part"
+            warn "whisper model download failed — voice stays off until one is fetched from /models → Local models → Voice transcription"
+        fi
+    fi
+    if [[ -f "$stt_dest" ]]; then
+        if [[ -L "$stt_link" && -e "$stt_link" ]]; then
+            log "keeping existing voice symlink $stt_link → $(readlink "$stt_link")"
+        else
+            log "symlinking $stt_link → $stt_file"
+            sudo ln -sfn "$stt_file" "$stt_link"
+        fi
+    fi
+fi
+
+# ---------- TLS (self-signed) ------------------------------------------------
+# Browsers expose the microphone only on https:// or localhost. --tls makes
+# the box answer https with a self-signed certificate (accept it once per
+# browser). Existing cert/key are kept on re-run.
+if [[ $do_service -eq 1 && $do_tls -eq 1 ]]; then
+    tls_crt="$config_dir/tls.crt"; tls_key="$config_dir/tls.key"
+    if [[ -f "$tls_crt" && -f "$tls_key" ]]; then
+        log "keeping existing TLS certificate $tls_crt"
+    else
+        command -v openssl >/dev/null 2>&1 || die "--tls needs openssl (apt-get install openssl)"
+        log "generating self-signed TLS certificate for $mdns_hostname.local → $tls_crt"
+        sudo install -d -m755 "$config_dir"
+        sudo openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -keyout "$tls_key" -out "$tls_crt" \
+            -subj "/CN=$mdns_hostname.local" \
+            -addext "subjectAltName=DNS:$mdns_hostname.local,DNS:$mdns_hostname,DNS:localhost,IP:127.0.0.1" \
+            >/dev/null 2>&1 || die "openssl certificate generation failed"
+    fi
+    sudo chown "$service_user":"$service_group" "$tls_key" "$tls_crt"
+    sudo chmod 600 "$tls_key"; sudo chmod 644 "$tls_crt"
+fi
+
 # ---------- systemd unit ----------------------------------------------------
 if [[ $do_service -eq 1 ]]; then
     if [[ $do_force_service -eq 1 ]]; then
@@ -2669,16 +2796,22 @@ fi
 echo
 log "DONE."
 echo
+scheme="$([[ $do_tls -eq 1 ]] && echo https || echo http)"
 printf '  binary    : %s\n' "$install_prefix/bin/easyai-server"
 printf '  shortcut  : %s\n' "$install_prefix/bin/ai (-> easyai-cli)"
 printf '  service   : %s\n' "$service_name"
-printf '  webui     : http://%s:%s/\n' \
+printf '  webui     : %s://%s:%s/\n' "$scheme" \
     "$([[ "$service_host" == "0.0.0.0" ]] && hostname || echo "$service_host")" "$service_port"
-printf '  api base  : http://%s:%s/v1\n' \
+printf '  api base  : %s://%s:%s/v1\n' "$scheme" \
     "$([[ "$service_host" == "0.0.0.0" ]] && hostname || echo "$service_host")" "$service_port"
-printf '  health    : http://localhost:%s/health\n' "$service_port"
+printf '  voice     : %s://%s:%s/v1/audio/transcriptions   (%s)\n' "$scheme" \
+    "$([[ "$service_host" == "0.0.0.0" ]] && hostname || echo "$service_host")" "$service_port" \
+    "$([[ $do_whisper -eq 1 ]] && echo "whisper $stt_model, mic chip in the chat; endpoints list: /models → Status" || echo "off: --with-whisper")"
+[[ $do_tls -eq 1 ]] && \
+    printf '              https is self-signed — accept the certificate once per browser; the mic chip needs https or localhost\n'
+printf '  health    : %s://localhost:%s/health\n' "$scheme" "$service_port"
 [[ $enable_metrics -eq 1 ]] && \
-    printf '  metrics   : http://localhost:%s/metrics\n' "$service_port"
+    printf '  metrics   : %s://localhost:%s/metrics\n' "$scheme" "$service_port"
 printf '  system    : %s   (TEMPLATE; refreshed every --upgrade)\n' "$system_template_file"
 if [[ -f "$system_file" ]]; then
     printf '              %s   (active custom prompt — uncomment SERVER.system_file in easyai.ini)\n' "$system_file"
@@ -2692,14 +2825,14 @@ printf '  webui     : title="%s"\n' "$webui_title"
     printf '  api key   : %s   (Bearer auth required on /v1)\n' "$api_key_file"
 echo
 printf '  test (open server):\n'
-printf '    curl http://localhost:%s/v1/chat/completions \\\n' "$service_port"
+printf '    curl %s://localhost:%s/v1/chat/completions %s\\\n' "$scheme" "$service_port" "$([[ $do_tls -eq 1 ]] && echo "-k ")"
 printf '         -H "Content-Type: application/json" \\\n'
 if [[ -f "$api_key_file" ]]; then
     printf '         -H "Authorization: Bearer $(cat %s)" \\\n' "$api_key_file"
 fi
 printf '         -d '\''{"messages":[{"role":"user","content":"hi"}]}'\''\n'
 echo
-printf '  point any OpenAI client at:  http://%s:%s/v1\n' \
+printf '  point any OpenAI client at:  %s://%s:%s/v1\n' "$scheme" \
     "$([[ "$service_host" == "0.0.0.0" ]] && hostname || echo "$service_host")" "$service_port"
 echo
 printf '  if it crashes:\n'

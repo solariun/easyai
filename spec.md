@@ -707,6 +707,183 @@ queued: a model that emits dozens is looping, and the log line makes it
 visible. SVG is sanitised client-side instead of trusting the model: the
 model's output is untrusted content in the page.
 
+## Voice transcription (STT) service + endpoint directory (AUTHORITATIVE — 2026-10-15)
+
+**Plain words.** The server can turn speech into text. A whisper model
+sits next to the chat model; a mic chip in the web UI records, the
+browser converts the recording to a plain WAV, the server transcribes it
+and the text lands in the prompt box for the user to check before
+sending. Any other program on the LAN can use the same route with the
+OpenAI audio API shape. The `/models` Status tab lists every endpoint
+the server speaks, with full URLs, so a client is configured by copying.
+
+```mermaid
+flowchart LR
+  subgraph Browser
+    MIC[mic chip\nafter the effort chip] --> REC[MediaRecorder\nwebm / mp4]
+    REC --> WA[Web Audio decode\n16 kHz mono PCM16 WAV]
+    WA --> POST
+    POST --> BOX[text appended to\nthe prompt box]
+  end
+  POST -->|multipart file= or raw audio/wav| EP["POST /v1/audio/transcriptions"]
+  subgraph easyai-server
+    EP --> WAV[decode_wav\nPCM16 / float32 / extensible\nany rate, any channels]
+    WAV --> RS[resample_linear\n-> 16 kHz mono]
+    RS --> STT["easyai::Stt::transcribe\n(stt_mu, not engine_mu)"]
+    STT --> J["{text, language, duration, segments}"]
+  end
+  CFG["[STT] model / language / threads\n--stt-model --stt-language --stt-threads"] -.-> STT
+  HL["/health: stt_loaded, stt_model\ncompat.stt"] -.-> STT
+```
+
+**Rules.**
+
+1. **Library.** `easyai::Stt` (`include/easyai/stt.hpp`, `src/stt.cpp`)
+   wraps `whisper.cpp`: `load(path)`, `unload()`, `is_loaded()`,
+   `model_path()`, `last_error()`, `threads(n)`,
+   `transcribe(pcm, n, language, Result&)`. `Result` = `text`,
+   `language` (detected or forced), `audio_ms`, `run_ms`, `segments`
+   (`t0_ms`, `t1_ms`, `text`). Input is always 16 kHz mono float PCM
+   (`Stt::kSampleRate`). `Stt::available()` says whether the build has
+   whisper; without it `load()` fails with "built without whisper".
+   Model-free helpers: `decode_wav(bytes, pcm, err)` (RIFF/WAVE, PCM16,
+   float32, WAVE_FORMAT_EXTENSIBLE, any rate, channels averaged) and
+   `resample_linear(in, in_rate, out_rate, out)`.
+2. **Build.** `EASYAI_WITH_WHISPER` (default ON) adds the sibling
+   `../whisper.cpp` with `EXCLUDE_FROM_ALL` after llama.cpp, so whisper
+   links the ggml already built (Metal / CUDA / Vulkan included) instead
+   of a second copy. Missing sibling → warning, STT compiled out. The
+   install rule ships `libwhisper*` next to `libllama*`.
+3. **Server config.** New INI section `[STT]`: `model` (`--stt-model`,
+   path to `ggml-*.bin`, may be a symlink), `language` (`--stt-language`,
+   default `auto`), `threads` (`--stt-threads`, 0 = whisper default).
+   Load is non-fatal, like the chat model: the server starts, logs
+   `NO STT MODEL`, and the route answers 503 `stt_not_loaded` until a
+   model is loaded from `/models`.
+4. **Route.** `POST /v1/audio/transcriptions`, OpenAI shape, Bearer-gated
+   like every `/v1/*`. Body: multipart with `file` (required), `model`
+   (echoed, otherwise ignored), `language` (`auto` or ISO-639-1),
+   `response_format` = `json` (default, `{"text"}`), `text` (plain
+   body), `verbose_json` (`text`, `language`, `duration`, `segments[]`
+   with `id`, `start`, `end`, `text`). A raw body with
+   `Content-Type: audio/wav` (or `audio/x-wav`, `audio/wave`) is accepted
+   too, for `curl --data-binary`. Accepted audio: WAV only (see
+   decision). Errors: 400 `invalid_request_error` (no file / bad WAV),
+   415 `unsupported_media_type` (not WAV), 503 `stt_not_loaded`.
+   One transcription at a time per context (`stt_mu`); chat generation
+   is never blocked by it (separate mutex from `engine_mu`).
+   Body cap is `max_body` (default 8 MiB ≈ 4 min of 16 kHz mono PCM16).
+5. **Discovery.** `/health` adds `stt_loaded`, `stt_model`, and
+   `compat.stt = "/v1/audio/transcriptions"`. `/props.modalities.audio`
+   stays `false` (true would make the bundle attach audio to chat turns,
+   which the chat model cannot read).
+6. **Web UI, bundle.** Mic chip cloned from the model pill, placed after
+   the effort chip: `[tone][tools][pill][effort][mic][send]`. Click =
+   record (red dot + seconds), click = stop → decode → WAV → POST →
+   text appended to the textarea with an `input` event so the bundle's
+   binding sees it. The chip is greyed with the title "no STT model —
+   open /models" while `/health.stt_loaded` is false (the existing 3 s
+   poll carries the flag). Bearer header comes from the bundle's own
+   `apiKey` setting. The bundle's own mic button stays hidden (it would
+   attach audio to the chat). Minimal UI: a 🎤 button in the input bar
+   with the same helper. Both UIs share `kEasyaiVoiceJs`
+   (`window.__easyaiVoice`): `available()`, `recording()`, `toggle(cb)`
+   with `cb({state:'recording'|'transcribing'|'done'|'error', text,
+   seconds, error})`.
+7. **Secure context.** Browsers expose `getUserMedia` only on `https://`
+   or `localhost`. Over plain `http://ai-pro.local:8080` the mic chip
+   says "needs HTTPS or localhost" and stays disabled. The server gains
+   optional TLS: `[SERVER] tls_cert` / `tls_key` (`--tls-cert`,
+   `--tls-key`, PEM) switch the listener to `httplib::SSLServer`; the
+   startup banner prints `https://`. A self-signed certificate is
+   accepted once in the browser. Alternative without TLS: Chrome flag
+   `chrome://flags/#unsafely-treat-insecure-origin-as-secure` with the
+   server origin. Both are documented.
+8. **STT model management (`/models`).** Session-cookie gated like the
+   other `/models/api/*` routes. `GET /models/api/stt` → `{loaded,
+   model, model_path, configured_path, language, dir, local:[{name,
+   size_bytes, mtime, is_current}], catalog:[{name, file, size_bytes,
+   multilingual, note}], download:{…}}`. `POST /models/api/stt/download
+   {name}` fetches `ggml-<name>.bin` from `ggerganov/whisper.cpp` on
+   HuggingFace through the existing download worker (one download at a
+   time, same progress object). `POST /models/api/stt/run {name,
+   link}` hot-swaps under `stt_mu`; `link:true` repoints the
+   `--stt-model` symlink (same rules as `set_model_symlink`).
+   `POST /models/api/stt/unload`, `POST /models/api/stt/delete {name}`
+   (never the running one). The Local tab shows a "Voice transcription
+   (STT)" panel: current model, local `ggml-*.bin` files with Run /
+   Slink / Delete, and the catalog with Download. The catalog is the
+   whisper.cpp model table (tiny…large-v3-turbo, `.en` and `q5`
+   variants) with sizes; `large-v3-turbo-q5_0` is marked recommended
+   for pt-BR + en on a small box.
+9. **Endpoint directory.** `/models/api/status` gains `endpoints`: a
+   list of `{family, method, path, auth, description, enabled}` built
+   from the routes actually registered (metrics only when `--metrics`,
+   TLS scheme reflected). The Status tab renders an "Endpoints" card
+   grouped by family — OpenAI-compatible, Ollama-compatible, Voice
+   (STT), MCP, Health, Web UI, Models API — each row showing the full
+   URL (`location.origin + path`), the method, and the auth posture
+   (`open`, `Bearer api_key`, `MCP_USER bearer`, `session cookie`), plus
+   a copy button per URL and one "Base URL for OpenAI clients" line
+   (`<origin>/v1`). Every path keeps the name the upstream API uses, so
+   third-party tools connect without a translation layer.
+
+**Decisions.**
+
+- **WAV only on the wire; the browser converts.** `decodeAudioData`
+  handles webm/opus and mp4/aac in every browser, so the server never
+  needs ffmpeg or libopus. Rejected: server-side decoding (a codec
+  dependency for one feature), whisper.cpp's miniaudio (wav/mp3/flac,
+  still no opus).
+- **whisper, not an audio-capable chat model.** mtmd audio models tie
+  voice to one chat model and force a swap; whisper works with any LLM
+  and runs beside it.
+- **Transcript into the box, never auto-sent.** The user sees and fixes
+  the text first.
+- **Separate mutex.** Transcription is short and must not wait behind
+  a long generation; whisper contexts are single-run, so `stt_mu`
+  serialises transcriptions only.
+- **Own management routes instead of extending the GGUF manager.**
+  whisper weights are `ggml-*.bin`, not GGUF; the local list, catalog
+  and symlink logic differ. The download worker is shared through a
+  `start_download_file()` entry that skips the GGUF rules.
+- **TLS optional, in the same binary.** cpp-httplib already carries
+  OpenSSL for outbound HTTPS; `SSLServer` costs 30 lines and unlocks the
+  microphone on a LAN host. Rejected: a reverse proxy requirement.
+
+**Proof.** `easyai-test-stt` (ctest `stt`): a synthetic 1 kHz tone WAV
+at 44.1 kHz stereo decodes to 16 kHz mono of the right length and
+amplitude; float32 and WAVE_FORMAT_EXTENSIBLE variants decode; a
+truncated header, a non-RIFF body and an 8-bit file are rejected with
+the right error; `resample_linear` keeps endpoints and length. When
+`EASYAI_STT_TEST_MODEL` names a whisper model and
+`../whisper.cpp/samples/jfk.wav` exists, the test transcribes it and
+expects the word "country".
+
+Measured 2026-10-15 (macOS, Metal, `ggml-tiny`): the 11.0 s JFK sample
+transcribes in 437 ms from the library and in 457 ms / 68 ms (first /
+warm) through the live route; `decode_wav` + 44.1 kHz stereo → 16 kHz
+mono keeps the amplitude within 0.05. Live server proof: `/health`
+carries `stt_loaded`, `stt_model`, `tls`, `compat.stt`; multipart
+`json`, raw `audio/wav` `verbose_json` (1 segment, `en`, 11.0 s) and
+`text` all return the sentence; mp3 → 415, a non-WAV file → 400,
+unload → 503, `run` + `link` reloads and re-points `stt.bin`, deleting
+the running file → 409. A second instance with `--tls-cert/--tls-key`
++ `--api-key` answers `https://` (`tls:true`), 401 without the token,
+503 with it (no STT model there). `/models/api/status.endpoints` has 21
+rows in 7 families. Bundle page: 14 inline scripts, 0 syntax errors,
+voice helper + mic chip present; minimal page: 3 scripts, 0 errors,
+placeholder substituted; models page: 1 script, 0 errors. Full build
+green, ctest 2/2 (`reasoning_effort`, `stt` with the real model). Not
+verified here: microphone capture in a real browser (no browser tool in
+this session).
+
+**Limits.** No streaming / partial transcripts (push-to-talk only).
+Non-WAV uploads from external clients are refused. Browser microphone
+needs HTTPS or localhost (rule 7). `/api/chat` (Ollama generation) is
+still not served: the Ollama family lists only `/api/tags` and
+`/api/show`.
+
 ## Backend::Config extensions (2026-05-27)
 
 `LocalBackend::Config` and `RemoteBackend::Config` gained two fields,

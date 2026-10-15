@@ -61,6 +61,7 @@ Drop the CLI flag and the INI value takes over.
 | `[SERVER]` | HTTP layer, paths, tool gating, MCP auth posture | active |
 | `[ENGINE]` | Model loading + inference tunables | active |
 | `[MODEL_<pattern>]` | Per-model `[ENGINE]` overrides matched by model filename | active |
+| `[STT]` | Voice transcription: whisper model, language, threads | active |
 | `[MCP_USER]` | Bearer-token auth for `/mcp` (one user per line) | active |
 | `[TOOLS]` | Per-tool ACL (`mcp_allowed = …`) | reserved for a future release |
 
@@ -299,6 +300,54 @@ Loading `Qwen3-Coder-Next-Q6_K_M.gguf` applies the
 `Qwen3-8B-Q8_0.gguf` applies `[MODEL_Qwen3]`. Loading a non-Qwen
 model applies nothing — pure `[ENGINE]` values.
 
+### `[STT]` — voice transcription
+
+Speech-to-text runs beside the chat model on a [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
+model (`ggml-*.bin`, not GGUF). The chat UI gets a mic chip; any program
+can POST audio to the OpenAI-shaped route. Build needs `../whisper.cpp`
+next to `../llama.cpp` (`EASYAI_WITH_WHISPER=ON`, the default); without
+it the route answers 503 and the Voice panel says so.
+
+```mermaid
+flowchart LR
+  MIC[mic chip in the chat] --> REC[MediaRecorder]
+  REC --> WAV[Web Audio: 16 kHz mono WAV]
+  WAV -->|POST file=| EP["/v1/audio/transcriptions"]
+  EXT[any OpenAI-audio client] -->|multipart or raw audio/wav| EP
+  EP --> W[whisper.cpp\nggml-*.bin]
+  W --> T["{text}"] --> BOX[prompt box / your app]
+```
+
+| Key | CLI | Default | Meaning |
+| --- | --- | --- | --- |
+| `model` | `--stt-model <path>` | (none) | whisper `ggml-*.bin`, or a symlink to one (the installer uses `/var/lib/easyai/models/stt.bin`). A failed load is not fatal: the server starts, `/health.stt_loaded` is `false`, and `/models` → Local models → **Voice transcription** downloads / runs / slinks one. |
+| `language` | `--stt-language <code>` | `auto` | ISO-639-1 (`pt`, `en`, …) or `auto` (whisper detects). Per-request `language` overrides it. |
+| `threads` | `--stt-threads <n>` | `0` | whisper threads; `0` = its default. |
+
+Model choice: `large-v3-turbo-q5_0` (547 MB) is the recommended
+multilingual pick for pt-BR + en; `small` (466 MB) when the box is
+CPU-only and slow; `*.en` variants are English only. The Voice panel
+lists the whole whisper.cpp table with sizes.
+
+**Browser microphone needs a secure context.** Browsers expose
+`getUserMedia` only on `https://` or `localhost`. On a LAN host such as
+`http://ai-pro.local:8080` the mic chip stays greyed with the reason.
+Two ways out:
+
+1. **TLS in the server** (recommended): `[SERVER] tls_cert` / `tls_key`
+   (`--tls-cert` / `--tls-key`, PEM). Self-signed is fine on a LAN:
+
+   ```bash
+   openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+     -keyout /etc/easyai/tls.key -out /etc/easyai/tls.crt \
+     -subj "/CN=ai-pro.local" -addext "subjectAltName=DNS:ai-pro.local"
+   ```
+
+   then accept the certificate once in the browser. Every route is the
+   same under `https://`; the startup banner prints the scheme.
+2. **Chrome flag**: `chrome://flags/#unsafely-treat-insecure-origin-as-secure`
+   with `http://ai-pro.local:8080` — per browser, no server change.
+
 ### `[MCP_USER]`
 
 Bearer-token authentication for `POST /mcp`. Each line registers one
@@ -468,7 +517,10 @@ Binary-only flags (no INI equivalent):
 ## 3. API endpoints
 
 The server speaks **three** API dialects so most AI clients work
-unchanged.
+unchanged. Every path keeps the upstream name (OpenAI, Ollama, MCP),
+and the `/models` **Status** tab prints this whole table as copy-ready
+URLs for the host you are on ("Endpoints" card, also in
+`GET /models/api/status` → `endpoints[]`).
 
 | Verb | Path | Dialect | Auth | Notes |
 | --- | --- | --- | --- | --- |
@@ -476,12 +528,13 @@ unchanged.
 | GET | `/bundle.{js,css}` | webui | (open) | Bundle assets. |
 | GET | `/loading.html` | webui | (open) | Loading splash. |
 | GET | `/favicon` (+ `.ico`/`.svg`) | webui | (open) | Operator-supplied (`--webui-icon`) or the embedded AI Box logo SVG (compiled into the binary as `kBrandSvg`; canonical copy at `webui/AI-brain.svg`). |
-| GET | `/health` | easyai | (open) | `{model, model_loaded, load_error?, backend, tools, preset, compat:{...}}` — liveness probe. `model_loaded:false` means the server is up without a model (`model` reads `(no model)`, `load_error` says why); `/props` carries the same `model_loaded`. |
+| GET | `/health` | easyai | (open) | `{model, model_loaded, load_error?, stt_loaded, stt_model, tls, backend, tools, preset, compat:{openai, ollama, mcp, stt}}` — liveness probe. `model_loaded:false` means the server is up without a model (`model` reads `(no model)`, `load_error` says why); `/props` carries the same `model_loaded`. |
 | GET | `/metrics` | easyai | api_key | Prometheus exposition (only when `--metrics` is on). |
 | GET | `/v1/models` | OpenAI | api_key | OpenAI-shape list-models. |
 | GET | `/v1/tools` | easyai | api_key | Tool catalogue. Each entry: `{name, description, short_description}`. `description` is the full multi-line manual; `short_description` is the one-line trigger shipped in the per-turn `<tools>` block. `easyai-cli` reads `short_description` to render its prompt prefix; the webui popover reads `description`. Pre-Shape-C consumers see only the `description` field — backward compatible. |
 | POST | `/v1/chat/completions` | OpenAI | api_key | The workhorse — streaming SSE, tools, sampling controls. |
 | POST | `/v1/preset` | easyai | api_key | Swap the ambient preset. |
+| POST | `/v1/audio/transcriptions` | OpenAI | api_key | Voice → text on whisper. Multipart `file` (WAV) + optional `language`, `response_format` = `json` (default `{"text"}`) / `text` / `verbose_json` (`language`, `duration`, `segments[]`); or a raw body with `Content-Type: audio/wav`. WAV only (PCM16 / float32, any rate, any channels — the webui converts the recording itself). 503 `stt_not_loaded` without a model, 415 for non-WAV, 400 for a bad file. |
 | GET | `/api/tags` | Ollama | api_key | Ollama-shape list-models (LobeChat, OpenWebUI in Ollama mode, etc.). |
 | GET/POST | `/api/show` | Ollama | api_key | Ollama-shape model detail. |
 | POST | `/mcp` | MCP | `[MCP_USER]` | JSON-RPC 2.0 — full tool catalogue exposed to other AI apps. See `MCP.md`. |
@@ -626,6 +679,7 @@ to defend against multi-megabyte headers being sent on every probe.
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" http://localhost/v1/models
+curl -H "Authorization: Bearer $TOKEN" -F file=@clip.wav http://localhost/v1/audio/transcriptions
 ```
 
 The systemd installer wires `${EASYAI_API_KEY}` from

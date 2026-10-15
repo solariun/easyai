@@ -264,6 +264,33 @@ be.chat("hello", [](const std::string & p){ std::fputs(p.c_str(), stdout); });
 `extra_tools` + `system_appendix` were added at the same time as
 `Session` so the lower-level Backend path stays at parity.
 
+### Voice: `easyai::Stt`
+
+Speech-to-text over whisper.cpp, in the same library. Input is 16 kHz
+mono float PCM; `decode_wav` + `resample_linear` get you there from
+any PCM16 / float32 WAV without a codec dependency.
+
+```cpp
+#include "easyai/stt.hpp"
+
+easyai::Stt stt;
+if (!stt.load("models/ggml-large-v3-turbo-q5_0.bin")) die(stt.last_error());
+
+std::vector<float> pcm; std::string err;
+if (!easyai::decode_wav(read_file("clip.wav"), pcm, err)) die(err);
+
+easyai::Stt::Result r;
+if (stt.transcribe(pcm.data(), pcm.size(), "auto", r))   // "pt", "en", … or "auto"
+    std::printf("[%s, %.0f ms] %s\n", r.language.c_str(), r.run_ms, r.text.c_str());
+for (const auto & s : r.segments) /* s.t0_ms, s.t1_ms, s.text */;
+```
+
+One `Stt` runs one clip at a time — serialise calls yourself (the
+server keeps a dedicated mutex so transcriptions never queue behind a
+chat generation). `Stt::available()` is `false` when the library was
+built without `../whisper.cpp` (`EASYAI_WITH_WHISPER`), and `load()`
+then fails with a clear message.
+
 ---
 
 ## 6. Linking

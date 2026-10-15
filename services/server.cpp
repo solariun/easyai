@@ -34,6 +34,7 @@
 
 #include "easyai/easyai.hpp"
 #include "easyai/models_dashboard.hpp"   // native MODELS dashboard engine
+#include "easyai/stt.hpp"                // voice transcription (whisper.cpp)
 
 #include <random>             // session-token generation for the /models gate
 #include <filesystem>         // ai.gguf symlink re-point on model hot-swap
@@ -391,6 +392,12 @@ header.topbar h1 { font-size: 1rem; margin: 0; font-weight: 600; letter-spacing:
   font: inherit; line-height: 1.5;
 }
 #textArea:focus { outline: 2px solid var(--accent-dim); border-color: var(--accent); }
+#micBtn {
+  background: var(--bg-elev, #222); color: var(--text); border: 1px solid var(--border, #444);
+  border-radius: 8px; padding: 0 .7rem; cursor: pointer; height: 2.4rem; align-self: flex-end;
+}
+#micBtn.rec { background: #b42318; color: #fff; border-color: #b42318; }
+#micBtn:disabled { opacity: .45; cursor: not-allowed; }
 #sendBtn, #stopBtn {
   background: var(--accent); color: #fff; border: 0;
   border-radius: 8px; padding: 0 1.05rem; cursor: pointer; font-weight: 600;
@@ -538,6 +545,7 @@ header.topbar h1 { font-size: 1rem; margin: 0; font-weight: 600; letter-spacing:
       <div id="inputBar">
         <button id="settingsToggle" title="Sampling settings">⚙</button>
         <textarea id="textArea" rows="1" placeholder="Type a message…"></textarea>
+        <button id="micBtn" title="Voice input (whisper)">🎤</button>
         <button id="stopBtn" hidden>stop</button>
         <button id="sendBtn">send</button>
       </div>
@@ -555,6 +563,7 @@ header.topbar h1 { font-size: 1rem; margin: 0; font-weight: 600; letter-spacing:
 
 <!-- markdown lib (loaded async, with graceful fallback) -->
 <script>__EASYAI_VISUAL_JS__</script>
+<script>__EASYAI_VOICE_JS__</script>
 <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
 
@@ -1268,6 +1277,18 @@ function submitMsg(){
 }
 
 $('#sendBtn').onclick = submitMsg;
+$('#micBtn').onclick = () => {
+  const V = window.__easyaiVoice; const b = $('#micBtn');
+  if (!V) return;
+  if (!V.available()) { alert(V.why() || 'microphone unavailable'); return; }
+  V.toggle(s => {
+    if (s.state === 'recording') { b.classList.add('rec'); b.textContent = '● ' + (s.seconds || 0) + 's'; return; }
+    if (s.state === 'transcribing') { b.classList.remove('rec'); b.textContent = '…'; return; }
+    b.classList.remove('rec'); b.textContent = '🎤';
+    if (s.state === 'done') V.insertIntoTextarea(ta, s.text);
+    if (s.state === 'error') alert('voice: ' + s.error);
+  });
+};
 $('#stopBtn').onclick = stopGeneration;
 $('#newChatBtn').onclick = startNewConv;
 $('#sidebarToggle').onclick = () => {
@@ -1289,6 +1310,14 @@ function pollHealth(){
     $('#backend').textContent = j.backend ? 'backend: ' + j.backend : '';
     $('#ntools').textContent  = (j.tools ?? 0) + ' tools';
     const ta = $('#textArea'), noModel = j.model_loaded === false;
+    const mic = $('#micBtn');
+    if (mic && !window.__easyaiVoice?.recording()) {
+      const V = window.__easyaiVoice;
+      const ok = !!j.stt_loaded && V && V.available();
+      mic.disabled = !ok;
+      mic.title = !j.stt_loaded ? 'No voice model — open /models → Voice transcription'
+                : (V && !V.available() ? V.why() : 'Voice input (whisper)');
+    }
     if (noModel && !ta.disabled) {
       ta.dataset.prevPlaceholder = ta.placeholder; ta.placeholder = NO_MODEL_MSG;
       ta.disabled = true; $('#sendBtn').disabled = true;
@@ -1488,6 +1517,16 @@ struct ServerCtx {
     std::string                model_id;        // basename of model file; "(no model)" while nothing is loaded
     std::string                load_error;      // why the start-up load failed; empty once a model is loaded
     std::string                api_key;         // empty = auth disabled
+    bool                       tls = false;     // listener is https (--tls-cert/--tls-key)
+    // Voice transcription. Its own lock: a transcription is short and must
+    // never wait behind a long chat generation (engine_mu); whisper contexts
+    // are single-run, so stt_mu serialises transcriptions and STT hot-swaps.
+    easyai::Stt                stt;
+    std::mutex                 stt_mu;
+    std::string                stt_error;       // why the STT load failed; empty once loaded
+    std::string                stt_language = "auto";
+    std::string                stt_model_arg;   // --stt-model path (symlink target for Slink)
+    std::atomic<uint64_t>      n_transcriptions{0};
     bool                       no_think = false;// strip <think> from responses
     // Ambient reasoning-effort level applied to every request unless the
     // request body overrides it. Empty = model default (inject nothing).
@@ -3437,6 +3476,112 @@ static void route_preset(ServerCtx & ctx, const httplib::Request & req,
 }
 
 // ---------------------------------------------------------------------------
+// Voice transcription — POST /v1/audio/transcriptions (OpenAI audio shape).
+// ---------------------------------------------------------------------------
+static std::string stt_model_id(const ServerCtx & ctx) {
+    if (!ctx.stt.is_loaded()) return "";
+    std::string p = ctx.stt.model_path();
+    std::error_code ec;
+    auto real = std::filesystem::weakly_canonical(p, ec);
+    if (!ec && !real.empty()) p = real.string();
+    auto slash = p.find_last_of("/\\"); if (slash != std::string::npos) p = p.substr(slash + 1);
+    auto dot = p.find_last_of('.');     if (dot != std::string::npos) p = p.substr(0, dot);
+    return p;
+}
+
+static bool require_stt(ServerCtx & ctx, httplib::Response & res) {
+    if (ctx.stt.is_loaded()) return true;
+    res.status = 503;
+    ordered_json err;
+    err["error"] = {
+        {"message", "no STT model loaded — open /models → Local models → Voice transcription" +
+                    (ctx.stt_error.empty() ? std::string() : " (" + ctx.stt_error + ")")},
+        {"type",    "stt_not_loaded"},
+    };
+    res.set_content(err.dump(), "application/json");
+    return false;
+}
+
+static bool is_wav_content_type(const std::string & ct) {
+    static const char * const kWav[] = { "audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave" };
+    for (const char * k : kWav) if (ct.compare(0, std::strlen(k), k) == 0) return true;
+    return false;
+}
+
+static void route_transcriptions(ServerCtx & ctx, const httplib::Request & req,
+                                 httplib::Response & res) {
+    if (!require_stt(ctx, res)) return;
+
+    std::string audio, language = ctx.stt_language, format = "json";
+    if (req.is_multipart_form_data()) {
+        if (!req.form.has_file("file")) {
+            res.status = 400;
+            res.set_content(error_json("multipart field 'file' (WAV) is required", "invalid_request_error"),
+                            "application/json");
+            return;
+        }
+        audio = req.form.get_file("file").content;
+        if (req.form.has_field("language"))        language = req.form.get_field("language");
+        if (req.form.has_field("response_format")) format   = req.form.get_field("response_format");
+    } else if (is_wav_content_type(req.get_header_value("Content-Type"))) {
+        audio = req.body;
+        if (req.has_param("language"))        language = req.get_param_value("language");
+        if (req.has_param("response_format")) format   = req.get_param_value("response_format");
+    } else {
+        res.status = 415;
+        res.set_content(error_json("send multipart/form-data with a 'file' field, or a raw body with "
+                                   "Content-Type: audio/wav (PCM16 or float32 WAV; the webui converts "
+                                   "the microphone recording itself)", "unsupported_media_type"),
+                        "application/json");
+        return;
+    }
+
+    std::vector<float> pcm; std::string err;
+    if (!easyai::decode_wav(audio, pcm, err)) {
+        res.status = 400;
+        res.set_content(error_json("bad audio: " + err, "invalid_request_error"), "application/json");
+        return;
+    }
+
+    easyai::Stt::Result r; bool ok;
+    {
+        std::lock_guard<std::mutex> lk(ctx.stt_mu);
+        if (!require_stt(ctx, res)) return;   // unloaded while we waited
+        ok = ctx.stt.transcribe(pcm.data(), pcm.size(), language, r);
+        if (!ok) err = ctx.stt.last_error();
+    }
+    if (!ok) {
+        ctx.n_errors++;
+        res.status = 500;
+        res.set_content(error_json("transcription failed: " + err, "internal_error"), "application/json");
+        return;
+    }
+    ctx.n_transcriptions++;
+    std::fprintf(stderr, "[easyai-server] stt: %.1fs audio -> %zu chars in %.0f ms (lang=%s)\n",
+                 r.audio_ms / 1000.0, r.text.size(), r.run_ms, r.language.c_str());
+
+    if (format == "text") {
+        res.set_content(r.text + "\n", "text/plain; charset=utf-8");
+        return;
+    }
+    ordered_json j;
+    if (format == "verbose_json") {
+        j["task"]     = "transcribe";
+        j["language"] = r.language;
+        j["duration"] = r.audio_ms / 1000.0;
+        j["text"]     = r.text;
+        ordered_json segs = ordered_json::array();
+        int id = 0;
+        for (const auto & sg : r.segments)
+            segs.push_back({ {"id", id++}, {"start", sg.t0_ms / 1000.0}, {"end", sg.t1_ms / 1000.0}, {"text", sg.text} });
+        j["segments"] = std::move(segs);
+    } else {
+        j["text"] = r.text;
+    }
+    res.set_content(j.dump(), "application/json");
+}
+
+// ---------------------------------------------------------------------------
 // GET /health   →  small status JSON.
 // ---------------------------------------------------------------------------
 static void route_health(ServerCtx & ctx, const httplib::Request &,
@@ -3455,6 +3600,10 @@ static void route_health(ServerCtx & ctx, const httplib::Request &,
     j["preset_authoritative"] = ctx.preset_authoritative();
     j["reasoning_effort"] = ctx.default_reasoning_effort.empty()
                                 ? "auto" : ctx.default_reasoning_effort;
+    j["stt_loaded"] = ctx.stt.is_loaded();
+    j["stt_model"]  = stt_model_id(ctx);
+    if (!ctx.stt.is_loaded() && !ctx.stt_error.empty()) j["stt_error"] = ctx.stt_error;
+    j["tls"] = ctx.tls;
 
     // Compatibility shims this server speaks. Lets clients
     // auto-detect which API they can use without trial requests.
@@ -3463,6 +3612,7 @@ static void route_health(ServerCtx & ctx, const httplib::Request &,
     compat["ollama"]   = "/api/tags";
     compat["mcp"]      = "/mcp";
     compat["mcp_protocol"] = "2024-11-05";
+    compat["stt"]      = "/v1/audio/transcriptions";
     j["compat"] = std::move(compat);
 
     res.set_content(j.dump(), "application/json");
@@ -3554,7 +3704,7 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "\n"
         "Nearly every flag has an INI equivalent. Precedence:\n"
         "  CLI flag  >  [section] key in the --config INI  >  built-in default.\n"
-        "Sections: [SERVER], [ENGINE], [MCP_USER] (Bearer auth for /mcp),\n"
+        "Sections: [SERVER], [ENGINE], [STT], [MCP_USER] (Bearer auth for /mcp),\n"
         "[MODEL_<glob>] (per-model [ENGINE] overrides). Default INI: /etc/easyai/easyai.ini.\n"
         "Each option below shows its INI key, then the CLI flag(s).\n"
         "\n"
@@ -3573,6 +3723,9 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "  port          --port <n>          TCP port (default 8080).\n"
         "  alias         -a, --alias <name>  Model id reported by /v1/models.\n"
         "  api_key       --api-key <key>     Require Bearer auth on /v1/* (empty = open).\n"
+        "  tls_cert      --tls-cert <pem>     Serve https with this certificate (+ tls_key).\n"
+        "  tls_key       --tls-key <pem>      Private key for tls_cert. Browsers allow the\n"
+        "                                     microphone only on https or localhost.\n"
         "  max_body      --max-body <bytes>  Max request body (default 8 MiB).\n"
         "  http_timeout  --http-timeout <s>  Socket + MCP read/write timeout (default 600).\n"
         "  http_retries  --http-retries <n>  Retries on transient HTTP failures (default 5).\n"
@@ -3611,6 +3764,11 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "  webui_title        --webui-title <text>     Tab + sidebar brand title.\n"
         "  webui_icon         --webui-icon <path>      Favicon (.ico/.png/.svg/.gif/.jpg/.webp).\n"
         "  webui_placeholder  --webui-placeholder <s>  Input box placeholder text.\n"
+        "\n"
+        "[STT]  voice transcription (POST /v1/audio/transcriptions, webui mic chip)\n"
+        "  model     --stt-model <path>     whisper ggml-*.bin (or a symlink; Slink from /models).\n"
+        "  language  --stt-language <code>  auto (default) or ISO-639-1, e.g. pt, en.\n"
+        "  threads   --stt-threads <n>      whisper threads (0 = its default).\n"
         "\n"
         "[ENGINE]  runtime  (also valid under [MODEL_<glob>])\n"
         "  context          -c, --ctx <n>             Context window (default 8192).\n"
@@ -3795,6 +3953,11 @@ struct ServerArgs {
     // llama-server compatibility / production knobs
     std::string alias;            // exposed as model id in /v1/models
     std::string api_key;          // Bearer token required if set
+    std::string tls_cert;         // PEM certificate: serve https (needed for the browser microphone on a LAN host)
+    std::string tls_key;          // PEM private key
+    std::string stt_model_path;   // whisper ggml-*.bin (or a symlink to one); empty = no voice transcription
+    std::string stt_language = "auto";   // ISO-639-1 or auto
+    int         stt_threads  = 0;        // 0 = whisper default
     std::string numa;             // distribute|isolate|numactl|mirror
     int         threads_batch  = 0;
     int         parallel       = 1;
@@ -3997,6 +4160,12 @@ static const std::vector<FlagDef> & kFlags() {
         { {},                      "SERVER", "rag",            "memory",         true,  SET_STR(&ServerArgs::rag_dir) },
         { {"--memory","--RAG"},    "SERVER", "memory",         "memory",         true,  SET_STR(&ServerArgs::rag_dir) },
         { {"--api-key"},           "SERVER", "api_key",        "api_key",        true,  SET_STR(&ServerArgs::api_key) },
+        { {"--tls-cert"},          "SERVER", "tls_cert",       "tls_cert",       true,  SET_STR(&ServerArgs::tls_cert) },
+        { {"--tls-key"},           "SERVER", "tls_key",        "tls_key",        true,  SET_STR(&ServerArgs::tls_key) },
+        // ----- voice transcription (STT) -----
+        { {"--stt-model"},         "STT",    "model",          "stt_model",      true,  SET_STR(&ServerArgs::stt_model_path) },
+        { {"--stt-language"},      "STT",    "language",       "stt_language",   true,  SET_STR(&ServerArgs::stt_language) },
+        { {"--stt-threads"},       "STT",    "threads",        "stt_threads",    true,  SET_INT(&ServerArgs::stt_threads) },
         { {"--max-body"},          "SERVER", "max_body",       "max_body",       true,  SET_SIZE(&ServerArgs::max_body) },
         // ----- toggles (SERVER) -----
         { {"--metrics"},           "SERVER", "metrics",        "metrics",        false, SET_BOOL_TRUE(&ServerArgs::metrics) },
@@ -4571,6 +4740,103 @@ static const char kEasyaiVisualJs[] = R"JS((()=>{
   }
 })();)JS";
 
+// ---------------------------------------------------------------------------
+// Shared voice helper (bundle webui + minimal webui). Records with
+// MediaRecorder, decodes the webm/mp4 clip with Web Audio, resamples to
+// 16 kHz mono PCM16 WAV in the browser and POSTs it to
+// /v1/audio/transcriptions. The server therefore never needs a codec.
+// window.__easyaiVoice = { available, why, recording, toggle(cb),
+//                         insertIntoTextarea(ta, text) }
+// cb({state:'recording'|'transcribing'|'done'|'error', seconds, text, error})
+// ---------------------------------------------------------------------------
+static const char kEasyaiVoiceJs[] = R"JS((()=>{
+  if(window.__easyaiVoice)return;
+  const RATE=16000;
+  const ENDPOINT='/v1/audio/transcriptions';
+  const MIME=['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus'];
+  const TICK_MS=500, CHUNK_MS=250;
+  let rec=null,chunks=[],stream=null,timer=null,t0=0,cb=null;
+  const secure=()=>window.isSecureContext===true;
+  const available=()=>secure()&&!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);
+  const why=()=>!secure()?'microphone needs HTTPS or localhost (see --tls-cert)':
+    (!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)?'no microphone API in this browser':
+    (!window.MediaRecorder?'no MediaRecorder in this browser':''));
+  const emit=(st)=>{try{if(cb)cb(st);}catch(e){}};
+  const authHeaders=()=>{
+    try{
+      const raw=localStorage.getItem('LlamaCppWebui.config');
+      const k=raw?(JSON.parse(raw).apiKey||''):'';
+      return k?{'Authorization':'Bearer '+String(k).trim()}:{};
+    }catch(e){return {};}
+  };
+  const toWav=(buf)=>{
+    const n=buf.length,dv=new DataView(new ArrayBuffer(44+n*2));
+    const str=(o,t)=>{for(let i=0;i<t.length;i++)dv.setUint8(o+i,t.charCodeAt(i));};
+    str(0,'RIFF');dv.setUint32(4,36+n*2,true);str(8,'WAVE');
+    str(12,'fmt ');dv.setUint32(16,16,true);dv.setUint16(20,1,true);dv.setUint16(22,1,true);
+    dv.setUint32(24,RATE,true);dv.setUint32(28,RATE*2,true);dv.setUint16(32,2,true);dv.setUint16(34,16,true);
+    str(36,'data');dv.setUint32(40,n*2,true);
+    const ch=buf.getChannelData(0);
+    for(let i=0;i<n;i++){const v=Math.max(-1,Math.min(1,ch[i]));dv.setInt16(44+i*2,v<0?v*32768:v*32767,true);}
+    return new Blob([dv],{type:'audio/wav'});
+  };
+  const toPcm16k=async(blob)=>{
+    const AC=window.AudioContext||window.webkitAudioContext;
+    const ac=new AC();
+    try{
+      const dec=await ac.decodeAudioData(await blob.arrayBuffer());
+      const len=Math.max(1,Math.ceil(dec.duration*RATE));
+      const off=new OfflineAudioContext(1,len,RATE);
+      const src=off.createBufferSource();src.buffer=dec;src.connect(off.destination);src.start(0);
+      return await off.startRendering();
+    }finally{try{ac.close();}catch(e){}}
+  };
+  const transcribe=async(blob)=>{
+    const wav=toWav(await toPcm16k(blob));
+    const fd=new FormData();fd.append('file',wav,'voice.wav');fd.append('model','whisper');
+    const r=await fetch(ENDPOINT,{method:'POST',headers:authHeaders(),body:fd});
+    let j=null;try{j=await r.json();}catch(e){}
+    if(!r.ok)throw new Error((j&&j.error&&j.error.message)||('HTTP '+r.status));
+    return (j&&j.text)||'';
+  };
+  const start=async()=>{
+    stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    const mt=MIME.find(m=>MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported(m));
+    rec=new MediaRecorder(stream,mt?{mimeType:mt}:undefined);chunks=[];
+    rec.ondataavailable=(e)=>{if(e.data&&e.data.size>0)chunks.push(e.data);};
+    rec.onstop=async()=>{
+      const blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});
+      try{stream.getTracks().forEach(t=>t.stop());}catch(e){}
+      stream=null;rec=null;clearInterval(timer);timer=null;
+      emit({state:'transcribing'});
+      try{const text=await transcribe(blob);emit({state:'done',text});}
+      catch(e){emit({state:'error',error:e.message||String(e)});}
+    };
+    rec.start(CHUNK_MS);t0=Date.now();
+    emit({state:'recording',seconds:0});
+    timer=setInterval(()=>emit({state:'recording',seconds:Math.round((Date.now()-t0)/1000)}),TICK_MS);
+  };
+  const stop=()=>{if(rec&&rec.state!=='inactive')rec.stop();};
+  window.__easyaiVoice={
+    available,why,endpoint:ENDPOINT,
+    recording:()=>!!rec,
+    toggle:async(handler)=>{
+      if(handler)cb=handler;
+      if(rec){stop();return;}
+      try{await start();}catch(e){emit({state:'error',error:e.message||String(e)});}
+    },
+    insertIntoTextarea:(ta,text)=>{
+      if(!ta||!text)return;
+      const cur=ta.value||'';
+      const sep=cur&&!/\s$/.test(cur)?' ':'';
+      const d=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value');
+      if(d&&d.set)d.set.call(ta,cur+sep+text);else ta.value=cur+sep+text;
+      ta.dispatchEvent(new Event('input',{bubbles:true}));
+      try{ta.focus();}catch(e){}
+    }
+  };
+})();)JS";
+
 // First line of the web static prompt: the identity fix. Models that
 // believe they are "text-based" refuse to draw however detailed the rules
 // further down are, so the capability statement leads the prompt and is
@@ -4663,6 +4929,139 @@ static const char kWebUIAppendix[] =
     "or several fetches); dependent steps go one hop at a time.\n";
 
 // ============================================================================
+// ---------------------------------------------------------------------------
+// STT model management (/models/api/stt*). whisper weights are ggml-*.bin
+// files from ggerganov/whisper.cpp, not GGUF, so they get their own small
+// catalogue, local listing and hot-swap instead of the GGUF manager's.
+// ---------------------------------------------------------------------------
+static const char kSttHfRepo[] = "ggerganov/whisper.cpp";
+
+struct SttCatalogEntry {
+    const char *  name;          // ggml-<name>.bin
+    std::uint64_t size_bytes;    // from whisper.cpp/models/README.md
+    bool          multilingual;
+    bool          recommended;
+    const char *  note;
+};
+static constexpr std::uint64_t kMiB = 1024ull * 1024ull;
+static const SttCatalogEntry kSttCatalog[] = {
+    { "large-v3-turbo-q5_0",  547 * kMiB, true,  true,  "best fit for pt-BR + en on a small box" },
+    { "large-v3-turbo",      1536 * kMiB, true,  false, "best quality / speed, 1.5 GB" },
+    { "large-v3-q5_0",       1126 * kMiB, true,  false, "full large-v3, 5-bit" },
+    { "large-v3",            2969 * kMiB, true,  false, "full large-v3, 2.9 GB" },
+    { "medium",              1536 * kMiB, true,  false, "slow on CPU" },
+    { "medium.en",           1536 * kMiB, false, false, "English only" },
+    { "small",                466 * kMiB, true,  false, "good balance on CPU" },
+    { "small.en",             466 * kMiB, false, false, "English only" },
+    { "base",                 142 * kMiB, true,  false, "fast, rough on non-English" },
+    { "base.en",              142 * kMiB, false, false, "English only" },
+    { "tiny",                  75 * kMiB, true,  false, "fastest, rough" },
+    { "tiny.en",               75 * kMiB, false, false, "English only, fastest" },
+};
+
+static std::string stt_file_for(const std::string & name) { return "ggml-" + name + ".bin"; }
+
+static bool stt_safe_name(const std::string & n) {
+    if (n.empty() || n.size() > 128) return false;
+    for (char c : n) if (!(std::isalnum((unsigned char) c) || c == '.' || c == '_' || c == '-')) return false;
+    return n.find("..") == std::string::npos;
+}
+
+static std::string stt_canonical(const std::string & p) {
+    std::error_code ec;
+    auto r = std::filesystem::weakly_canonical(p, ec);
+    return ec ? p : r.string();
+}
+
+// Everything the Voice panel needs in one JSON.
+static ordered_json stt_status_json(ServerCtx & ctx, const std::string & dir) {
+    ordered_json j;
+    j["available"]       = easyai::Stt::available();
+    j["loaded"]          = ctx.stt.is_loaded();
+    j["model"]           = stt_model_id(ctx);
+    j["model_path"]      = ctx.stt.model_path();
+    j["configured_path"] = ctx.stt_model_arg;
+    j["language"]        = ctx.stt_language;
+    j["error"]           = ctx.stt.is_loaded() ? std::string() : ctx.stt_error;
+    j["dir"]             = dir;
+    j["repo"]            = kSttHfRepo;
+
+    const std::string cur = ctx.stt.is_loaded() ? stt_canonical(ctx.stt.model_path()) : std::string();
+    ordered_json local = ordered_json::array();
+    std::error_code ec;
+    std::vector<std::filesystem::directory_entry> ents;
+    for (const auto & e : std::filesystem::directory_iterator(dir, ec)) ents.push_back(e);
+    std::sort(ents.begin(), ents.end(), [](const auto & a, const auto & b) { return a.path().filename() < b.path().filename(); });
+    for (const auto & e : ents) {
+        const std::string name = e.path().filename().string();
+        if (name.compare(0, 5, "ggml-") != 0 || name.size() < 9 || name.compare(name.size() - 4, 4, ".bin") != 0) continue;
+        std::error_code fe;
+        if (!e.is_regular_file(fe)) continue;
+        const auto mt = std::filesystem::last_write_time(e.path(), fe);
+        const auto sys = std::chrono::time_point_cast<std::chrono::seconds>(
+            mt - std::filesystem::file_time_type::clock::now() + std::chrono::system_clock::now());
+        local.push_back({
+            {"name", name},
+            {"size_bytes", (std::uint64_t) e.file_size(fe)},
+            {"mtime", (std::int64_t) std::chrono::duration_cast<std::chrono::seconds>(sys.time_since_epoch()).count()},
+            {"is_current", !cur.empty() && stt_canonical(e.path().string()) == cur},
+        });
+    }
+    j["local"] = std::move(local);
+
+    ordered_json cat = ordered_json::array();
+    for (const auto & c : kSttCatalog) {
+        const std::string file = stt_file_for(c.name);
+        std::error_code fe;
+        cat.push_back({
+            {"name", c.name}, {"file", file}, {"size_bytes", c.size_bytes},
+            {"multilingual", c.multilingual}, {"recommended", c.recommended}, {"note", c.note},
+            {"downloaded", std::filesystem::exists(std::filesystem::path(dir) / file, fe)},
+        });
+    }
+    j["catalog"] = std::move(cat);
+    return j;
+}
+
+// Every HTTP route this process serves, with the auth posture, so the
+// Status tab can print copy-ready URLs. Paths keep the upstream API names
+// (OpenAI, Ollama, MCP) so third-party clients connect unchanged.
+static ordered_json endpoint_directory(const ServerCtx & ctx, const ServerArgs & args) {
+    const std::string v1_auth  = ctx.api_key.empty() ? "open" : "Bearer api_key";
+    const std::string mcp_auth = (!ctx.mcp_keys.empty() && !args.no_mcp_auth) ? "MCP_USER bearer" : "open";
+    const std::string ui_auth  = ctx.webui_password.empty() ? "open" : "session cookie";
+    ordered_json e = ordered_json::array();
+    auto add = [&](const char * family, const char * method, const char * path, const std::string & auth,
+                   const char * desc, bool enabled = true) {
+        e.push_back({ {"family", family}, {"method", method}, {"path", path}, {"auth", auth},
+                      {"description", desc}, {"enabled", enabled} });
+    };
+    add("OpenAI-compatible", "POST", "/v1/chat/completions",    v1_auth, "chat, streaming SSE, tools, sampling, reasoning_effort");
+    add("OpenAI-compatible", "GET",  "/v1/models",              v1_auth, "model list");
+    add("OpenAI-compatible", "GET",  "/v1/tools",               v1_auth, "easyai tool catalogue (server-side tools)");
+    add("OpenAI-compatible", "POST", "/v1/preset",              v1_auth, "live sampling preset swap");
+    add("Voice (STT)",       "POST", "/v1/audio/transcriptions", v1_auth,
+        "whisper transcription; multipart file= (WAV) or raw audio/wav; json | text | verbose_json",
+        easyai::Stt::available());
+    add("Ollama-compatible", "GET",  "/api/tags",               v1_auth, "model list (Ollama clients)");
+    add("Ollama-compatible", "GET",  "/api/show",               v1_auth, "model details (Ollama clients)");
+    add("Ollama-compatible", "POST", "/api/show",               v1_auth, "model details (Ollama clients)");
+    add("MCP",               "POST", "/mcp",                    mcp_auth, "Model Context Protocol, JSON-RPC 2.0 (2024-11-05)");
+    add("Health",            "GET",  "/health",                 "open",  "status JSON: model, stt, compat shims");
+    add("Health",            "GET",  "/metrics",                "open",  "Prometheus exposition (--metrics)", args.metrics);
+    add("Health",            "GET",  "/props",                  v1_auth, "llama-server style capabilities", args.webui_mode != "minimal");
+    add("Web UI",            "GET",  "/",                       "open",  "chat UI");
+    add("Web UI",            "GET",  "/models",                 ui_auth, "MODELS dashboard (this page)");
+    add("Models API",        "GET",  "/models/api/status",      ui_auth, "server status + endpoint directory");
+    add("Models API",        "GET",  "/models/api/local",       ui_auth, "local GGUF files");
+    add("Models API",        "POST", "/models/api/run",         ui_auth, "hot-swap the chat model {name, link}");
+    add("Models API",        "POST", "/models/api/download",    ui_auth, "download a GGUF {repo, filename}");
+    add("Models API",        "GET",  "/models/api/stt",         ui_auth, "voice model: current, local, catalogue");
+    add("Models API",        "POST", "/models/api/stt/run",     ui_auth, "hot-swap the voice model {name, link}");
+    add("Models API",        "POST", "/models/api/stt/download", ui_auth, "download a whisper model {name}");
+    return e;
+}
+
 // MODELS dashboard auth — a session cookie distinct from the Bearer `api_key`
 // that guards /v1/*. The operator sets [SERVER] webui_password (or
 // --webui-password); a correct POST /models/api/login mints the cookie
@@ -5428,6 +5827,7 @@ int main(int argc, char ** argv) {
 
             // ----- visual replies: ```svg → inline figure (shared helper) --
             inj << "<script>" << kEasyaiVisualJs << "</script>";
+            inj << "<script>" << kEasyaiVoiceJs << "</script>";
 
             // ----- fetch interceptor: stub unsupported endpoints AND inject
             //       sampling overrides from the tone dropdown ----------------
@@ -6007,6 +6407,7 @@ int main(int argc, char ** argv) {
                 "const TONE_ID='__easyaiToneHost';"
                 "const TOOLS_ID='__easyaiToolsHost';"
                 "const EFFORT_ID='__easyaiEffortHost';"
+                "const MIC_ID='__easyaiMicHost';"
                 // Server-side default effort, baked at render time so the
                 // chip can say what 'auto' resolves to without a round-trip.
                 "const EFFORT_DEFAULT='" << (ctx->default_reasoning_effort.empty()
@@ -6019,7 +6420,7 @@ int main(int argc, char ** argv) {
                 // the way during normal cycling).
                 "const TONE_ORDER="
                   "['default','deterministic','precise','balanced','creative','wild'];"
-                "let toneBtn=null,toolsBtn=null,toolsPop=null,effortBtn=null;"
+                "let toneBtn=null,toolsBtn=null,toolsPop=null,effortBtn=null,micBtn=null;"
                 // findPill MUST skip our own clones — `cloneNode(false)`
                 // copies the pill's class string, so toneBtn and toolsBtn
                 // also match PILL_SEL.  Without this guard, querySelector
@@ -6030,7 +6431,7 @@ int main(int argc, char ** argv) {
                 "const findPill=()=>{"
                   "const all=document.querySelectorAll(PILL_SEL);"
                   "for(const p of all){"
-                    "if(p.id===TONE_ID||p.id===TOOLS_ID||p.id===EFFORT_ID)continue;"
+                    "if(p.id===TONE_ID||p.id===TOOLS_ID||p.id===EFFORT_ID||p.id===MIC_ID)continue;"
                     "return p;"
                   "}"
                   "return null;"
@@ -6326,6 +6727,61 @@ int main(int argc, char ** argv) {
                   "return b;"
                 "};"
 
+                // Mic chip: right AFTER the effort chip. Click = record,
+                // click = stop → kEasyaiVoiceJs converts and POSTs → text
+                // lands in the textarea (never auto-sent). Greyed while
+                // /health.stt_loaded is false (pollModel sets the flag) or
+                // the page is not a secure context (http:// on a LAN host).
+                "const MIC_SVG="
+                  "'<svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" "
+                    "fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" "
+                    "stroke-linecap=\"round\" stroke-linejoin=\"round\" "
+                    "style=\"opacity:.75;flex-shrink:0\">"
+                    "<rect x=\"9\" y=\"3\" width=\"6\" height=\"11\" rx=\"3\"/>"
+                    "<path d=\"M5 11a7 7 0 0 0 14 0\"/><path d=\"M12 18v3\"/>"
+                  "</svg>';"
+                "const buildMicFromPill=(pill)=>{"
+                  "if(micBtn)return micBtn;"
+                  "const b=pill.cloneNode(false);"
+                  "b.id=MIC_ID;"
+                  "b.type='button';"
+                  "b.removeAttribute('disabled');"
+                  "b.removeAttribute('aria-disabled');"
+                  "b.removeAttribute('data-svelte-h');"
+                  "b.setAttribute('aria-label','voice input');"
+                  "b.innerHTML=MIC_SVG+'<span data-mic-current>voice</span>';"
+                  "const lbl=b.querySelector('[data-mic-current]');"
+                  "const V=window.__easyaiVoice;"
+                  "const refresh=()=>{"
+                    "if(V&&V.recording())return;"
+                    "const ok=!!window.__easyaiSttLoaded&&V&&V.available();"
+                    "b.style.opacity=ok?'':'.45';"
+                    "b.style.cursor=ok?'pointer':'not-allowed';"
+                    "b.title=!window.__easyaiSttLoaded?'No voice model \u2014 open /models \u2192 Local models \u2192 Voice transcription':"
+                      "(V&&!V.available()?V.why():'Voice input: click to record, click again to stop');"
+                  "};"
+                  "refresh();"
+                  "setInterval(refresh,1000);"
+                  "b.addEventListener('click',(e)=>{"
+                    "e.preventDefault();e.stopPropagation();"
+                    "if(!V)return;"
+                    "if(!V.available()){alert(V.why()||'microphone unavailable');return;}"
+                    "if(!window.__easyaiSttLoaded&&!V.recording()){alert('No voice model loaded \u2014 open /models \u2192 Local models \u2192 Voice transcription');return;}"
+                    "V.toggle((s)=>{"
+                      "if(s.state==='recording'){b.style.color='#f87171';lbl.textContent='\u25cf '+(s.seconds||0)+'s';return;}"
+                      "if(s.state==='transcribing'){b.style.color='';lbl.textContent='\u2026';return;}"
+                      "b.style.color='';lbl.textContent='voice';"
+                      "if(s.state==='done'){"
+                        "const ta=document.querySelector('textarea');"
+                        "V.insertIntoTextarea(ta,s.text);"
+                      "}"
+                      "if(s.state==='error')alert('voice: '+s.error);"
+                    "});"
+                  "});"
+                  "micBtn=b;"
+                  "return b;"
+                "};"
+
                 // Reposition: walk UP from the pill until we hit a
                 // horizontal flex container (display:flex, flex-direction
                 // anything but column).  The pill itself often lives in
@@ -6359,7 +6815,8 @@ int main(int argc, char ** argv) {
                   "if(!toneBtn)buildToneFromPill(pill);"
                   "if(!toolsBtn)buildToolsFromPill(pill);"
                   "if(!effortBtn)buildEffortFromPill(pill);"
-                  "if(!toneBtn||!toolsBtn||!effortBtn)return;"
+                  "if(!micBtn)buildMicFromPill(pill);"
+                  "if(!toneBtn||!toolsBtn||!effortBtn||!micBtn)return;"
                   "const row=findHorizontalRow(pill);"
                   "if(!row)return;"
                   // The pill may be nested several levels deep inside a
@@ -6374,14 +6831,17 @@ int main(int argc, char ** argv) {
                   "if(toneBtn.parentElement===row&&"
                      "toolsBtn.parentElement===row&&"
                      "effortBtn.parentElement===row&&"
+                     "micBtn.parentElement===row&&"
                      "toneBtn.nextSibling===toolsBtn&&"
                      "toolsBtn.nextSibling===pillBranch&&"
-                     "pillBranch.nextSibling===effortBtn){"
+                     "pillBranch.nextSibling===effortBtn&&"
+                     "effortBtn.nextSibling===micBtn){"
                     "return;"
                   "}"
                   "row.insertBefore(toneBtn,pillBranch);"
                   "row.insertBefore(toolsBtn,pillBranch);"
                   "row.insertBefore(effortBtn,pillBranch.nextSibling);"
+                  "row.insertBefore(micBtn,effortBtn.nextSibling);"
                 "};"
 
                 "if(document.documentElement){reposition();}"
@@ -6789,6 +7249,7 @@ int main(int argc, char ** argv) {
                 "const pollModel=async()=>{"
                   "let j=null;"
                   "try{const r=await fetch('/health');j=await r.json();}catch(e){return;}"
+                  "window.__easyaiSttLoaded=!!(j&&j.stt_loaded);"
                   "if(!j||j.model_loaded!==false){"
                     "if(window.__easyaiNoModel){"
                       "window.__easyaiNoModel=false;"
@@ -7299,8 +7760,10 @@ int main(int argc, char ** argv) {
             // Minimal inline webui — substitute the title placeholder we
             // baked into the kWebUI string.
             ctx->webui_html = str_replace_all(
-                str_replace_all(kWebUI, "__EASYAI_TITLE__", html_escape(title)),
-                "__EASYAI_VISUAL_JS__", kEasyaiVisualJs);
+                str_replace_all(
+                    str_replace_all(kWebUI, "__EASYAI_TITLE__", html_escape(title)),
+                    "__EASYAI_VISUAL_JS__", kEasyaiVisualJs),
+                "__EASYAI_VOICE_JS__", kEasyaiVoiceJs);
         }
 
         if (!args.webui_icon.empty()) {
@@ -7385,10 +7848,32 @@ int main(int argc, char ** argv) {
             "[easyai-server] NO MODEL LOADED: %s\n"
             "                path: %s\n"
             "                chat is unavailable (503 model_not_loaded) until a model is loaded.\n"
-            "                open http://%s:%d/models to download, run or slink one.\n",
+            "                open %s://%s:%d/models to download, run or slink one.\n",
             ctx->load_error.c_str(),
             args.model_path.empty() ? "(none — pass --model or [SERVER] model)" : args.model_path.c_str(),
-            args.host.c_str(), args.port);
+            args.tls_cert.empty() ? "http" : "https", args.host.c_str(), args.port);
+    }
+
+    // Voice transcription: same non-fatal posture as the chat model.
+    ctx->tls           = !args.tls_cert.empty();
+    ctx->stt_language  = args.stt_language.empty() ? std::string("auto") : args.stt_language;
+    ctx->stt_model_arg = args.stt_model_path;
+    if (args.stt_threads > 0) ctx->stt.threads(args.stt_threads);
+    if (!args.stt_model_path.empty()) {
+        if (!ctx->stt.load(args.stt_model_path)) {
+            ctx->stt_error = ctx->stt.last_error();
+            std::fprintf(stderr,
+                "[easyai-server] NO STT MODEL: %s\n"
+                "                path: %s\n"
+                "                POST /v1/audio/transcriptions answers 503 (stt_not_loaded) until one is loaded from /models.\n",
+                ctx->stt_error.c_str(), args.stt_model_path.c_str());
+        } else {
+            std::fprintf(stderr, "[easyai-server] stt: %s loaded (language=%s, threads=%s)\n",
+                         stt_model_id(*ctx).c_str(), ctx->stt_language.c_str(),
+                         args.stt_threads > 0 ? std::to_string(args.stt_threads).c_str() : "auto");
+        }
+    } else {
+        std::fprintf(stderr, "[easyai-server] stt: no model (pass --stt-model or [STT] model; download one from /models)\n");
     }
 
     // Engine::load() resolves symlinks on the model path (so the AI box's
@@ -7416,7 +7901,7 @@ int main(int argc, char ** argv) {
         "                compute: ngl=%d  flash_attn=%s  mlock=%s  no_mmap=%s  split_mode=%s\n"
         "                cache: type_k=%s  type_v=%s  no_kv_offload=%s\n"
         "                generation: max_tokens=%d  seed=%u\n"
-        "                listening on http://%s:%d  (webui at /)\n"
+        "                listening on %s://%s:%d  (webui at /)\n"
         "                inject_datetime=%s  cutoff=%s  verbose=%s\n"
         "                max_tool_hops=99999  retry_on_incomplete=ON\n"
         "                http_timeout=%ds (read/write)  http_retries=%d\n",
@@ -7438,7 +7923,7 @@ int main(int argc, char ** argv) {
         args.cache_type_v.empty() ? "default" : args.cache_type_v.c_str(),
         args.no_kv_offload ? "ON" : "OFF",
         args.max_tokens, args.seed,
-        args.host.c_str(), args.port,
+        ctx->tls ? "https" : "http", args.host.c_str(), args.port,
         ctx->inject_datetime ? "ON" : "OFF",
         ctx->knowledge_cutoff.c_str(),
         args.verbose ? "ON" : "OFF",
@@ -7492,7 +7977,32 @@ int main(int argc, char ** argv) {
     }
 
     // -------- http server -------------------------------------------------
-    httplib::Server svr;
+    // Plain http by default; --tls-cert/--tls-key switch to httplib's
+    // SSLServer (same routes). TLS exists for one reason: browsers expose
+    // the microphone only on https or localhost, and the AI box is reached
+    // as http://ai-pro.local on the LAN.
+    std::unique_ptr<httplib::Server> svr_holder;
+    if (!args.tls_cert.empty() || !args.tls_key.empty()) {
+#if defined(CPPHTTPLIB_OPENSSL_SUPPORT)
+        if (args.tls_cert.empty() || args.tls_key.empty()) {
+            std::fprintf(stderr, "[easyai-server] --tls-cert and --tls-key must be given together\n");
+            return 1;
+        }
+        auto ssl = std::make_unique<httplib::SSLServer>(args.tls_cert.c_str(), args.tls_key.c_str());
+        if (!ssl->is_valid()) {
+            std::fprintf(stderr, "[easyai-server] TLS: cannot load %s / %s (PEM certificate + private key)\n",
+                         args.tls_cert.c_str(), args.tls_key.c_str());
+            return 1;
+        }
+        svr_holder = std::move(ssl);
+#else
+        std::fprintf(stderr, "[easyai-server] TLS requested but this build has no OpenSSL\n");
+        return 1;
+#endif
+    } else {
+        svr_holder = std::make_unique<httplib::Server>();
+    }
+    httplib::Server & svr = *svr_holder;
     svr.set_payload_max_length(args.max_body);
     // Apply the configured HTTP timeout to BOTH directions.  Default is
     // 600 s (10 min) so long thinking turns don't trip a mid-stream cut
@@ -7876,6 +8386,10 @@ int main(int argc, char ** argv) {
         if (!require_auth(ctx_ref, q, r)) return;
         route_preset(ctx_ref, q, r);
     });
+    svr.Post("/v1/audio/transcriptions", [&](const auto & q, auto & r){
+        if (!require_auth(ctx_ref, q, r)) return;
+        route_transcriptions(ctx_ref, q, r);
+    });
 
     // Ollama-compat list-models. Same auth posture as /v1/models.
     svr.Get ("/api/tags",             [&](const auto & q, auto & r){
@@ -8053,6 +8567,12 @@ int main(int argc, char ** argv) {
             {"datetime_injection", ctx_ref.inject_datetime},
             {"knowledge_cutoff", ctx_ref.knowledge_cutoff},
             {"webui_mode", args.webui_mode},
+            {"tls", ctx_ref.tls},
+            {"stt_available", easyai::Stt::available()},
+            {"stt_loaded", ctx_ref.stt.is_loaded()},
+            {"stt_model", stt_model_id(ctx_ref)},
+            {"stt_language", ctx_ref.stt_language},
+            {"transcriptions", ctx_ref.n_transcriptions.load()},
         };
 
         std::uint64_t rss_kb = 0, hwm_kb = 0; metrics::read_proc_self_status(rss_kb, hwm_kb);
@@ -8075,6 +8595,7 @@ int main(int argc, char ** argv) {
         ordered_json j = {
             {"server", server}, {"model", model}, {"parameters", params},
             {"services", services}, {"metrics", metrics_j}, {"models", models_side},
+            {"endpoints", endpoint_directory(ctx_ref, args)},
         };
         res.set_content(j.dump(), "application/json");
     });
@@ -8191,6 +8712,104 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "[easyai-server] model symlink %s -> %s\n", args.model_path.c_str(), name.c_str());
         nlohmann::ordered_json j{{"ok", true}, {"model", name}, {"link", args.model_path}, {"target", target}};
         res.set_content(j.dump(), "application/json");
+    });
+
+    // ---- voice transcription model (whisper ggml-*.bin) ----
+    svr.Get("/models/api/stt", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        ordered_json j = stt_status_json(ctx_ref, ctx_ref.models->download_dir());
+        auto s = ctx_ref.models->download_status();
+        j["download"] = { {"id", s.id}, {"repo", s.repo}, {"filename", s.filename}, {"state", s.state},
+                          {"downloaded_bytes", s.downloaded_bytes}, {"total_bytes", s.total_bytes},
+                          {"percent", s.percent}, {"error", s.error} };
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Post("/models/api/stt/download", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        std::string name;
+        try { name = nlohmann::json::parse(req.body).value("name", ""); }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
+        if (!stt_safe_name(name)) { res.status = 400; res.set_content(error_json("invalid model name"), "application/json"); return; }
+        std::string err; const std::string file = stt_file_for(name);
+        int id = ctx_ref.models->start_download_file(kSttHfRepo, file, err);
+        if (id < 0) { res.status = 409; res.set_content(error_json(err), "application/json"); return; }
+        res.set_content(ordered_json({{"id", id}, {"repo", kSttHfRepo}, {"filename", file}, {"state", "downloading"}}).dump(),
+                        "application/json");
+    });
+    svr.Post("/models/api/stt/run", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        std::string name; bool want_link = false;
+        try { auto b = nlohmann::json::parse(req.body); name = b.value("name", ""); want_link = b.value("link", false); }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
+        if (!stt_safe_name(name)) { res.status = 400; res.set_content(error_json("invalid file name"), "application/json"); return; }
+        const std::string target = (std::filesystem::path(ctx_ref.models->download_dir()) / name).string();
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(target, ec)) {
+            res.status = 400; res.set_content(error_json("no such file: " + name), "application/json"); return;
+        }
+        bool ok; std::string load_err;
+        {
+            std::lock_guard<std::mutex> lk(ctx_ref.stt_mu);
+            ok = ctx_ref.stt.load(target);
+            if (ok) ctx_ref.stt_error.clear(); else load_err = ctx_ref.stt.last_error();
+        }
+        if (!ok) {
+            res.status = 500;
+            res.set_content(error_json("failed to load STT model: " + load_err, "internal_error"), "application/json");
+            return;
+        }
+        bool linked = false; std::string link_err;
+        if (want_link) linked = set_model_symlink(ctx_ref.stt_model_arg, target, link_err);
+        std::fprintf(stderr, "[easyai-server] hot-swapped STT model -> %s%s\n",
+                     name.c_str(), (want_link && linked) ? " (symlinked as default)" : "");
+        ordered_json j{{"ok", true}, {"model", stt_model_id(ctx_ref)}, {"file", name}, {"linked", linked}};
+        if (want_link && !linked) j["link_error"] = link_err;
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Post("/models/api/stt/symlink", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        std::string name;
+        try { name = nlohmann::json::parse(req.body).value("name", ""); }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
+        if (!stt_safe_name(name)) { res.status = 400; res.set_content(error_json("invalid file name"), "application/json"); return; }
+        const std::string target = (std::filesystem::path(ctx_ref.models->download_dir()) / name).string();
+        std::string link_err;
+        if (ctx_ref.stt_model_arg.empty()) {
+            res.status = 400;
+            res.set_content(error_json("no --stt-model / [STT] model path configured to link"), "application/json");
+            return;
+        }
+        if (!set_model_symlink(ctx_ref.stt_model_arg, target, link_err)) {
+            res.status = 400; res.set_content(error_json(link_err), "application/json"); return;
+        }
+        res.set_content(ordered_json({{"ok", true}, {"file", name}, {"link", ctx_ref.stt_model_arg}, {"target", target}}).dump(),
+                        "application/json");
+    });
+    svr.Post("/models/api/stt/unload", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        { std::lock_guard<std::mutex> lk(ctx_ref.stt_mu); ctx_ref.stt.unload(); ctx_ref.stt_error = "unloaded from /models"; }
+        res.set_content("{\"ok\":true}", "application/json");
+    });
+    svr.Post("/models/api/stt/delete", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (!models_ready(res)) return;
+        std::string name;
+        try { name = nlohmann::json::parse(req.body).value("name", ""); }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
+        if (!stt_safe_name(name)) { res.status = 400; res.set_content(error_json("invalid file name"), "application/json"); return; }
+        const std::string target = (std::filesystem::path(ctx_ref.models->download_dir()) / name).string();
+        if (ctx_ref.stt.is_loaded() && stt_canonical(ctx_ref.stt.model_path()) == stt_canonical(target)) {
+            res.status = 409; res.set_content(error_json("that STT model is running — unload it first"), "application/json"); return;
+        }
+        std::error_code ec;
+        if (!std::filesystem::remove(target, ec) || ec) {
+            res.status = 400; res.set_content(error_json("delete failed: " + (ec ? ec.message() : "no such file")), "application/json"); return;
+        }
+        res.set_content("{\"ok\":true}", "application/json");
     });
 
     // ---- download manager (native libcurl → HuggingFace) ----
