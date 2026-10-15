@@ -58,7 +58,7 @@ public:
         std::int64_t  mtime      = 0;      // unix seconds
         bool          is_current = false;  // == the model the engine is serving (in memory)
         bool          is_default = false;  // == what the --model path resolves to (next start)
-        std::string   link_target;         // set when the entry is itself a symlink
+        std::string   link_target;         // symlink chain "a.gguf → b.gguf" when the entry is a link
     };
 
     // A downloadable .gguf inside a HuggingFace repo.

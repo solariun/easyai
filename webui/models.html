@@ -437,7 +437,8 @@ async function loadLocal(){
         via <span class="mono">${esch(base(d.default_link))}</span>. Restart the service, or <b>Run</b> the default, to make them agree.</div>`;
     let rows=d.models.map(m=>`<tr data-f="${enc(m.name)}">
       <td onclick="localDetail('${esch(m.name)}',this.parentNode)">
-        <div>${esch(m.name)}${m.link_target?' <span class="muted small mono">→ '+esch(base(m.link_target))+'</span>':''}
+        <div>${esch(m.name)}${m.link_target?' <span class="muted small mono" title="symlink chain; the file on the right is the one that loads">→ '+esch(m.link_target.split(' → ').map(base).join(' → '))+'</span>':''}
+          ${m.link_target&&!m.size_bytes?' <span class="pill too_tight" title="the link points at a file that is not there">broken link</span>':''}
           ${m.is_current?' <span class="pill good" title="loaded in memory now">running</span>':''}
           ${m.is_default?' <span class="pill perfect" title="what --model resolves to; loaded on the next start">default</span>':''}</div>
         <div class="muted small">${new Date(m.mtime*1000).toLocaleDateString()}</div></td>
@@ -445,7 +446,7 @@ async function loadLocal(){
       <td class="num" style="white-space:nowrap">
         <button class="btn small acc" onclick="runModel('${esch(m.name)}')" ${m.is_current?'disabled':''}>Run</button>
         <button class="btn small" onclick="slinkModel('${esch(m.name)}')" title="Set as default model (symlink); effective next start">Slink</button>
-        <button class="btn small danger" onclick="delModel('${esch(m.name)}')" ${m.is_current?'disabled':''}>Delete</button></td></tr>`).join('');
+        <button class="btn small danger" onclick="delModel('${esch(m.name)}',${m.link_target?'true':'false'})" ${m.is_current&&!m.link_target?'disabled':''} title="${m.link_target?'removes this link only; the target file stays':'deletes the file from disk'}">${m.link_target?'Unlink':'Delete'}</button></td></tr>`).join('');
     let html=note+`<table><thead><tr><th>File</th><th class="num">Size</th><th class="num">Actions</th></tr></thead><tbody>${rows}</tbody></table>`;
     $('#localWrap').innerHTML=html;$('#dlLocalWrap').innerHTML=html;
   }catch(e){$('#localWrap').innerHTML='<div class="empty">'+esch(e.message)+'</div>';}
@@ -577,8 +578,10 @@ async function slinkModel(name){
   try{await api('/models/api/symlink',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
     toast(name+' set as default (symlink)');loadLocal();}catch(e){toast(e.message,true);}
 }
-async function delModel(name){
-  if(!confirm('Delete "'+name+'" from disk? This cannot be undone.'))return;
+async function delModel(name,isLink){
+  const q=isLink?'Remove the link "'+name+'"? Only the link goes; the file it points at stays.'
+                :'Delete "'+name+'" from disk? This cannot be undone.';
+  if(!confirm(q))return;
   try{await api('/models/api/local/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
     toast('Deleted '+name);loadLocal();$('#localDetail').innerHTML='<div class="empty">Select a local model.</div>';}catch(e){toast(e.message,true);}
 }

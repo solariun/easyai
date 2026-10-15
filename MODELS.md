@@ -189,7 +189,10 @@ the server's `api_key` Bearer auth on `/v1/*`.
 - A table of every `.gguf` in `download_dir`, with size, date, a **running**
   badge on the file the engine holds in memory and a **default** badge on
   the file the `--model` symlink (`ai.gguf`) resolves to, i.e. what the
-  next start loads. Symlink rows show their target (`ai.gguf → gemma…`).
+  next start loads. Symlink rows show their whole chain (`ai.gguf → gemma…`,
+  or `Qwen… → ai.gguf → gemma…` for a stray second link, which is then just
+  another name for gemma and carries gemma's badges) and offer **Unlink**
+  (removes the link only) instead of Delete.
   When the two differ (after a Run or a Slink) a note above the table
   names both and says a restart, or a Run of the default, makes them
   agree. Same table in the Downloads tab.

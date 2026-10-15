@@ -59,6 +59,28 @@ int main() {
     CHECK(find(v, "qwen.gguf")->is_current && find(v, "qwen.gguf")->is_default);
     CHECK(!find(v, "gemma.gguf")->is_current);
 
+    // --- a stray second link: qlink.gguf -> ai.gguf -> qwen.gguf ------------
+    // (what the AI box had: a Qwen-named link that is really the ai.gguf
+    // target). It must show the whole chain and carry the target's flags.
+    fs::create_symlink("ai.gguf", dir / "qlink.gguf");
+    v = eng.list_local();
+    CHECK(find(v, "qlink.gguf")->link_target == "ai.gguf → qwen.gguf");
+    CHECK(find(v, "qlink.gguf")->is_current && find(v, "qlink.gguf")->is_default);
+    std::string e2;
+    CHECK(eng.delete_local("qlink.gguf", e2));          // removes the link only
+    CHECK(fs::exists(dir / "qwen.gguf") && fs::exists(dir / "ai.gguf") && !fs::exists(dir / "qlink.gguf"));
+
+    // --- dangling link: listed (so it can be cleaned up), unlinkable --------
+    fs::create_symlink("gone.gguf", dir / "dead.gguf");
+    v = eng.list_local();
+    CHECK(find(v, "dead.gguf") && find(v, "dead.gguf")->link_target == "gone.gguf" && find(v, "dead.gguf")->size_bytes == 0);
+    CHECK(eng.delete_local("dead.gguf", e2));
+    CHECK(!fs::exists(fs::symlink_status(dir / "dead.gguf")));
+    // deleting the --model link itself removes only the link
+    CHECK(eng.delete_local("ai.gguf", e2));
+    CHECK(fs::exists(dir / "qwen.gguf") && fs::exists(dir / "gemma.gguf"));
+    fs::create_symlink("qwen.gguf", dir / "ai.gguf");
+
     // --- no --model configured: nothing is "default" -----------------------
     easyai::ModelsEngine bare(dir.string(), nullptr, [&]() { return engine_path; }, 1, dir.string());
     v = bare.list_local();

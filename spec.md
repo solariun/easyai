@@ -1510,8 +1510,19 @@ flowchart LR
    is_current, is_default, link_target}], running, default_link,
    default_target}`. `is_current`: the file's canonical path equals the
    engine's model path. `is_default`: it equals the canonical path of the
-   configured `--model`. `link_target`: `readlink` of the entry when the
-   entry is itself a symlink (so `ai.gguf → gemma.gguf` is visible).
+   configured `--model`. `link_target`: the whole symlink chain of the
+   entry, hops joined by ` → ` (max 8 hops), so a stray
+   `Qwen.gguf → ai.gguf → gemma.gguf` reads as a second name for gemma
+   and not as Qwen weights (the AI box had exactly that: a Qwen-named
+   link at the Gemma size, flagged running). Link rows offer **Unlink**
+   instead of Delete, always enabled: it removes the link only
+   (`fs::remove` does not follow symlinks), the target file stays.
+   Found while writing the test: `safe_in_dir` canonicalised the leaf
+   name, so a delete of `ai.gguf` resolved to the weights behind it and
+   removed those. The guard now validates the name (no separators, no
+   `..`) and returns `download_dir/name` as is; `delete_local` uses
+   `symlink_status`, so dangling links are listed (size 0, pill
+   **broken link**) and can be unlinked.
    `running` and `default_target` are real paths; `default_link` is the
    `--model` path as configured.
 2. `GET /models/api/local/detail` carries the same `is_current` and

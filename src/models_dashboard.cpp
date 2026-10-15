@@ -1045,11 +1045,12 @@ bool safe_in_dir(const std::string & dir, const std::string & filename, fs::path
     if (!ends_with_ci(filename, ".gguf")) { err = "not a .gguf file"; return false; }
     std::error_code ec;
     fs::path root = fs::weakly_canonical(fs::absolute(dir, ec), ec);
-    fs::path cand = fs::weakly_canonical(root / filename, ec);
     if (ec) { err = "path resolution failed"; return false; }
-    auto a = root.begin(); auto b = cand.begin();
-    for (; a != root.end(); ++a, ++b) if (b == cand.end() || *b != *a) { err = "path escapes download dir"; return false; }
-    out = cand; return true;
+    // The checks above already forbid separators and "..", so root/filename
+    // cannot escape. The leaf is deliberately NOT canonicalised: a symlink
+    // entry (ai.gguf) must stay the link itself, or deleting the link would
+    // delete the weights it points at.
+    out = root / filename; return true;
 }
 }  // namespace
 
@@ -1068,7 +1069,8 @@ std::vector<ModelsEngine::LocalModel> ModelsEngine::list_local() {
     for (const auto & e : fs::directory_iterator(download_dir_, ec)) {
         if (ec) break;
         std::error_code fe;
-        if (!e.is_regular_file(fe)) continue;
+        // Regular files and symlinks (dangling ones too, so they can be unlinked).
+        if (!e.is_regular_file(fe) && !e.is_symlink(fe)) continue;
         std::string name = e.path().filename().string();
         if (!ends_with_ci(name, ".gguf")) continue;
         LocalModel m; m.name = name;
@@ -1082,8 +1084,20 @@ std::vector<ModelsEngine::LocalModel> ModelsEngine::list_local() {
         std::error_code rec; fs::path rp = fs::weakly_canonical(e.path(), rec);
         m.is_current = !curp.empty() && rp == curp;
         m.is_default = !defp.empty() && rp == defp;
-        std::error_code lec;
-        if (fs::is_symlink(e.path(), lec) && !lec) m.link_target = fs::read_symlink(e.path(), lec).string();
+        // Follow the whole symlink chain so "Qwen.gguf → ai.gguf → gemma.gguf"
+        // reads as what it is: a second name for gemma, not Qwen weights.
+        {
+            constexpr int kMaxLinkHops = 8;
+            fs::path p = e.path();
+            std::error_code lec;
+            for (int hop = 0; hop < kMaxLinkHops && fs::is_symlink(p, lec) && !lec; ++hop) {
+                fs::path t = fs::read_symlink(p, lec);
+                if (lec) break;
+                if (!m.link_target.empty()) m.link_target += " → ";
+                m.link_target += t.string();
+                p = t.is_absolute() ? t : p.parent_path() / t;
+            }
+        }
         out.push_back(std::move(m));
     }
     std::sort(out.begin(), out.end(), [](const LocalModel & a, const LocalModel & b) { return a.name < b.name; });
@@ -1207,10 +1221,13 @@ bool ModelsEngine::delete_local(const std::string & name, std::string & err) {
     fs::path dest;
     if (!safe_in_dir(download_dir_, name, dest, err)) return false;
     std::error_code ec;
-    if (!fs::exists(dest, ec)) { err = "not found: " + name; return false; }
-    if (!fs::is_regular_file(dest, ec)) { err = "not a regular file"; return false; }
+    // symlink_status: a link (even a dangling one) is removed as the link
+    // itself; fs::remove never follows symlinks.
+    auto st = fs::symlink_status(dest, ec);
+    if (ec || !fs::exists(st)) { err = "not found: " + name; return false; }
+    if (!fs::is_symlink(st) && !fs::is_regular_file(st)) { err = "not a regular file"; return false; }
     if (!fs::remove(dest, ec) || ec) { err = "delete failed: " + (ec ? ec.message() : std::string("unknown")); return false; }
-    easyai::log::write("[models] deleted %s\n", name.c_str());
+    easyai::log::write("[models] %s %s\n", fs::is_symlink(st) ? "unlinked" : "deleted", name.c_str());
     return true;
 }
 
