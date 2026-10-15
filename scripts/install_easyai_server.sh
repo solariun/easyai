@@ -319,6 +319,7 @@ stt_model="large-v3-turbo-q5_0"               # whisper model downloaded at inst
                                               # linked as stt.bin. "none" = no download
                                               # (pick one later from /models). --stt-model.
 stt_hf_repo="ggerganov/whisper.cpp"
+stt_lfs_pointer_max_bytes=4096                # a Git LFS pointer file is ~130 bytes; real weights are MBs
 do_tls=0                                      # --tls: generate a self-signed certificate
                                               # (CN=<mdns-hostname>.local) under $config_dir
                                               # and enable [SERVER] tls_cert/tls_key so the
@@ -822,7 +823,7 @@ if [[ $do_install -eq 1 ]]; then
     sudo apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build git ccache pkg-config curl ca-certificates \
         libcurl4-openssl-dev libomp-dev libcap2-bin jq \
-        systemd-coredump patchelf
+        systemd-coredump patchelf git-lfs
 
     case "$backend_resolved" in
         vulkan)
@@ -1012,6 +1013,14 @@ if [[ $do_whisper -eq 1 ]]; then
     fetch_repo "$whisper_dir" "$whisper_repo" "$whisper_ref"
 fi
 fetch_repo "$easyai_dir" "$easyai_repo" "$easyai_ref"
+# The default voice model ships in the repo through Git LFS
+# (models/stt/ggml-large-v3-turbo-q5_0.bin). Without git-lfs the checkout
+# holds a 130-byte pointer; the voice-model step below detects that and
+# downloads from HuggingFace instead.
+if command -v git-lfs >/dev/null 2>&1; then
+    log "git lfs pull in $easyai_dir (voice model)"
+    git -C "$easyai_dir" lfs pull || warn "git lfs pull failed — voice model will be downloaded instead"
+fi
 
 # Symlink llama.cpp (and whisper.cpp) as siblings of easyai if they aren't already.
 expected_llama="$(dirname "$easyai_dir")/llama.cpp"
@@ -2228,10 +2237,17 @@ if [[ $do_service -eq 1 && $do_whisper -eq 1 && "$stt_model" != "none" ]]; then
     stt_file="ggml-$stt_model.bin"
     stt_dest="$service_model_dir/$stt_file"
     stt_link="$service_model_dir/$service_stt_link"
+    stt_repo_copy="$easyai_dir/models/stt/$stt_file"
     sudo install -d -m755 -o "$service_user" -g "$service_group" "$service_model_dir"
     if [[ -f "$stt_dest" ]]; then
         log "voice model already present: $stt_dest"
+    elif [[ -f "$stt_repo_copy" ]] && \
+         [[ $(stat -c %s "$stt_repo_copy") -gt $stt_lfs_pointer_max_bytes ]]; then
+        # Real weights from the repo (Git LFS resolved) — no network needed.
+        log "copying voice model from the repo: $stt_repo_copy → $stt_dest"
+        sudo install -m640 -o "$service_user" -g "$service_group" "$stt_repo_copy" "$stt_dest"
     else
+        [[ -f "$stt_repo_copy" ]] && log "repo copy of $stt_file is an LFS pointer (git-lfs missing) — downloading"
         log "downloading whisper model $stt_file (from $stt_hf_repo) → $stt_dest"
         if sudo curl -fL --retry 3 --progress-bar -o "$stt_dest.part" \
                 "https://huggingface.co/$stt_hf_repo/resolve/main/$stt_file"; then

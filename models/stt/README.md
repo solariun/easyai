@@ -1,14 +1,20 @@
 # Voice transcription model — `ggml-large-v3-turbo-q5_0.bin`
 
 The whisper model easyai-server loads for `POST /v1/audio/transcriptions`
-and the chat's mic chip (`[STT] model` / `--stt-model`). The weight file is
-**not committed** (574 MB; GitHub refuses blobs over 100 MB). Fetch it into
-this directory with:
+and the chat's mic chip (`[STT] model` / `--stt-model`). The weight file
+ships in this directory through **Git LFS** (574 MB; plain git blobs are
+capped at 100 MB on GitHub). A clone without git-lfs holds a 130-byte
+pointer file instead of the weights; resolve it with:
 
 ```bash
-scripts/fetch_stt_model.sh            # → models/stt/ggml-large-v3-turbo-q5_0.bin, sha256-verified
-scripts/fetch_stt_model.sh small      # any other name from the table below
+git lfs install && git lfs pull        # → models/stt/ggml-large-v3-turbo-q5_0.bin (real file)
+scripts/fetch_stt_model.sh             # alternative: download from HuggingFace, sha256-verified
+scripts/fetch_stt_model.sh small       # any other name from the table below
 ```
+
+The Linux installer copies the LFS-resolved file into
+`/var/lib/easyai/models/` and falls back to the HuggingFace download when
+it only finds the pointer.
 
 The Linux installer downloads the same file into `/var/lib/easyai/models`
 and links it as `stt.bin`; the `/models` dashboard (Local models → Voice

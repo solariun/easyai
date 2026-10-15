@@ -882,11 +882,16 @@ this session).
 (574 MB, SHA-256 `394221709c…a7e2`, MIT, from `ggerganov/whisper.cpp`
 at HF commit `5359861`) is documented in `models/stt/README.md` with its
 provenance table and alternatives, and fetched by
-`scripts/fetch_stt_model.sh` (checksum-verified). The binary itself is
-not committed: GitHub rejects blobs over 100 MB, and Git LFS would
-spend the free 1 GB/month bandwidth on two clones, breaking the
-installer's own clone. Measured with it: the 11 s JFK sample in 1224 ms
-on Metal, punctuation included.
+`scripts/fetch_stt_model.sh` (checksum-verified). The binary is committed
+through **Git LFS** (`.gitattributes`: `models/stt/*.bin filter=lfs`), by
+Gustavo's decision on 2026-10-15 so a fresh checkout is ready to work;
+GitHub rejects plain blobs over 100 MB. Cost accepted: each LFS checkout
+of the file counts against the account's LFS bandwidth quota. The Linux
+installer (`git lfs pull` after clone, then `install` from
+`models/stt/` into `/var/lib/easyai/models/`) needs no HuggingFace
+access for the default model; a pointer-only checkout (no git-lfs,
+detected by size ≤ 4096 bytes) falls back to the download. Measured with
+it: the 11 s JFK sample in 1224 ms on Metal, punctuation included.
 
 **Limits.** No streaming / partial transcripts (push-to-talk only).
 Non-WAV uploads from external clients are refused. Browser microphone

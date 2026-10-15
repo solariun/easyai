@@ -126,8 +126,10 @@ landing on it for the first time) sees what shipped recently.
   (default ON) picks up `../whisper.cpp` and links the ggml already built.
 - Recommended voice model `ggml-large-v3-turbo-q5_0` documented in
   `models/stt/README.md` (source, commit, SHA-256, license, data) and
-  fetched by `scripts/fetch_stt_model.sh`; the installer downloads it and
-  links `stt.bin`. Enable with `--stt-model <file>` or `[STT] model = <file>`.
+  shipped in the repo via Git LFS (`git lfs pull` after a clone, or
+  `scripts/fetch_stt_model.sh` to download instead); the installer copies
+  it from the checkout and links `stt.bin`. Enable with `--stt-model
+  <file>` or `[STT] model = <file>`.
 - **Model finder** in `/models` and `easyai-cli --llm-manager`: a search
   now shows every HuggingFace match (multi-word, any order), most
   downloaded first, fit informational — and fixes the bug where any query

@@ -6,6 +6,7 @@ models/*
 !models/stt/
 models/stt/*
 !models/stt/README.md
+!models/stt/ggml-large-v3-turbo-q5_0.bin
 *.o
 *.dylib
 *.so
