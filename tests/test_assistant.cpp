@@ -88,6 +88,15 @@ int main() {
     CHECK(guess_language("What is the weather like today?") == "en");
     CHECK(guess_language("xyz") == "en");
 
+    // --- /proc/asound/pcm: the AI box (HDMI-only card 0, analog card 1 with capture) ---
+    {
+        auto d = parse_asound_pcm("00-03: HDMI 0 : HDMI 0 : playback 1\n00-07: HDMI 1 : HDMI 1 : playback 1\n"
+                                  "01-00: ALC245 Analog : ALC245 Analog : playback 1 : capture 1\n");
+        CHECK(d.size() == 3 && !d[0].capture && d[0].playback && d[0].card == 0 && d[0].dev == 3);
+        CHECK(d[2].capture && d[2].playback && d[2].name == "ALC245 Analog" && d[2].alsa_name() == "plughw:1,0");
+        CHECK(parse_asound_pcm("garbage\n").empty());
+    }
+
     // --- beep + WAV round trip ---------------------------------------------------
     {
         auto b = make_beep(kSampleRate, 2);

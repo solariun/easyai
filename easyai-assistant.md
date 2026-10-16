@@ -69,7 +69,14 @@ levels, every transcript the wake model heard, and timings.
 ## 3. Configuration — `[ASSISTANT]` in `easyai.ini`
 
 Precedence: CLI flag > INI key > default. `--config` picks the file
-(default `/etc/easyai/easyai.ini`).
+(default `/etc/easyai/easyai.ini`). Every INI key has a flag with the same
+name and dashes instead of underscores. Three commands tell you everything:
+
+```bash
+easyai-assistant --help              # every option: flag, INI key, default, meaning
+easyai-assistant --list-options      # same, with the VALUE IN EFFECT after the INI and the flags
+easyai-assistant --text "que horas são?"   # try the chat + voice path, no microphone needed
+```
 
 | INI key | flag | default | meaning |
 |---|---|---|---|
@@ -81,7 +88,7 @@ Precedence: CLI flag > INI key > default. `--config` picks the file
 | `language` | `--language` | `auto` | force `pt` / `en` transcription |
 | `pause_ms`, `max_listen_ms` | same | 1500, 20000 | end of question |
 | `wake_model` | `--wake-model` | `models/stt/ggml-tiny.bin` | local whisper; `server` = send every burst to the STT endpoint |
-| `mic`, `speaker` | same | `default` | ALSA device names (`plughw:1,0`); macOS uses the system default |
+| `mic`, `speaker` | same | `default` | ALSA device names (`plughw:1,0`). When `default` has no capture (card 0 is HDMI-only on many boxes) the assistant picks the first card that has one, logs it, and the speaker follows that card; `cat /proc/asound/pcm` shows the cards. macOS uses the system default |
 | `tts` | `--tts` | `auto` | `server` / `say` / `piper` / `espeak`; auto = endpoint, else local |
 | `voice_pt`, `voice_en`, `piper` | same | engine defaults | local voices |
 | `tools` | `--tools` | `datetime,web` | built-in tools; empty = none |

@@ -84,5 +84,16 @@ std::string guess_language(const std::string & text);
 // count beeps of kBeepHz/kBeepMs with kBeepGapMs gaps, PCM16 at rate_hz.
 std::vector<std::int16_t> make_beep(int rate_hz, int count);
 
+// One line of /proc/asound/pcm: "01-00: ALC245 Analog : ALC245 Analog : playback 1 : capture 1".
+struct PcmDevice {
+    int         card = 0, dev = 0;
+    std::string name;
+    bool        playback = false, capture = false;
+    std::string alsa_name() const { return "plughw:" + std::to_string(card) + "," + std::to_string(dev); }
+};
+// Parses the whole /proc/asound/pcm text; used to find a capture device when
+// ALSA "default" has none (an HDMI-only card 0 is the usual reason).
+std::vector<PcmDevice> parse_asound_pcm(const std::string & text);
+
 }  // namespace assistant
 }  // namespace easyai

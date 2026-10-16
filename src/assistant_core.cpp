@@ -179,6 +179,32 @@ std::string guess_language(const std::string & text) {
     return pt > en ? "pt" : "en";
 }
 
+std::vector<PcmDevice> parse_asound_pcm(const std::string & text) {
+    std::vector<PcmDevice> out;
+    std::stringstream ss(text);
+    std::string line;
+    while (std::getline(ss, line)) {
+        // "cc-dd: name : subname : playback N : capture N"
+        if (line.size() < 6 || line[2] != '-' || line[5] != ':') continue;
+        PcmDevice d;
+        d.card = std::atoi(line.substr(0, 2).c_str());
+        d.dev  = std::atoi(line.substr(3, 2).c_str());
+        std::vector<std::string> fields; std::string f;
+        std::stringstream fs(line.substr(6));
+        while (std::getline(fs, f, ':')) {
+            const auto a = f.find_first_not_of(' '), b = f.find_last_not_of(' ');
+            fields.push_back(a == std::string::npos ? "" : f.substr(a, b - a + 1));
+        }
+        if (!fields.empty()) d.name = fields[0];
+        for (const auto & x : fields) {
+            if (x.rfind("playback", 0) == 0) d.playback = true;
+            if (x.rfind("capture", 0) == 0)  d.capture = true;
+        }
+        out.push_back(d);
+    }
+    return out;
+}
+
 std::vector<std::int16_t> make_beep(int rate_hz, int count) {
     std::vector<std::int16_t> out;
     const std::size_t tone = (std::size_t) rate_hz * kBeepMs / kMsPerSecond;

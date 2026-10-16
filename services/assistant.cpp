@@ -40,6 +40,7 @@ namespace {
 
 constexpr int kUnmuteMs        = 300;     // after the voice stops, before the mic counts again
 constexpr int kRetryS          = 10;      // backoff while the endpoint is down
+constexpr int kMicRetryS       = 15;      // no capture device yet (unplugged USB mic): retry, do not exit
 constexpr int kHttpTimeoutS    = 120;
 constexpr int kDefaultPauseMs  = 1500;
 constexpr int kDefaultMaxListenMs = 20000;
@@ -121,11 +122,45 @@ void set_key(const Key & k, const std::string & v) {
     else                       *static_cast<bool *>(k.dst) = !(v == "0" || v == "false" || v == "off" || v == "no");
 }
 
+std::string value_of(const Key & k) {
+    if (k.type == Key::S) return *static_cast<std::string *>(k.dst);
+    if (k.type == Key::I) return std::to_string(*static_cast<int *>(k.dst));
+    return *static_cast<bool *>(k.dst) ? "on" : "off";
+}
+
 void usage(Args & a) {
-    std::fprintf(stderr, "Usage: easyai-assistant [options]\n\nVoice assistant: listens for \"hey %s\" / \"oi %s\", answers aloud.\n"
-                         "Precedence: CLI flag > [ASSISTANT] key in --config > default.\n\n", a.name.c_str(), a.name.c_str());
-    for (const auto & k : keys(a))
-        std::fprintf(stderr, "  %-18s %-16s %s\n", k.flag, k.ini ? k.ini : "", k.help);
+    Args d;   // defaults
+    auto dk = keys(d);
+    std::fprintf(stderr,
+        "Usage: easyai-assistant [options]\n\n"
+        "Voice assistant: listens on the microphone for \"hey %s\" / \"oi %s\", records until a\n"
+        "pause, transcribes (POST /v1/audio/transcriptions), answers (POST /v1/chat/completions,\n"
+        "thinking off, tools run here) and speaks (POST /v1/audio/speech). Every call is\n"
+        "OpenAI-shaped: endpoint can be easyai-server, llama-server or OpenAI with an api_key.\n\n"
+        "Precedence: CLI flag  >  [ASSISTANT] key in the INI (--config)  >  default.\n"
+        "Each option: its flag, its INI key, its default, what it does.\n\n", a.name.c_str(), a.name.c_str());
+    const auto ks = keys(a);
+    for (std::size_t i = 0; i < ks.size(); ++i)
+        std::fprintf(stderr, "  %-18s %-16s %-22s %s\n", ks[i].flag, ks[i].ini ? ks[i].ini : "-",
+                     ks[i].type == Key::B ? "off" : ("[" + value_of(dk[i]) + "]").c_str(), ks[i].help);
+    std::fprintf(stderr,
+        "\n  --list-options                                  print every option with its flag, INI key and the\n"
+        "                                                  value in effect (after the INI and the flags), then exit\n"
+        "  -h, --help                                      this text\n\n"
+        "Test modes:  --text \"question\" answers without the microphone;  --once handles one question and exits.\n"
+        "INI example (/etc/easyai/easyai.ini):\n"
+        "  [ASSISTANT]\n  name = easy\n  endpoint = http://127.0.0.1:8080\n  mic = plughw:1,0\n  speaker = plughw:1,0\n  pause_ms = 1500\n");
+}
+
+void list_options(Args & a) {
+    Args d;
+    auto dk = keys(d);
+    const auto ks = keys(a);
+    std::printf("%-18s %-16s %-28s %-14s %s\n", "flag", "ini key", "value", "default", "description");
+    for (std::size_t i = 0; i < ks.size(); ++i)
+        std::printf("%-18s %-16s %-28s %-14s %s\n", ks[i].flag, ks[i].ini ? ks[i].ini : "-",
+                    value_of(ks[i]).substr(0, 28).c_str(), value_of(dk[i]).substr(0, 14).c_str(), ks[i].help);
+    std::printf("\nconfig file: %s   (section [ASSISTANT]; flags win over the file)\n", a.config.c_str());
 }
 
 bool parse_args(int argc, char ** argv, Args & a) {
@@ -139,9 +174,11 @@ bool parse_args(int argc, char ** argv, Args & a) {
         const std::string v = ini.get(kIniSection, k.ini);
         if (!v.empty()) set_key(k, v);
     }
+    bool want_list = false;
     for (int i = 1; i < argc; ++i) {
         const std::string f = argv[i];
         if (f == "-h" || f == "--help") { usage(a); return false; }
+        if (f == "--list-options") { want_list = true; continue; }
         bool found = false;
         for (const auto & k : keys(a)) {
             if (f != k.flag) continue;
@@ -156,6 +193,7 @@ bool parse_args(int argc, char ** argv, Args & a) {
     if (a.api_key.empty()) { const char * k = std::getenv("EASYAI_API_KEY"); if (k && *k) a.api_key = k; }   // same env the server unit uses
     if (a.stt_endpoint.empty()) a.stt_endpoint = a.endpoint;
     if (a.tts_endpoint.empty()) a.tts_endpoint = a.endpoint;
+    if (want_list) { list_options(a); return false; }
     return true;
 }
 
@@ -341,11 +379,40 @@ public:
         std::fprintf(stderr, "[easyai-assistant] tools: %s\n", names.empty() ? "(none)" : names.c_str());
     }
 
-    bool open_audio() {
+    // ALSA "default" is card 0, which on many boxes is HDMI-only: no capture.
+    // When the configured mic fails and it was "default", try every PCM that
+    // reports capture in /proc/asound/pcm; a matching speaker follows the mic.
+    bool open_mic() {
         std::string err;
-        if (!cap_.open(a_.mic, kSampleRate, kPeriodMs, err)) {
-            std::fprintf(stderr, "[easyai-assistant] microphone: %s\n", err.c_str());
-            return false;
+        if (cap_.open(a_.mic, kSampleRate, kPeriodMs, err)) return true;
+        std::fprintf(stderr, "[easyai-assistant] microphone %s: %s\n", a_.mic.c_str(), err.c_str());
+        if (a_.mic != "default") return false;
+        const auto devs = parse_asound_pcm(read_file("/proc/asound/pcm"));
+        bool any = false;
+        for (const auto & d : devs) {
+            if (!d.capture) continue;
+            any = true;
+            if (cap_.open(d.alsa_name(), kSampleRate, kPeriodMs, err)) {
+                std::fprintf(stderr, "[easyai-assistant] microphone: using %s (%s) — set [ASSISTANT] mic to keep it\n", d.alsa_name().c_str(), d.name.c_str());
+                a_.mic = d.alsa_name();
+                if (a_.speaker == "default" && d.playback) {
+                    a_.speaker = d.alsa_name();
+                    std::fprintf(stderr, "[easyai-assistant] speaker: following the microphone card, %s\n", a_.speaker.c_str());
+                }
+                return true;
+            }
+            std::fprintf(stderr, "[easyai-assistant] microphone %s (%s): %s\n", d.alsa_name().c_str(), d.name.c_str(), err.c_str());
+        }
+        if (!any) std::fprintf(stderr, "[easyai-assistant] no ALSA capture device on this box (plug a microphone; /proc/asound/pcm lists none)\n");
+        return false;
+    }
+
+    bool open_audio() {
+        while (!open_mic()) {
+            if (a_.once || g_stop) return false;
+            std::fprintf(stderr, "[easyai-assistant] retrying the microphone in %d s\n", kMicRetryS);
+            for (int i = 0; i < kMicRetryS * 10 && !g_stop; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (g_stop) return false;
         }
         std::fprintf(stderr, "[easyai-assistant] microphone: %s (%s, %d Hz, %d ms periods)\n",
                      a_.mic.c_str(), easyai::audio::backend_name().c_str(), kSampleRate, kPeriodMs);

@@ -1697,22 +1697,37 @@ language        = auto
 # threads         = 0
 
 # ============================================================
-# [TTS] — text-to-speech (POST /v1/audio/speech)
+# [TTS] — text-to-speech (POST /v1/audio/speech, the assistant's voice)
 # ============================================================
-# OpenAI audio shape: {input, voice: pt|en, response_format: wav} → audio/wav.
-# piper runs as a child process with the two male voices below; the
-# browser and easyai-assistant both use this endpoint. engine = none
-# switches it off (503).
+# OpenAI audio shape: {input, voice: pt|en|<engine voice>, response_format: wav}
+# -> audio/wav PCM16 mono. Every key below is also a flag of easyai-server
+# (--tts-<key with dashes>); easyai-server --help lists them.
+#
+#   engine          auto | kokoro | http | piper | say | espeak | none
+#                   auto = kokoro when model + voices + onnxruntime + espeak-ng
+#                   are found, else http when url answers, else piper, else none.
+#                   kokoro and http keep the best child-process engine as fallback.
+#   kokoro_model    Kokoro-82M .onnx (natural voice, run in-process in C++)
+#   kokoro_voices   its voices-v1.0.bin (54 voices)
+#   kokoro_voice_pt Kokoro voice for Portuguese: pm_alex (default), pm_santa, pf_dora
+#   kokoro_voice_en Kokoro voice for English: am_michael (default), bm_george, am_adam
+#   onnxruntime     libonnxruntime shared library (opened at run time)
+#   espeak_lib      libespeak-ng shared library (default: found in the apt/brew places)
+#   espeak_data     espeak-ng-data directory (default: found next to the library)
+#   url             engine http: base URL of another box's /v1/audio/speech
+#   piper           piper binary (fallback engine)
+#   voice_pt        piper .onnx / say voice / espeak voice for Portuguese (fallback)
+#   voice_en        same for English (fallback)
 [TTS]
-# auto = Kokoro-82M in-process (natural voice) when model + voices + onnxruntime
-# + espeak-ng are found, else piper, else none. piper stays as fallback.
 engine          = auto
 $([[ $do_kokoro -eq 1 ]] && echo "kokoro_model    = $tts_dir/kokoro-v1.0.onnx" || echo "# kokoro_model    = $tts_dir/kokoro-v1.0.onnx   (install had --no-kokoro)")
 $([[ $do_kokoro -eq 1 ]] && echo "kokoro_voices   = $tts_dir/voices-v1.0.bin" || echo "# kokoro_voices   = $tts_dir/voices-v1.0.bin")
 kokoro_voice_pt = $kokoro_voice_pt
 kokoro_voice_en = $kokoro_voice_en
 onnxruntime     = $ort_dir/lib/libonnxruntime.so
-# espeak_lib / espeak_data: found automatically (apt espeak-ng)
+# espeak_lib      =
+# espeak_data     =
+# url             = http://other-box:8080
 piper           = $piper_dir/piper
 voice_pt        = $tts_dir/$(basename "$piper_voice_pt").onnx
 voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
@@ -1720,16 +1735,43 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 # ============================================================
 # [ASSISTANT] — easyai-assistant.service (voice assistant)
 # ============================================================
-# Always listening on this box's microphone; "hey <name>" / "oi <name>"
-# wakes it, a pause of pause_ms ends the question, the answer is spoken.
-# Every call is OpenAI-shaped, so endpoint/api_key can point at another
-# box or at OpenAI. Tools run inside the assistant (datetime, web, plus
-# EASYAI-*.tools manifests from external_tools).
+# Always listening on this box's microphone. "hey <name>" / "oi <name>" wakes
+# it, a pause of pause_ms ends the question, the answer is spoken sentence by
+# sentence. Every key is also a flag (--<key with dashes>); flags win over
+# this file. `easyai-assistant --list-options` prints every option with the
+# value in effect; `easyai-assistant --text "question"` tests the chat and
+# voice path without a microphone.
+#
+#   name            wake name: "hey <name>", "oi <name>", "ei <name>", "ok <name>"
+#   endpoint        OpenAI-compatible base URL for chat (this server, llama-server, OpenAI)
+#   api_key         Bearer token; the unit passes the server's key as EASYAI_API_KEY
+#   model           model id sent in the request ("default" = whatever the server serves)
+#   stt_endpoint    base URL for /v1/audio/transcriptions (default: endpoint)
+#   tts_endpoint    base URL for /v1/audio/speech (default: endpoint)
+#   language        auto | pt | en  — forced transcription language (auto detects)
+#   pause_ms        silence that ends a question (ms)
+#   max_listen_ms   longest question (ms)
+#   wake_model      local whisper ggml for the wake word, or "server" (every burst to stt_endpoint)
+#   mic             ALSA capture device: default, plughw:1,0 … ("default" with no capture
+#                   makes the assistant pick the first card that has one and log it)
+#   speaker         ALSA playback device; "default" follows the microphone card
+#   tts             auto | server | kokoro | say | piper | espeak — where the voice comes from
+#   kokoro_model / kokoro_voices   local Kokoro files when tts is not the server
+#   voice_pt / voice_en / piper    local fallback voices (piper .onnx, say, espeak)
+#   tools           csv of built-in tools: datetime, web (empty = none)
+#   external_tools  directory of EASYAI-*.tools manifests (MCP-style tools run here)
+#   system          system prompt: file path or inline text (default: built-in short-answer prompt)
+#   history_turns   turns kept before the conversation restarts
+#   history_idle_s  idle seconds after which the conversation restarts
+#   verbose         1 = log VAD levels, every transcript the wake model heard, timings
+#   tls_insecure    1 = skip certificate verification (self-signed endpoint)
 [ASSISTANT]
 name            = $assistant_name
 endpoint        = http://127.0.0.1:$service_port
-# api_key         =                 (EASYAI_API_KEY from the unit when the server has a key)
+# api_key         =
 model           = default
+# stt_endpoint    =
+# tts_endpoint    =
 language        = auto
 pause_ms        = 1500
 max_listen_ms   = 20000
@@ -1742,6 +1784,7 @@ tools           = datetime,web
 # system          = $config_dir/assistant_system.txt
 history_turns   = 6
 history_idle_s  = 300
+verbose         = 0
 
 # ============================================================
 # [ENGINE] — model loading and inference tunables
