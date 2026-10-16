@@ -195,6 +195,19 @@ std::string SentenceChunker::flush() {
     return s;
 }
 
+bool looks_like_question(const std::string & transcript) {
+    // strip bracketed / starred markers before counting words
+    std::string t; bool skip = false; char close = 0;
+    for (char c : transcript) {
+        if (!skip && (c == '*' || c == '[' || c == '(')) { skip = true; close = c == '*' ? '*' : c == '[' ? ']' : ')'; continue; }
+        if (skip) { if (c == close) skip = false; continue; }
+        t.push_back(c);
+    }
+    int n = 0;
+    for (const auto & w : words(normalize_text(t))) if (w.size() >= 2 || std::isalpha((unsigned char) w[0])) ++n;
+    return n >= kMinQuestionWords;
+}
+
 std::string guess_language(const std::string & text) {
     int pt = 0, en = 0;
     for (const auto & w : words(normalize_text(text))) {

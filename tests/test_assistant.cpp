@@ -109,6 +109,11 @@ int main() {
         CHECK(b3 == 0);
     }
 
+    // --- hallucination guard ---------------------------------------------------
+    CHECK(looks_like_question("Como você está?") && looks_like_question("what time is it"));
+    CHECK(!looks_like_question("*crash*") && !looks_like_question("phase") && !looks_like_question("[BLANK_AUDIO]") && !looks_like_question("(music playing)"));
+    CHECK(!looks_like_question("") && looks_like_question("sim senhor"));
+
     // --- language guess ------------------------------------------------------------
     CHECK(guess_language("Qual é a previsão do tempo para hoje?") == "pt");
     CHECK(guess_language("What is the weather like today?") == "en");

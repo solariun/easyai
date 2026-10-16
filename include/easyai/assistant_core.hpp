@@ -89,6 +89,11 @@ private:
     std::string buf_;
 };
 
+// A transcript worth answering: at least kMinQuestionWords real words after
+// dropping whisper's noise markers (*crash*, [BLANK_AUDIO], (music)…).
+constexpr int kMinQuestionWords = 2;
+bool looks_like_question(const std::string & transcript);
+
 // "pt" or "en" from common function words; "en" when undecided.
 std::string guess_language(const std::string & text);
 

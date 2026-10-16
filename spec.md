@@ -1630,7 +1630,11 @@ flowchart LR
    `stt_endpoint` (default: `endpoint`) `POST /v1/audio/transcriptions`
    multipart, `response_format=verbose_json`, `language` from
    `[ASSISTANT] language` (`auto` default). The returned `language`
-   drives the voice. Empty transcript → short double beep, back to idle.
+   drives the voice. An empty transcript, or one that is not a question
+   (`looks_like_question`: fewer than `kMinQuestionWords = 2` real words
+   after dropping whisper's noise markers `*crash*`, `[BLANK_AUDIO]`,
+   `(music)`; on the box a beep echo became "phase" and was answered) →
+   short double beep, back to idle.
 5. **Chat.** `easyai::Client` to `endpoint` with `api_key`, `model`,
    streaming. System prompt = `[ASSISTANT] system` (file or inline)
    else the built-in `kAssistantSystem`: answer in ≤ 3 sentences unless

@@ -560,7 +560,10 @@ public:
             auto utt = listen.take();
             std::string text, lang;
             const bool ok = transcribe(utt, false, text, lang);
-            if (!ok || normalize_text(text).empty()) { beep(2); mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs); continue; }
+            if (!ok || !looks_like_question(text)) {   // nothing, or whisper's noise markers / a lone hallucinated word
+                if (a_.verbose && ok) std::fprintf(stderr, "[easyai-assistant] ignored: %s\n", text.c_str());
+                beep(2); mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs); continue;
+            }
             answer(text, lang);
             mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs);
             if (a_.once) break;
