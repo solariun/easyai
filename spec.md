@@ -1606,8 +1606,8 @@ flowchart LR
    (default 1500) of non-speech or `max_listen_ms` (default 20 000).
 3. **Wake word.** Each burst (bounded to `kWakeMaxMs = 4000`) goes to a
    local whisper model `[ASSISTANT] wake_model` (default
-   `models/stt/ggml-tiny.bin`; the installer and the Mac fetch script put
-   it there). The transcript is lower-cased, punctuation stripped, and
+   `models/stt/ggml-base.bin`, 142 MB; tiny was measured too weak for a
+   pt-BR "oi easy" through a room). The transcript is lower-cased, punctuation stripped, and
    matched by `wake_match(text, name, aliases)`: a prefix token in
    `{hey, hi, oi, o, ei, ok, olá, ola, alô, alo}` (whisper writes "oi" as
    "O") followed by the name with Levenshtein distance ≤ `kNameMaxEdits
@@ -1617,8 +1617,13 @@ flowchart LR
    speaker) plus `[ASSISTANT] name_aliases`. Measured on the box with a
    Kokoro-spoken "Oi easy. Que horas são agora?": tiny → "O eaz de hora
    são agora.", base → "O iase que horas são agora?", both now matched;
-   "Hey, easy. What time is it?" matched as is. Words after the name are the question when there are ≥ 2 of
-   them; otherwise the assistant beeps (`kBeepHz = 880`, `kBeepMs = 120`,
+   "Hey, easy. What time is it?" matched as is. A call word glued to
+   the name ("oiasse", "heyeasy") matches too, for call words of two
+   letters or more. Words after the name mean the question came in the
+   same breath: the same burst audio is then sent to the STT endpoint
+   (the large model) and the words after the name in that transcript
+   are the question, so the small model only ever decides the name;
+   otherwise the assistant beeps (`kBeepHz = 880`, `kBeepMs = 120`,
    generated, no file) and listens. Without a wake model the burst goes
    to the STT endpoint instead (`wake_model = server`).
 4. **Transcription.** The recorded utterance is sent as PCM16 WAV to
@@ -1655,6 +1660,15 @@ flowchart LR
    `say`: `Eddy (Portuguese (Brazil))`, `Daniel`; piper: paths of the
    `.onnx` voices). Capture is muted from the first sentence until
    playback drains plus `kUnmuteMs = 300`.
+6a. **Own sound never heard.** `Capture::flush()` drops what the device
+   buffered during a synchronous beep or a spoken answer; it runs after
+   every beep, after the greeting and after each answer (on the box the
+   beep itself came back as a "question" before this).
+6b. **Greeting.** `[ASSISTANT] greeting = en|pt|off` (default `en`):
+   once the microphone is open the assistant says "The easy assistant
+   is online. Say 'hey easy' and ask your question." (pt: "O assistente
+   easy está no ar. Diga 'oi easy' e faça a sua pergunta."), so a
+   restart proves the voice path end to end.
 7. **Availability.** Endpoint down or non-2xx: spoken "servidor
    indisponível" / "server unavailable" once per outage (language =
    `[ASSISTANT] language` when not `auto`, else the last heard one, else

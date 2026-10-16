@@ -67,6 +67,7 @@ struct Args {
     std::string config = kDefaultConfig;
     std::string name = "easy";
     std::string name_aliases;               // csv of spellings whisper produces for the name
+    std::string greeting = "en";            // en | pt | off: spoken once at start-up
     std::string endpoint = kDefaultEndpoint, api_key, model = "default";
     std::string stt_endpoint, tts_endpoint;
     std::string language = "auto";
@@ -89,6 +90,7 @@ std::vector<Key> keys(Args & a) {
         {"--config",         nullptr,          Key::S, &a.config,         "INI file (default /etc/easyai/easyai.ini), section [ASSISTANT]"},
         {"--name",           "name",           Key::S, &a.name,           "wake name: hey <name> / oi <name> (default easy)"},
         {"--name-aliases",   "name_aliases",   Key::S, &a.name_aliases,   "csv of what whisper hears for the name (easy: izi, eaz, iase... built in); --verbose shows 'heard:' lines to collect them"},
+        {"--greeting",       "greeting",       Key::S, &a.greeting,       "en (default) | pt | off: spoken once at start-up, says it is up and how to call it"},
         {"--endpoint",       "endpoint",       Key::S, &a.endpoint,       "OpenAI-compatible base URL (default http://127.0.0.1:8080)"},
         {"--api-key",        "api_key",        Key::S, &a.api_key,        "Bearer token for the endpoint(s); env EASYAI_API_KEY as fallback"},
         {"--model",          "model",          Key::S, &a.model,          "model id sent in the request (default: default)"},
@@ -482,16 +484,31 @@ public:
             ++turns_; last_turn_ = std::chrono::steady_clock::now();
         }
         speaker_.wait_idle();
+        if (cap_.is_open()) cap_.flush();   // what the mic took in while we spoke is not a question
         if (a_.verbose) std::fprintf(stderr, "[easyai-assistant] turn %.0f ms\n",
                                      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
 
-    void beep(int n) { speaker_.play_pcm(make_beep(kSampleRate, n), kSampleRate); }
+    void beep(int n) { speaker_.play_pcm(make_beep(kSampleRate, n), kSampleRate); cap_.flush(); }
+
+    // Spoken once after the microphone is open: proof the box hears and talks, and how to call it.
+    void greet() {
+        if (a_.greeting == "off" || a_.greeting.empty()) return;
+        const bool pt = a_.greeting == "pt";
+        const std::string text = pt
+            ? "O assistente " + a_.name + " está no ar. Diga \"oi " + a_.name + "\" e faça a sua pergunta."
+            : "The " + a_.name + " assistant is online. Say \"hey " + a_.name + "\" and ask your question.";
+        std::fprintf(stderr, "[easyai-assistant] greeting (%s): %s\n", pt ? "pt" : "en", text.c_str());
+        speaker_.speak(text, pt ? "pt" : "en");
+        speaker_.wait_idle();
+        cap_.flush();
+    }
 
     int run() {
         if (!a_.text.empty()) { answer(a_.text, a_.language == "auto" ? "" : a_.language); return 0; }
         if (!open_audio()) return 2;
         std::fprintf(stderr, "[easyai-assistant] listening for \"hey %s\" / \"oi %s\" (pause %d ms)\n", a_.name.c_str(), a_.name.c_str(), a_.pause_ms);
+        greet();
 
         Vad vad;
         Segmenter idle(kBurstEndMs, kWakeMaxMs), listen(a_.pause_ms, a_.max_listen_ms);

@@ -82,13 +82,14 @@ easyai-assistant --text "que horas são?"   # try the chat + voice path, no micr
 |---|---|---|---|
 | `name` | `--name` | `easy` | wake name |
 | `name_aliases` | `--name-aliases` | built-in for easy | csv of what whisper hears for the name; run `--verbose` and copy the `heard:` lines |
+| `greeting` | `--greeting` | `en` | `en` / `pt` / `off`: spoken once at start-up ("The easy assistant is online. Say 'hey easy'…") |
 | `endpoint` | `--endpoint` | `http://127.0.0.1:8080` | OpenAI-compatible base URL |
 | `api_key` | `--api-key` | | Bearer token (env `EASYAI_API_KEY` as fallback) |
 | `model` | `--model` | `default` | model id in the request |
 | `stt_endpoint`, `tts_endpoint` | `--stt-endpoint`, `--tts-endpoint` | = endpoint | other boxes for speech in / out |
 | `language` | `--language` | `auto` | force `pt` / `en` transcription |
 | `pause_ms`, `max_listen_ms` | same | 1500, 20000 | end of question |
-| `wake_model` | `--wake-model` | `models/stt/ggml-tiny.bin` | local whisper; `server` = send every burst to the STT endpoint |
+| `wake_model` | `--wake-model` | `models/stt/ggml-base.bin` | local whisper for the name only (a question said in the same breath is re-transcribed by the server's large model); `server` = send every burst to the STT endpoint |
 | `mic`, `speaker` | same | `default` | ALSA device names (`plughw:1,0`). When `default` has no capture (card 0 is HDMI-only on many boxes) the assistant picks the first card that has one, logs it, and the speaker follows that card; `cat /proc/asound/pcm` shows the cards. macOS uses the system default |
 | `tts` | `--tts` | `auto` | `server` / `say` / `piper` / `espeak`; auto = endpoint, else local |
 | `voice_pt`, `voice_en`, `piper` | same | engine defaults | local voices |
