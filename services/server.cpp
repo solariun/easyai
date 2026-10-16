@@ -35,6 +35,7 @@
 #include "easyai/easyai.hpp"
 #include "easyai/models_dashboard.hpp"   // native MODELS dashboard engine
 #include "easyai/stt.hpp"                // voice transcription (whisper.cpp)
+#include "easyai/tts.hpp"                // text-to-speech (piper / say / espeak-ng child process)
 
 #include <random>             // session-token generation for the /models gate
 #include <filesystem>         // ai.gguf symlink re-point on model hot-swap
@@ -1527,6 +1528,13 @@ struct ServerCtx {
     std::string                stt_language = "auto";
     std::string                stt_model_arg;   // --stt-model path (symlink target for Slink)
     std::atomic<uint64_t>      n_transcriptions{0};
+    // Text-to-speech (POST /v1/audio/speech): a child-process engine (piper /
+    // say / espeak-ng); one synthesis at a time, independent of the chat lock.
+    easyai::Tts                tts;
+    std::mutex                 tts_mu;
+    std::string                tts_error;       // why no engine is usable; empty when one is
+    std::atomic<uint64_t>      n_speech{0};
+    bool                       default_enable_thinking = true;   // --reasoning; per-request chat_template_kwargs overrides
     bool                       no_think = false;// strip <think> from responses
     // Ambient reasoning-effort level applied to every request unless the
     // request body overrides it. Empty = model default (inject nothing).
@@ -1632,6 +1640,10 @@ struct ChatRequest {
     // the server's ambient default; when present (incl. "auto") it wins.
     bool                                              reasoning_effort_set = false;
     std::string                                       reasoning_effort;
+    // Per-request chat_template_kwargs.enable_thinking (llama-server
+    // compatible). Absent → server default (--reasoning).
+    bool                                              enable_thinking_set = false;
+    bool                                              enable_thinking     = true;
     // Per-request override of the server-side --inject-datetime flag,
     // populated from the X-Easyai-Inject HTTP header.  Empty leaves
     // the server default in effect; "on" forces injection on; "off"
@@ -1858,6 +1870,15 @@ static bool parse_chat_request(const httplib::Request & req,
         out.reasoning_effort_set = true;
         out.reasoning_effort     = body["reasoning_effort"].get<std::string>();
     }
+    // chat_template_kwargs.enable_thinking — the llama-server way to switch a
+    // reasoning model's thinking off for one request (easyai-assistant uses it).
+    if (body.contains("chat_template_kwargs") && body["chat_template_kwargs"].is_object()) {
+        const auto & kw = body["chat_template_kwargs"];
+        if (kw.contains("enable_thinking") && kw["enable_thinking"].is_boolean()) {
+            out.enable_thinking_set = true;
+            out.enable_thinking     = kw["enable_thinking"].get<bool>();
+        }
+    }
 
     // stream_options.easyai_prompt_progress (easyai extension on top
     // of OpenAI's stream_options). When explicitly false, skip the
@@ -1981,6 +2002,8 @@ static void prepare_engine_for_request(ServerCtx & ctx, const ChatRequest & req)
     // per-request field always wins regardless of which preset is pinned.
     ctx.engine.reasoning_effort(req.reasoning_effort_set ? req.reasoning_effort
                                                          : ctx.default_reasoning_effort);
+    ctx.engine.enable_thinking(req.enable_thinking_set ? req.enable_thinking
+                                                       : ctx.default_enable_thinking);
 
     // Build the request's history (everything except the final user
     // message — that one is pushed by the chat loop).  We work on a
@@ -3579,6 +3602,57 @@ static void route_transcriptions(ServerCtx & ctx, const httplib::Request & req,
 }
 
 // ---------------------------------------------------------------------------
+// POST /v1/audio/speech  →  OpenAI-shaped text-to-speech (spec.md
+// "easyai-assistant"). {model, input, voice, response_format, speed} in,
+// audio/wav (PCM16 mono) out. voice: "pt" | "en" | engine voice name.
+// ---------------------------------------------------------------------------
+static constexpr std::size_t kTtsMaxChars = 4000;
+
+static void route_speech(ServerCtx & ctx, const httplib::Request & req, httplib::Response & res) {
+    if (!ctx.tts.available()) {
+        res.status = 503;
+        res.set_content(error_json("no text-to-speech engine: " + (ctx.tts_error.empty() ? std::string("configure [TTS]") : ctx.tts_error),
+                                   "tts_not_available"), "application/json");
+        return;
+    }
+    nlohmann::json body;
+    try { body = nlohmann::json::parse(req.body); }
+    catch (...) { res.status = 400; res.set_content(error_json("invalid JSON", "invalid_request_error"), "application/json"); return; }
+    const std::string input  = body.value("input", "");
+    const std::string voice  = body.value("voice", "en");
+    const std::string format = body.value("response_format", "wav");
+    if (input.empty()) { res.status = 400; res.set_content(error_json("'input' is required", "invalid_request_error"), "application/json"); return; }
+    if (input.size() > kTtsMaxChars) {
+        res.status = 400;
+        res.set_content(error_json("'input' longer than " + std::to_string(kTtsMaxChars) + " bytes", "invalid_request_error"), "application/json");
+        return;
+    }
+    if (format != "wav") {
+        res.status = 415;
+        res.set_content(error_json("response_format '" + format + "' not supported (wav only)", "unsupported_media_type"), "application/json");
+        return;
+    }
+    std::vector<std::int16_t> pcm; int rate = 0; std::string err;
+    bool ok;
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lk(ctx.tts_mu);
+        ok = ctx.tts.synthesize(input, voice, pcm, rate, err);
+    }
+    if (!ok) {
+        ctx.n_errors++;
+        res.status = 500;
+        res.set_content(error_json("speech synthesis failed: " + err, "internal_error"), "application/json");
+        return;
+    }
+    ctx.n_speech++;
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    std::fprintf(stderr, "[easyai-server] tts: %zu chars -> %.1fs audio in %.0f ms (%s, voice=%s)\n",
+                 input.size(), (double) pcm.size() / rate, ms, ctx.tts.engine().c_str(), voice.c_str());
+    res.set_content(easyai::encode_wav_pcm16(pcm.data(), pcm.size(), rate), "audio/wav");
+}
+
+// ---------------------------------------------------------------------------
 // GET /health   →  small status JSON.
 // ---------------------------------------------------------------------------
 static void route_health(ServerCtx & ctx, const httplib::Request &,
@@ -3601,6 +3675,8 @@ static void route_health(ServerCtx & ctx, const httplib::Request &,
     j["stt_model"]  = stt_model_id(ctx);
     if (!ctx.stt.is_loaded() && !ctx.stt_error.empty()) j["stt_error"] = ctx.stt_error;
     j["tls"] = ctx.tls;
+    j["tts_available"] = ctx.tts.available();
+    j["tts_engine"]    = ctx.tts.engine();
 
     // Compatibility shims this server speaks. Lets clients
     // auto-detect which API they can use without trial requests.
@@ -3610,6 +3686,7 @@ static void route_health(ServerCtx & ctx, const httplib::Request &,
     compat["mcp"]      = "/mcp";
     compat["mcp_protocol"] = "2024-11-05";
     compat["stt"]      = "/v1/audio/transcriptions";
+    compat["tts"]      = "/v1/audio/speech";
     j["compat"] = std::move(compat);
 
     res.set_content(j.dump(), "application/json");
@@ -3701,7 +3778,7 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "\n"
         "Nearly every flag has an INI equivalent. Precedence:\n"
         "  CLI flag  >  [section] key in the --config INI  >  built-in default.\n"
-        "Sections: [SERVER], [ENGINE], [STT], [MCP_USER] (Bearer auth for /mcp),\n"
+        "Sections: [SERVER], [ENGINE], [STT], [TTS], [MCP_USER] (Bearer auth for /mcp),\n"
         "[MODEL_<glob>] (per-model [ENGINE] overrides). Default INI: /etc/easyai/easyai.ini.\n"
         "Each option below shows its INI key, then the CLI flag(s).\n"
         "\n"
@@ -3766,6 +3843,12 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "  model     --stt-model <path>     whisper ggml-*.bin (or a symlink; Slink from /models).\n"
         "  language  --stt-language <code>  auto (default) or ISO-639-1, e.g. pt, en.\n"
         "  threads   --stt-threads <n>      whisper threads (0 = its default).\n"
+        "\n"
+        "[TTS]  text-to-speech (POST /v1/audio/speech, easyai-assistant voice)\n"
+        "  engine    --tts-engine <e>       auto (default) | piper | say (macOS) | espeak | none.\n"
+        "  piper     --tts-piper <path>     piper binary (default: piper on PATH).\n"
+        "  voice_pt  --tts-voice-pt <v>     piper .onnx path / say voice / espeak voice for pt.\n"
+        "  voice_en  --tts-voice-en <v>     same for en. auto picks male defaults per engine.\n"
         "\n"
         "[ENGINE]  runtime  (also valid under [MODEL_<glob>])\n"
         "  context          -c, --ctx <n>             Context window (default 8192).\n"
@@ -3955,6 +4038,10 @@ struct ServerArgs {
     std::string stt_model_path;   // whisper ggml-*.bin (or a symlink to one); empty = no voice transcription
     std::string stt_language = "auto";   // ISO-639-1 or auto
     int         stt_threads  = 0;        // 0 = whisper default
+    std::string tts_engine   = "auto";   // auto|piper|say|espeak|none  (POST /v1/audio/speech)
+    std::string tts_piper    = "piper";  // piper binary
+    std::string tts_voice_pt;            // piper .onnx / say voice / espeak voice
+    std::string tts_voice_en;
     std::string numa;             // distribute|isolate|numactl|mirror
     int         threads_batch  = 0;
     int         parallel       = 1;
@@ -4163,6 +4250,10 @@ static const std::vector<FlagDef> & kFlags() {
         { {"--stt-model"},         "STT",    "model",          "stt_model",      true,  SET_STR(&ServerArgs::stt_model_path) },
         { {"--stt-language"},      "STT",    "language",       "stt_language",   true,  SET_STR(&ServerArgs::stt_language) },
         { {"--stt-threads"},       "STT",    "threads",        "stt_threads",    true,  SET_INT(&ServerArgs::stt_threads) },
+        { {"--tts-engine"},        "TTS",    "engine",         "tts_engine",     true,  SET_STR(&ServerArgs::tts_engine) },
+        { {"--tts-piper"},         "TTS",    "piper",          "tts_piper",      true,  SET_STR(&ServerArgs::tts_piper) },
+        { {"--tts-voice-pt"},      "TTS",    "voice_pt",       "tts_voice_pt",   true,  SET_STR(&ServerArgs::tts_voice_pt) },
+        { {"--tts-voice-en"},      "TTS",    "voice_en",       "tts_voice_en",   true,  SET_STR(&ServerArgs::tts_voice_en) },
         { {"--max-body"},          "SERVER", "max_body",       "max_body",       true,  SET_SIZE(&ServerArgs::max_body) },
         // ----- toggles (SERVER) -----
         { {"--metrics"},           "SERVER", "metrics",        "metrics",        false, SET_BOOL_TRUE(&ServerArgs::metrics) },
@@ -5040,6 +5131,9 @@ static ordered_json endpoint_directory(const ServerCtx & ctx, const ServerArgs &
     add("Voice (STT)",       "POST", "/v1/audio/transcriptions", v1_auth,
         "whisper transcription; multipart file= (WAV) or raw audio/wav; json | text | verbose_json",
         easyai::Stt::available());
+    add("Voice (TTS)",       "POST", "/v1/audio/speech",         v1_auth,
+        "OpenAI text-to-speech: {input, voice: pt|en, response_format: wav} -> audio/wav (piper / say / espeak-ng)",
+        ctx.tts.available());
     add("Ollama-compatible", "GET",  "/api/tags",               v1_auth, "model list (Ollama clients)");
     add("Ollama-compatible", "GET",  "/api/show",               v1_auth, "model details (Ollama clients)");
     add("Ollama-compatible", "POST", "/api/show",               v1_auth, "model details (Ollama clients)");
@@ -7872,6 +7966,18 @@ int main(int argc, char ** argv) {
     } else {
         std::fprintf(stderr, "[easyai-server] stt: no model (pass --stt-model or [STT] model; download one from /models)\n");
     }
+    ctx->default_enable_thinking = args.reasoning;
+    {
+        easyai::Tts::Config tc;
+        tc.engine = args.tts_engine; tc.piper = args.tts_piper;
+        tc.voice_pt = args.tts_voice_pt; tc.voice_en = args.tts_voice_en;
+        const std::string eng = ctx->tts.configure(tc, ctx->tts_error);
+        if (ctx->tts.available())
+            std::fprintf(stderr, "[easyai-server] tts: %s (POST /v1/audio/speech, voices pt/en)\n", eng.c_str());
+        else
+            std::fprintf(stderr, "[easyai-server] tts: none%s (POST /v1/audio/speech answers 503; set [TTS] engine / piper / voices)\n",
+                         ctx->tts_error.empty() ? "" : (" — " + ctx->tts_error).c_str());
+    }
 
     // Engine::load() resolves symlinks on the model path (so the AI box's
     // /var/lib/easyai/models/ai.gguf → real-weight-file pattern surfaces
@@ -8388,6 +8494,10 @@ int main(int argc, char ** argv) {
         if (!require_auth(ctx_ref, q, r)) return;
         route_transcriptions(ctx_ref, q, r);
     });
+    svr.Post("/v1/audio/speech", [&](const auto & q, auto & r){
+        if (!require_auth(ctx_ref, q, r)) return;
+        route_speech(ctx_ref, q, r);
+    });
 
     // Ollama-compat list-models. Same auth posture as /v1/models.
     svr.Get ("/api/tags",             [&](const auto & q, auto & r){
@@ -8570,6 +8680,8 @@ int main(int argc, char ** argv) {
             {"stt_loaded", ctx_ref.stt.is_loaded()},
             {"stt_model", stt_model_id(ctx_ref)},
             {"stt_language", ctx_ref.stt_language},
+            {"tts_available", ctx_ref.tts.available()},
+            {"tts_engine", ctx_ref.tts.engine()},
             {"transcriptions", ctx_ref.n_transcriptions.load()},
         };
 

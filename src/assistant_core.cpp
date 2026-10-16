@@ -1,0 +1,197 @@
+#include "easyai/assistant_core.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <sstream>
+
+namespace easyai {
+namespace assistant {
+
+namespace {
+constexpr double kPi            = 3.14159265358979323846;
+constexpr double kMinRmsDb      = -100.0;
+constexpr double kPcmFullScale  = 32768.0;
+constexpr float  kBeepAmp       = 0.3f;
+constexpr int    kMsPerSecond   = 1000;
+constexpr int    kMinQuestionWords = 2;
+
+// Accented letters folded to ASCII (UTF-8 two-byte sequences).
+const char * kFoldFrom[] = {"á","à","â","ã","ä","é","è","ê","ë","í","ì","î","ï","ó","ò","ô","õ","ö","ú","ù","û","ü","ç","ñ",
+                            "Á","À","Â","Ã","Ä","É","È","Ê","Ë","Í","Ì","Î","Ï","Ó","Ò","Ô","Õ","Ö","Ú","Ù","Û","Ü","Ç","Ñ"};
+const char   kFoldTo[]   = {'a','a','a','a','a','e','e','e','e','i','i','i','i','o','o','o','o','o','u','u','u','u','c','n',
+                            'a','a','a','a','a','e','e','e','e','i','i','i','i','o','o','o','o','o','u','u','u','u','c','n'};
+
+const char * kWakePrefixes[] = {"hey", "hi", "oi", "ei", "ok", "ola", "alo", "e", "a"};   // "e aí easy", "ai easy" → whisper variants
+const char * kPtWords[] = {"que", "nao", "voce", "e", "de", "para", "com", "uma", "um", "isso", "esta", "como", "qual", "quem",
+                           "onde", "quando", "por", "me", "eu", "sim", "tudo", "bem", "obrigado", "hora", "hoje"};
+const char * kEnWords[] = {"the", "is", "what", "are", "you", "how", "and", "it", "to", "of", "a", "in", "that", "this",
+                           "time", "please", "can", "do", "me", "yes", "no", "today", "thanks", "who", "where"};
+
+std::vector<std::string> words(const std::string & s) {
+    std::vector<std::string> out; std::stringstream ss(s); std::string w;
+    while (ss >> w) out.push_back(w);
+    return out;
+}
+}  // namespace
+
+double rms_db(const std::int16_t * pcm, std::size_t n) {
+    if (!pcm || n == 0) return kMinRmsDb;
+    double acc = 0;
+    for (std::size_t i = 0; i < n; ++i) { const double v = pcm[i] / kPcmFullScale; acc += v * v; }
+    const double rms = std::sqrt(acc / (double) n);
+    return rms > 0 ? std::max(kMinRmsDb, 20.0 * std::log10(rms)) : kMinRmsDb;
+}
+
+bool Vad::feed(const std::int16_t * pcm, std::size_t n) {
+    last_db_ = rms_db(pcm, n);
+    const double period_s = (double) n / kSampleRate;
+    if (last_db_ < floor_db_) floor_db_ = std::max(kFloorMinDb, last_db_);              // down at once
+    else                      floor_db_ = std::min(last_db_, floor_db_ + kFloorRiseDbPerS * period_s);   // up slowly
+    return last_db_ > floor_db_ + kSpeechMarginDb;
+}
+
+Segmenter::Segmenter(int end_silence_ms, int max_ms) : end_silence_ms_(end_silence_ms), max_ms_(max_ms) {}
+
+void Segmenter::reset() { in_burst_ = false; silence_ms_ = burst_ms_ = 0; burst_.clear(); ready_.clear(); }
+
+bool Segmenter::push(const std::int16_t * pcm, std::size_t n, bool speech) {
+    const int ms = (int) (n * kMsPerSecond / kSampleRate);
+    if (!in_burst_) {
+        preroll_.insert(preroll_.end(), pcm, pcm + n);
+        const std::size_t keep = (std::size_t) kSampleRate * kPrerollMs / kMsPerSecond;
+        if (preroll_.size() > keep) preroll_.erase(preroll_.begin(), preroll_.end() - (std::ptrdiff_t) keep);
+        if (!speech) return false;
+        in_burst_ = true; silence_ms_ = 0; burst_ms_ = 0;
+        burst_ = preroll_;
+        preroll_.clear();
+        return false;
+    }
+    burst_.insert(burst_.end(), pcm, pcm + n);
+    burst_ms_ += ms;
+    silence_ms_ = speech ? 0 : silence_ms_ + ms;
+    if (silence_ms_ >= end_silence_ms_ || burst_ms_ >= max_ms_) {
+        ready_.swap(burst_);
+        burst_.clear();
+        in_burst_ = false;
+        return true;
+    }
+    return false;
+}
+
+std::vector<std::int16_t> Segmenter::take() { std::vector<std::int16_t> out; out.swap(ready_); return out; }
+
+std::string normalize_text(const std::string & s) {
+    std::string t;
+    t.reserve(s.size());
+    for (std::size_t i = 0; i < s.size();) {
+        bool folded = false;
+        for (std::size_t k = 0; k < sizeof(kFoldFrom) / sizeof(kFoldFrom[0]); ++k) {
+            const std::size_t L = std::char_traits<char>::length(kFoldFrom[k]);
+            if (s.compare(i, L, kFoldFrom[k]) == 0) { t.push_back(kFoldTo[k]); i += L; folded = true; break; }
+        }
+        if (folded) continue;
+        const unsigned char c = (unsigned char) s[i++];
+        if (c >= 0x80) continue;                         // other non-ASCII: dropped
+        if (std::isalnum(c)) t.push_back((char) std::tolower(c));
+        else t.push_back(' ');
+    }
+    std::string out; bool space = true;
+    for (char c : t) {
+        if (c == ' ') { if (!space) out.push_back(' '); space = true; }
+        else { out.push_back(c); space = false; }
+    }
+    if (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+int levenshtein(const std::string & a, const std::string & b) {
+    std::vector<int> prev(b.size() + 1), cur(b.size() + 1);
+    for (std::size_t j = 0; j <= b.size(); ++j) prev[j] = (int) j;
+    for (std::size_t i = 1; i <= a.size(); ++i) {
+        cur[0] = (int) i;
+        for (std::size_t j = 1; j <= b.size(); ++j)
+            cur[j] = std::min({prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1)});
+        prev.swap(cur);
+    }
+    return prev[b.size()];
+}
+
+WakeResult wake_match(const std::string & transcript, const std::string & name) {
+    WakeResult r;
+    const auto w = words(normalize_text(transcript));
+    const std::string nm = normalize_text(name);
+    if (w.empty() || nm.empty()) return r;
+    for (std::size_t i = 0; i < w.size(); ++i) {
+        if (levenshtein(w[i], nm) > kNameMaxEdits) continue;
+        bool prefixed = (i == 0);
+        if (i > 0) for (const char * p : kWakePrefixes) if (w[i - 1] == p) { prefixed = true; break; }
+        if (!prefixed) continue;
+        r.matched = true;
+        std::string q;
+        for (std::size_t k = i + 1; k < w.size(); ++k) { if (!q.empty()) q += ' '; q += w[k]; }
+        if ((int) std::count(q.begin(), q.end(), ' ') + 1 >= kMinQuestionWords) r.question = q;
+        return r;
+    }
+    return r;
+}
+
+void SentenceChunker::push(const std::string & piece) { buf_ += piece; }
+
+bool SentenceChunker::pop(std::string & sentence) {
+    for (std::size_t i = 0; i < buf_.size(); ++i) {
+        const char c = buf_[i];
+        const bool nl = (c == '\n');
+        const bool punct = (c == '.' || c == '!' || c == '?');
+        if (!nl && !punct) continue;
+        // a sentence mark needs a following space/newline (so "3.14" and "e.g." stay), or end-of-buffer is NOT enough mid-stream
+        if (punct && (i + 1 >= buf_.size() || (buf_[i + 1] != ' ' && buf_[i + 1] != '\n'))) continue;
+        if ((int) i + 1 < kMinSentenceChars && !nl) continue;
+        if (c == '.') {   // abbreviations: "e.g." / "i.e." / a single initial never end a sentence
+            const std::size_t ws = buf_.find_last_of(" \n", i);
+            const std::string word = buf_.substr(ws == std::string::npos ? 0 : ws + 1, i - (ws == std::string::npos ? 0 : ws + 1));
+            if (word.size() <= 1 || word.find('.') != std::string::npos) continue;
+        }
+        sentence = buf_.substr(0, i + 1);
+        buf_.erase(0, i + 1);
+        // trim
+        const auto a = sentence.find_first_not_of(" \n\t"), b = sentence.find_last_not_of(" \n\t");
+        sentence = (a == std::string::npos) ? "" : sentence.substr(a, b - a + 1);
+        if (sentence.empty()) { --i; continue; }
+        return true;
+    }
+    return false;
+}
+
+std::string SentenceChunker::flush() {
+    const auto a = buf_.find_first_not_of(" \n\t"), b = buf_.find_last_not_of(" \n\t");
+    std::string s = (a == std::string::npos) ? "" : buf_.substr(a, b - a + 1);
+    buf_.clear();
+    return s;
+}
+
+std::string guess_language(const std::string & text) {
+    int pt = 0, en = 0;
+    for (const auto & w : words(normalize_text(text))) {
+        for (const char * p : kPtWords) if (w == p) { ++pt; break; }
+        for (const char * p : kEnWords) if (w == p) { ++en; break; }
+    }
+    return pt > en ? "pt" : "en";
+}
+
+std::vector<std::int16_t> make_beep(int rate_hz, int count) {
+    std::vector<std::int16_t> out;
+    const std::size_t tone = (std::size_t) rate_hz * kBeepMs / kMsPerSecond;
+    const std::size_t gap  = (std::size_t) rate_hz * kBeepGapMs / kMsPerSecond;
+    for (int b = 0; b < count; ++b) {
+        for (std::size_t i = 0; i < tone; ++i) {
+            const double env = std::sin(kPi * (double) i / (double) tone);   // half-sine envelope: no click
+            out.push_back((std::int16_t) (kBeepAmp * env * std::sin(2 * kPi * kBeepHz * (double) i / rate_hz) * 32767.0));
+        }
+        if (b + 1 < count) out.insert(out.end(), gap, 0);
+    }
+    return out;
+}
+
+}  // namespace assistant
+}  // namespace easyai

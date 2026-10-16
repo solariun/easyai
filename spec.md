@@ -1553,3 +1553,184 @@ every flag on every file. Live server on the toy model: boot with
 `qwen.gguf` neither; after `ln -sfn qwen.gguf ai.gguf` the listing reports
 `running gemma.gguf`, `default qwen.gguf`, `ai.gguf` default only. jsc
 syntax check of the page script clean.
+
+## easyai-assistant — voice assistant service + `/v1/audio/speech` (AUTHORITATIVE — 2026-10-16)
+
+**Plain words.** A separate program, `easyai-assistant`, that listens on the
+machine's own microphone all the time, wakes up when it hears its name
+("hey easy", "oi easy", "ei easy", "ok easy"), records the question until
+the speaker pauses for 1.5 s, sends the audio to a speech-to-text
+endpoint, sends the text to a chat endpoint with its own short-answer
+system prompt, and speaks the answer back with a male voice, sentence by
+sentence while the rest is still being generated. It runs on Linux (ALSA)
+and macOS (CoreAudio) with no third-party libraries. Every network call is
+OpenAI-shaped, so the INI can point it at easyai-server, llama-server, or
+OpenAI itself with an API key. Thinking is switched off per request;
+tools (MCP / external) run inside the assistant like in easyai-cli, and the
+system prompt makes the model say in one sentence that it is about to use
+a tool. easyai-server gains the matching OpenAI endpoint
+`POST /v1/audio/speech` (piper on Linux, `say` on macOS) so the browser
+and any client can get the same voice.
+
+```mermaid
+flowchart LR
+  M["mic 16 kHz mono\nALSA / CoreAudio"] --> V["VAD\nRMS vs adaptive floor"]
+  V -->|burst ended| W["wake word\nlocal whisper tiny/base\nhey|oi|ei|ok <name>"]
+  W -->|match, beep| L["listen until\npause_ms = 1500 of silence"]
+  L -->|PCM16 WAV| S["POST /v1/audio/transcriptions\n(endpoint, key from INI)"]
+  S -->|text, language| C["POST /v1/chat/completions\nstream, assistant system prompt,\nchat_template_kwargs.enable_thinking=false"]
+  C -->|tool_calls| X["tools run in the assistant\n(datetime, web, EASYAI-*.tools)"]
+  X --> C
+  C -->|sentence| T["POST /v1/audio/speech\nor local say / piper / espeak-ng"]
+  T --> P["speaker\nmic muted meanwhile"]
+```
+
+### Rules — assistant
+
+1. **Audio in/out.** `easyai::audio::Capture` and `easyai::audio::Playback`
+   (`include/easyai/audio_io.hpp`): PCM16 mono, capture at
+   `Stt::kSampleRate` (16 000 Hz), playback at the rate the voice
+   delivers. Linux: ALSA (`libasound`, system library), device names as
+   ALSA knows them (`default`, `plughw:1,0`). macOS: CoreAudio
+   AudioQueue, device `default`. `[ASSISTANT] mic`, `[ASSISTANT] speaker`.
+   Capture is a blocking `read()` of one period (`kPeriodMs = 20`);
+   the device clock paces the loop, no polling timer.
+2. **VAD.** Per period RMS in dB. Noise floor = exponential minimum
+   tracker (`kFloorRiseDbPerS = 1`, instant fall). Speech when RMS >
+   floor + `kSpeechMarginDb = 10`; a burst ends after `kBurstEndMs = 500`
+   of non-speech. Pre-roll `kPrerollMs = 300` is kept so the first
+   syllable is not cut. Listening after wake ends after `pause_ms`
+   (default 1500) of non-speech or `max_listen_ms` (default 20 000).
+3. **Wake word.** Each burst (bounded to `kWakeMaxMs = 4000`) goes to a
+   local whisper model `[ASSISTANT] wake_model` (default
+   `models/stt/ggml-tiny.bin`; the installer and the Mac fetch script put
+   it there). The transcript is lower-cased, punctuation stripped, and
+   matched by `wake_match(text, name)`: a prefix token in
+   `{hey, hi, oi, ei, ok, olá, ola, alô, alo}` followed by the name with
+   Levenshtein distance ≤ `kNameMaxEdits = 1` (whisper spells names
+   loosely). Words after the name are the question when there are ≥ 2 of
+   them; otherwise the assistant beeps (`kBeepHz = 880`, `kBeepMs = 120`,
+   generated, no file) and listens. Without a wake model the burst goes
+   to the STT endpoint instead (`wake_model = server`).
+4. **Transcription.** The recorded utterance is sent as PCM16 WAV to
+   `stt_endpoint` (default: `endpoint`) `POST /v1/audio/transcriptions`
+   multipart, `response_format=verbose_json`, `language` from
+   `[ASSISTANT] language` (`auto` default). The returned `language`
+   drives the voice. Empty transcript → short double beep, back to idle.
+5. **Chat.** `easyai::Client` to `endpoint` with `api_key`, `model`,
+   streaming. System prompt = `[ASSISTANT] system` (file or inline)
+   else the built-in `kAssistantSystem`: answer in ≤ 3 sentences unless
+   asked for detail, same language as the question, no lists, no
+   markdown, no reasoning or preamble, and before calling any tool say
+   one short sentence naming it ("Vou consultar a ferramenta X." /
+   "Let me check X."). The request carries
+   `chat_template_kwargs: {"enable_thinking": false}` and
+   `reasoning_effort: "low"`; a server that ignores them still works.
+   Tools: `[ASSISTANT] tools` (csv, default `datetime,web`) plus
+   `[ASSISTANT] external_tools` directory of `EASYAI-*.tools`; the
+   assistant runs them (the server only forwards `tool_calls`).
+   Conversation memory: the last `history_turns` (default 6) turns are
+   kept, cleared after `history_idle_s` (default 300) of silence.
+6. **Speech out.** `SentenceChunker` cuts the token stream at `.`, `!`,
+   `?` followed by space/newline, or at newline, with a minimum of
+   `kMinSentenceChars = 24`; a period after a one-letter word or a word
+   that already contains a period ("e.g.", "i.e.") never cuts, and
+   "3.14" stays whole because no space follows its period. Each
+   sentence is sent to `tts_endpoint` `POST /v1/audio/speech`
+   `{model, input, voice, response_format: "wav"}` and played; the next
+   sentence is fetched while the current one plays (one-deep queue).
+   `[ASSISTANT] tts = auto|server|say|piper|espeak`: `auto` uses the
+   endpoint when its `/v1/audio/speech` answers, else `say` on macOS,
+   else `piper` if `[ASSISTANT] piper` is set, else `espeak-ng`. Voice
+   per language: `voice_pt`, `voice_en` (server: `pt`, `en` voice ids;
+   `say`: `Eddy (Portuguese (Brazil))`, `Daniel`; piper: paths of the
+   `.onnx` voices). Capture is muted from the first sentence until
+   playback drains plus `kUnmuteMs = 300`.
+7. **Availability.** Endpoint down or non-2xx: spoken "servidor
+   indisponível" / "server unavailable" once per outage (language =
+   `[ASSISTANT] language` when not `auto`, else the last heard one, else
+   en), then silent retries with `kRetryS = 10` backoff. Health is
+   printed to stderr; `--once` processes one utterance and exits (test
+   mode); `--text "<question>"` skips the microphone and speaks the
+   answer (test mode for the chat and voice path).
+8. **Config.** `[ASSISTANT]` section of the same INI file as the server
+   (`/etc/easyai/easyai.ini`, `--config`), every key with a CLI flag:
+   `name`, `endpoint`, `api_key`, `model`, `stt_endpoint`, `tts_endpoint`,
+   `language`, `pause_ms`, `max_listen_ms`, `wake_model`, `mic`,
+   `speaker`, `tts`, `voice_pt`, `voice_en`, `piper`, `tools`,
+   `external_tools`, `system`, `history_turns`, `history_idle_s`,
+   `verbose`.
+
+### Rules — server
+
+9. **`POST /v1/audio/speech`** (OpenAI shape, Bearer auth like `/v1`).
+   Body `{model, input, voice, response_format, speed}`; `input` ≤
+   `kTtsMaxChars = 4000`; `response_format` `wav` only (415 otherwise);
+   `voice` is `pt`, `en`, or an engine voice name; `model` ignored.
+   Response `audio/wav`, PCM16 mono at the engine's rate. 503
+   `tts_not_available` when no engine is configured, 500 on engine
+   failure with the engine's stderr tail. One synthesis at a time
+   (`tts_mu`).
+10. **Engines.** `[TTS] engine = auto|piper|say|espeak|none`, `piper`
+    (binary path), `voice_pt`, `voice_en` (piper: `.onnx` paths, sample
+    rate read from the sidecar `.onnx.json`; `say`: voice names; espeak:
+    `pt-br`, `en`). The engine is a child process: piper
+    `--model <onnx> --output-raw` (raw PCM16), `say -v <voice> -o <tmp.wav>
+    --data-format=LEI16@22050`, `espeak-ng -v <v> --stdout`. `auto` = piper
+    if the binary and a voice exist, else `say` on macOS, else espeak-ng
+    if on PATH, else none.
+11. **Thinking per request.** `chat_template_kwargs.enable_thinking`
+    (boolean) in the request body sets the engine flag for that request
+    under the engine lock and restores the server default after it, same
+    pattern as `reasoning_effort`. Absent → server default.
+12. **Surface.** `/health` adds `tts_available`, `tts_engine`;
+    `/models/api/status.services` adds the same; the endpoint directory
+    adds the `Audio` row for `/v1/audio/speech`; the chat UI gets a
+    speaker toggle on the answer later (not in this change).
+
+### Decisions
+
+- **Subprocess engines, not linked TTS.** piper's runtime is onnxruntime
+  plus espeak-ng-data; linking it would add two heavy dependencies to
+  libeasyai. A child process keeps the library clean and lets the
+  installer swap voices. Rejected: implementing a TTS model in ggml
+  (weeks), browser-side speechSynthesis for the assistant (no browser).
+- **Wake word with a local small whisper** rather than a dedicated
+  keyword spotter: zero new dependencies, one more use of `easyai::Stt`,
+  and tiny is fast enough on the server box; cost is ~0.3 s per burst on
+  CPU, acceptable. Rejected: streaming every burst to the server (loads
+  the large model for noise).
+- **All calls OpenAI-shaped** so the INI can point at any provider.
+  easyai-specific extras (`chat_template_kwargs`, `verbose_json`
+  language) degrade gracefully.
+- **1.5 s pause** as asked; exposed as `pause_ms` because rooms differ.
+
+### Proof (2026-10-16, macOS; Linux box pending Gustavo's install)
+
+- ctest `assistant` (`tests/test_assistant.cpp`, 25 checks): `wake_match`
+  (accents, one-edit misspelling, call words, name first, name inside a
+  sentence rejected, question after the name), `SentenceChunker`
+  ("3.14", "e.g.", short sentence rides to the newline, flush), VAD +
+  `Segmenter` on 2 s noise → 800 ms tone → 1 s noise (one burst of
+  pre-roll + tone + end silence, 38–41 speech periods, floor < −40 dB),
+  `guess_language`, `make_beep` envelope, WAV encode → `decode_wav` round
+  trip. All ctest targets green (5/5).
+- Server on the toy model, `say` engine: `/v1/audio/speech` pt → 4.4 s
+  audio in 377 ms, en → 3.4 s in 445 ms, peaks 20 450 / 26 139, played;
+  415 for `mp3`, 400 for a missing input; `chat_template_kwargs.
+  enable_thinking=false` yields a reply with no `reasoning_content`.
+- `easyai-assistant --text` against that server: streamed answer, cut into
+  sentences, each fetched from the server voice and played through
+  CoreAudio. Microphone mode: CoreAudio capture at 16 kHz / 20 ms, VAD
+  levels −24…−5 dB over a −49 dB floor, local tiny model transcribed the
+  room's Portuguese speech.
+- Found while testing: `say` leaves a pre-existing output file empty and
+  appends `.caf` to an extension-less name — handled in `Tts`.
+
+### Limits
+
+- No barge-in: saying the name while it speaks does nothing until it
+  finishes. No speaker identification. VAD is energy-based: a loud TV
+  produces bursts that cost a tiny-whisper run each (~0.3 s CPU).
+- Languages: pt and en voices ship; whisper detects others and the
+  answer is spoken with the `en` voice.

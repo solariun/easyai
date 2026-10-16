@@ -83,6 +83,9 @@
 #                                                    #   tested pin (default: sha in llama_ref
 #                                                    #   below; also --whisper-ref)
 #   ./install_easyai_server.sh --no-whisper          # skip voice transcription (whisper.cpp)
+#   ./install_easyai_server.sh --no-assistant        # skip easyai-assistant.service (voice assistant on
+#                                                    #   the box's mic/speaker; --assistant-name easy)
+#   ./install_easyai_server.sh --no-piper            # skip piper TTS (POST /v1/audio/speech, male voices)
 #   ./install_easyai_server.sh --stt-model small     # whisper model to download (default
 #                                                    #   large-v3-turbo-q5_0, 547 MB; "none" = skip)
 #   ./install_easyai_server.sh --tls                 # self-signed https (browser microphone on
@@ -320,6 +323,19 @@ stt_model="large-v3-turbo-q5_0"               # whisper model downloaded at inst
                                               # (pick one later from /models). --stt-model.
 stt_hf_repo="ggerganov/whisper.cpp"
 stt_lfs_pointer_max_bytes=4096                # a Git LFS pointer file is ~130 bytes; real weights are MBs
+do_assistant=1                                # easyai-assistant.service: voice assistant on the box's own mic
+                                              # and speaker ("hey easy"). Needs whisper. --no-assistant skips.
+assistant_name="easy"                         # --assistant-name <name>: wake word "hey <name>" / "oi <name>"
+assistant_service="easyai-assistant.service"
+wake_model="tiny"                             # small whisper for the wake word (ggml-tiny.bin, 75 MB)
+do_piper=1                                    # piper TTS for POST /v1/audio/speech (male voices: pt_BR faber,
+                                              # en_US ryan). --no-piper → the server has no voice (503).
+piper_version="2023.11.14-2"                  # github.com/rhasspy/piper release
+piper_dir="/opt/easyai/piper"
+tts_dir="$service_home/tts"
+piper_voices_base="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
+piper_voice_pt="pt/pt_BR/faber/medium/pt_BR-faber-medium"
+piper_voice_en="en/en_US/ryan/medium/en_US-ryan-medium"
 do_tls=0                                      # --tls: generate a self-signed certificate
                                               # (CN=<mdns-hostname>.local) under $config_dir
                                               # and enable [SERVER] tls_cert/tls_key so the
@@ -503,6 +519,10 @@ while [[ $# -gt 0 ]]; do
         --no-llama-tools)   do_llama_tools=0; shift ;;
         --no-whisper)       do_whisper=0; shift ;;
         --with-whisper)     do_whisper=1; shift ;;
+        --no-assistant)     do_assistant=0; shift ;;
+        --with-assistant)   do_assistant=1; shift ;;
+        --assistant-name)   assistant_name="$2"; shift 2 ;;
+        --no-piper)         do_piper=0; shift ;;
         --stt-model)        stt_model="$2"; shift 2 ;;
         --tls)              do_tls=1; shift ;;
         --no-tls)           do_tls=0; shift ;;
@@ -823,7 +843,7 @@ if [[ $do_install -eq 1 ]]; then
     sudo apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build git ccache pkg-config curl ca-certificates \
         libcurl4-openssl-dev libomp-dev libcap2-bin jq \
-        systemd-coredump patchelf git-lfs
+        systemd-coredump patchelf git-lfs libasound2-dev alsa-utils
 
     case "$backend_resolved" in
         vulkan)
@@ -1118,6 +1138,7 @@ if [[ $do_build -eq 1 ]]; then
     sudo install -Dm755 "$easyai_dir/build/easyai-server"  "$install_prefix/bin/easyai-server"
     sudo install -Dm755 "$easyai_dir/build/easyai-cli"     "$install_prefix/bin/easyai-cli"
     sudo install -Dm755 "$easyai_dir/build/easyai-local"   "$install_prefix/bin/easyai-local"   || true
+    sudo install -Dm755 "$easyai_dir/build/easyai-assistant" "$install_prefix/bin/easyai-assistant" || true
     sudo install -Dm755 "$easyai_dir/build/easyai-agent"   "$install_prefix/bin/easyai-agent"   || true
     sudo install -Dm755 "$easyai_dir/build/easyai-chat"    "$install_prefix/bin/easyai-chat"    || true
     # Tutorial agent (today_is + weather).  Only built when libcurl is
@@ -1661,6 +1682,45 @@ mcp_auth        = off
 $([[ $do_whisper -eq 1 ]] && echo "model           = $service_model_dir/$service_stt_link" || echo "# model           = $service_model_dir/$service_stt_link   (build had --no-whisper)")
 language        = auto
 # threads         = 0
+
+# ============================================================
+# [TTS] — text-to-speech (POST /v1/audio/speech)
+# ============================================================
+# OpenAI audio shape: {input, voice: pt|en, response_format: wav} → audio/wav.
+# piper runs as a child process with the two male voices below; the
+# browser and easyai-assistant both use this endpoint. engine = none
+# switches it off (503).
+[TTS]
+$([[ $do_piper -eq 1 ]] && echo "engine          = piper" || echo "engine          = none   (install had --no-piper)")
+piper           = $piper_dir/piper
+voice_pt        = $tts_dir/$(basename "$piper_voice_pt").onnx
+voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
+
+# ============================================================
+# [ASSISTANT] — easyai-assistant.service (voice assistant)
+# ============================================================
+# Always listening on this box's microphone; "hey <name>" / "oi <name>"
+# wakes it, a pause of pause_ms ends the question, the answer is spoken.
+# Every call is OpenAI-shaped, so endpoint/api_key can point at another
+# box or at OpenAI. Tools run inside the assistant (datetime, web, plus
+# EASYAI-*.tools manifests from external_tools).
+[ASSISTANT]
+name            = $assistant_name
+endpoint        = http://127.0.0.1:$service_port
+# api_key         =                 (EASYAI_API_KEY from the unit when the server has a key)
+model           = default
+language        = auto
+pause_ms        = 1500
+max_listen_ms   = 20000
+wake_model      = $service_model_dir/ggml-$wake_model.bin
+mic             = default
+speaker         = default
+tts             = auto
+tools           = datetime,web
+# external_tools  = $config_dir/tools
+# system          = $config_dir/assistant_system.txt
+history_turns   = 6
+history_idle_s  = 300
 
 # ============================================================
 # [ENGINE] — model loading and inference tunables
@@ -2269,6 +2329,61 @@ if [[ $do_service -eq 1 && $do_whisper -eq 1 && "$stt_model" != "none" ]]; then
     fi
 fi
 
+# ---------- wake-word model + piper voices (assistant / TTS) ----------------
+if [[ $do_service -eq 1 && $do_whisper -eq 1 && $do_assistant -eq 1 ]]; then
+    wake_file="ggml-$wake_model.bin"; wake_dest="$service_model_dir/$wake_file"
+    if [[ -f "$wake_dest" ]]; then
+        log "wake-word model already present: $wake_dest"
+    else
+        log "downloading wake-word model $wake_file → $wake_dest"
+        if sudo curl -fL --retry 3 --progress-bar -o "$wake_dest.part" "https://huggingface.co/$stt_hf_repo/resolve/main/$wake_file"; then
+            sudo mv "$wake_dest.part" "$wake_dest"; sudo chown "$service_user":"$service_group" "$wake_dest"; sudo chmod 640 "$wake_dest"
+        else
+            sudo rm -f "$wake_dest.part"; warn "wake-word model download failed — the assistant will use the server STT for every burst"
+        fi
+    fi
+fi
+if [[ $do_service -eq 1 && $do_piper -eq 1 ]]; then
+    sudo install -d -m755 -o "$service_user" -g "$service_group" "$tts_dir"
+    if [[ -x "$piper_dir/piper" ]]; then
+        log "piper already installed: $piper_dir/piper"
+    else
+        case "$(uname -m)" in
+            x86_64)          piper_arch="amd64" ;;
+            aarch64|arm64)   piper_arch="arm64" ;;
+            armv7l)          piper_arch="armv7" ;;
+            *)               piper_arch="" ;;
+        esac
+        if [[ -z "$piper_arch" ]]; then
+            warn "no piper build for $(uname -m) — /v1/audio/speech stays off (set [TTS] engine = espeak after apt install espeak-ng)"
+        else
+            piper_tgz="piper_linux_$( [[ "$piper_arch" == "amd64" ]] && echo x86_64 || ( [[ "$piper_arch" == "arm64" ]] && echo aarch64 || echo armv7l ) ).tar.gz"
+            log "downloading piper $piper_version ($piper_tgz)"
+            if curl -fL --retry 3 --progress-bar -o "/tmp/$piper_tgz" "https://github.com/rhasspy/piper/releases/download/$piper_version/$piper_tgz"; then
+                sudo install -d -m755 "$(dirname "$piper_dir")"
+                sudo rm -rf "$piper_dir"
+                sudo tar -xzf "/tmp/$piper_tgz" -C "$(dirname "$piper_dir")"   # extracts ./piper/
+                rm -f "/tmp/$piper_tgz"
+                [[ -x "$piper_dir/piper" ]] || warn "piper binary not found after extraction"
+            else
+                warn "piper download failed — /v1/audio/speech stays off"
+            fi
+        fi
+    fi
+    for v in "$piper_voice_pt" "$piper_voice_en"; do
+        for ext in onnx onnx.json; do
+            dest="$tts_dir/$(basename "$v").$ext"
+            [[ -f "$dest" ]] && continue
+            log "downloading piper voice $(basename "$v").$ext"
+            if sudo curl -fL --retry 3 --progress-bar -o "$dest.part" "$piper_voices_base/$v.$ext"; then
+                sudo mv "$dest.part" "$dest"; sudo chown "$service_user":"$service_group" "$dest"; sudo chmod 644 "$dest"
+            else
+                sudo rm -f "$dest.part"; warn "voice download failed: $v.$ext"
+            fi
+        done
+    done
+fi
+
 # ---------- TLS (self-signed) ------------------------------------------------
 # Browsers expose the microphone only on https:// or localhost. --tls makes
 # the box answer https with a self-signed certificate (accept it once per
@@ -2440,6 +2555,48 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 WantedBy=multi-user.target
 UNIT
 
+    # ---- easyai-assistant.service ---------------------------------------------
+    # The voice assistant on this box's own microphone and speaker. Same
+    # user as the server plus the audio group; the server's API key (when
+    # one exists) reaches it through EASYAI_API_KEY like the server itself.
+    if [[ $do_assistant -eq 1 && $do_whisper -eq 1 ]]; then
+        sudo usermod -aG audio "$service_user" || true
+        log "writing /etc/systemd/system/$assistant_service"
+        sudo tee "/etc/systemd/system/$assistant_service" >/dev/null <<AUNIT
+[Unit]
+Description=easyai voice assistant ("hey $assistant_name" on this box's microphone)
+Documentation=https://github.com/solariun/easy
+After=easyai-server.service sound.target
+Wants=easyai-server.service
+StartLimitBurst=3
+StartLimitIntervalSec=120
+
+[Service]
+Type=simple
+User=$service_user
+Group=$service_group
+WorkingDirectory=$service_home
+SupplementaryGroups=audio
+Environment=HOME=$service_home
+Environment=LD_LIBRARY_PATH=$install_prefix/lib/easyai
+Environment=EASYAI_NO_AUTO_LOG=1
+$( [[ -f "$api_key_file" ]] && echo "Environment=\"EASYAI_API_KEY_FILE=$api_key_file\"" )
+ExecStart=/bin/sh -c '$( [[ -f "$api_key_file" ]] && echo "EASYAI_API_KEY=\$(cat $api_key_file) " )exec $install_prefix/bin/easyai-assistant --config $ini_file'
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGINT
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=$service_home /tmp
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+AUNIT
+    else
+        sudo rm -f "/etc/systemd/system/$assistant_service"
+    fi
+
     # ---- legacy drop-in cleanup --------------------------------------------
     # Earlier versions of this script wrote SOME flags into separate drop-in
     # files under .service.d/ (e.g. verbose.conf carried `--verbose` via its
@@ -2489,6 +2646,7 @@ UNIT
     if [[ $do_enable_now -eq 1 ]]; then
         log "enabling + starting $service_name"
         sudo systemctl enable --now "$service_name"
+        [[ -f "/etc/systemd/system/$assistant_service" ]] && sudo systemctl enable --now "$assistant_service"
         sleep 1
         sudo systemctl --no-pager --full status "$service_name" || true
     else
@@ -2835,6 +2993,10 @@ printf '  voice     : %s://%s:%s/v1/audio/transcriptions   (%s)\n' "$scheme" \
     "$([[ $do_whisper -eq 1 ]] && echo "whisper $stt_model, mic chip in the chat; endpoints list: /models → Status" || echo "off: --with-whisper")"
 [[ $do_tls -eq 1 ]] && \
     printf '              https is self-signed — accept the certificate once per browser; the mic chip needs https or localhost\n'
+printf '  speech    : %s://%s:%s/v1/audio/speech   (%s)\n' "$scheme" \
+    "$([[ "$service_host" == "0.0.0.0" ]] && hostname || echo "$service_host")" "$service_port" \
+    "$([[ $do_piper -eq 1 ]] && echo "piper, voices pt_BR faber + en_US ryan" || echo "off: --no-piper")"
+printf '  assistant : %s\n' "$([[ $do_assistant -eq 1 && $do_whisper -eq 1 ]] && echo "$assistant_service — say \"hey $assistant_name\" / \"oi $assistant_name\" near the box; journalctl -u easyai-assistant -f" || echo "off: --with-assistant")"
 printf '  health    : %s://localhost:%s/health\n' "$scheme" "$service_port"
 [[ $enable_metrics -eq 1 ]] && \
     printf '  metrics   : %s://localhost:%s/metrics\n' "$scheme" "$service_port"

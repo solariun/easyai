@@ -293,6 +293,17 @@ then fails with a clear message.
 
 ---
 
+### `easyai::Tts`, `easyai::audio`, `easyai::assistant`
+
+`easyai/tts.hpp`: `Tts::configure(cfg, err)` picks piper / `say` /
+espeak-ng as a child process, `synthesize(text, "pt"|"en", pcm, rate,
+err)` returns PCM16; `encode_wav_pcm16()` wraps it. `easyai/audio_io.hpp`:
+`audio::Capture` (blocking `read()` of one period, ALSA or CoreAudio) and
+`audio::Playback::play()`. `easyai/assistant_core.hpp`: `Vad`,
+`Segmenter`, `wake_match()`, `SentenceChunker`, `guess_language()`,
+`make_beep()` — the model-free pieces of `easyai-assistant`, all pure and
+unit-tested (`tests/test_assistant.cpp`).
+
 ## 6. Linking
 
 easyai ships as ONE library — `libeasyai.so` / `.dylib`. There is no

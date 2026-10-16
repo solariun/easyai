@@ -213,6 +213,9 @@ access unless `--stt-model` names another model.
 | `/etc/easyai/system.txt` | root:easyai | 640 | **NOT installed by default** — created only by the operator (e.g. `sudo cp system.txt_template system.txt`); when present and `SERVER.system_file` is uncommented in `easyai.ini`, replaces the binary's built-in "Deep" prompt |
 | `/etc/easyai/api_key` | easyai:easyai | 600 | optional bearer-token gate |
 | `/etc/easyai/tls.crt`, `tls.key` | easyai:easyai | 644 / 600 | optional self-signed TLS pair (`--tls`): the box answers `https://`, which the chat's mic chip needs from other machines |
+| `/opt/easyai/piper/`, `/var/lib/easyai/tts/*.onnx` | root / easyai | 755 / 644 | piper TTS binary and the two male voices behind `POST /v1/audio/speech` (`--no-piper` skips) |
+| `/var/lib/easyai/models/ggml-tiny.bin` | easyai:easyai | 640 | wake-word whisper model for `easyai-assistant.service` |
+| `/etc/systemd/system/easyai-assistant.service` | root | 644 | the voice assistant unit (`--no-assistant` skips): same user plus `audio` group, `journalctl -u easyai-assistant -f`; wake name via `--assistant-name` |
 | `/etc/easyai/external-tools/` | root:easyai | 750 | operator-defined tools (`EASYAI-*.tools`) |
 | `/etc/easyai/favicon[.ext]` | root:easyai | 644 | optional webui favicon |
 | `/var/lib/easyai/` | easyai:easyai | 750 | mutable agent state |
