@@ -166,6 +166,30 @@ std::string Tts::configure(const Config & cfg, std::string & err) {
     cfg_ = cfg; err.clear();
     std::string e = cfg.engine.empty() ? "auto" : cfg.engine;
     fallback_ = "none";
+    auto pick_fallback = [&]() {
+        std::string ferr;
+        fallback_ = resolve_local("auto", ferr);
+        if (cfg_.piper.empty()) cfg_.piper = "piper";
+        if (fallback_ == "say")    { if (cfg_.voice_pt.empty()) cfg_.voice_pt = "Eddy (Portuguese (Brazil))"; if (cfg_.voice_en.empty()) cfg_.voice_en = "Daniel"; }
+        if (fallback_ == "espeak") { if (cfg_.voice_pt.empty()) cfg_.voice_pt = "pt-br"; if (cfg_.voice_en.empty()) cfg_.voice_en = "en"; }
+        if (fallback_ == "piper")  { piper_rate_pt_ = file_exists(cfg_.voice_pt) ? piper_rate(cfg_.voice_pt) : 0; piper_rate_en_ = file_exists(cfg_.voice_en) ? piper_rate(cfg_.voice_en) : 0; }
+    };
+    if (e == "kokoro" || (e == "auto" && !cfg.kokoro_model.empty())) {
+        Kokoro::Config kc;
+        kc.model = cfg.kokoro_model; kc.voices = cfg.kokoro_voices; kc.onnxruntime = cfg.onnxruntime;
+        kc.espeak_lib = cfg.espeak_lib; kc.espeak_data = cfg.espeak_data;
+        std::string kerr;
+        if (kokoro_.load(kc, kerr)) {
+            engine_ = "kokoro";
+            kokoro_voice_pt_ = (!cfg.kokoro_voice_pt.empty() && kokoro_.has_voice(cfg.kokoro_voice_pt)) ? cfg.kokoro_voice_pt : "pm_alex";
+            kokoro_voice_en_ = (!cfg.kokoro_voice_en.empty() && kokoro_.has_voice(cfg.kokoro_voice_en)) ? cfg.kokoro_voice_en : "am_michael";
+            pick_fallback();   // voice_pt / voice_en stay the child-process voices (piper .onnx, say, espeak)
+            return engine_;
+        }
+        err = "kokoro: " + kerr;
+        if (e == "kokoro") { engine_ = "none"; return engine_; }
+        err += "; falling back";
+    }
     if (e == "http" || (e == "auto" && !cfg.url.empty())) {
         httplib::Client c(cfg.url);
         c.set_connection_timeout(2); c.set_read_timeout(5);
@@ -204,7 +228,7 @@ std::string Tts::configure(const Config & cfg, std::string & err) {
 }
 
 std::string Tts::resolve_voice(const std::string & voice, int & rate_hz) const {
-    const std::string local = engine_ == "http" ? fallback_ : engine_;
+    const std::string local = (engine_ == "http" || engine_ == "kokoro") ? fallback_ : engine_;
     rate_hz = local == "say" ? kSayRateHz : local == "espeak" ? kEspeakRateHz : kDefaultPiperRate;
     if (voice == "pt" || voice == "pt-br" || voice == "pt_BR") {
         if (local == "piper") rate_hz = piper_rate_pt_ ? piper_rate_pt_ : piper_rate_en_;
@@ -274,12 +298,21 @@ bool Tts::synthesize(const std::string & text, const std::string & voice,
     pcm.clear();
     if (!available()) { err = "no TTS engine"; return false; }
     if (text.empty()) { err = "empty text"; return false; }
-    if (engine_ == "http") {
-        if (synthesize_http(text, voice, pcm, rate_hz, err)) return true;
+    if (engine_ == "kokoro" || engine_ == "http") {
+        bool ok;
+        if (engine_ == "kokoro") {
+            const std::string v = (voice == "pt" || voice == "pt-br" || voice == "pt_BR") ? kokoro_voice_pt_
+                                : (voice.empty() || voice == "en" || voice == "en-us" || voice == "en_US") ? kokoro_voice_en_ : voice;
+            rate_hz = Kokoro::kSampleRate;
+            ok = kokoro_.synthesize(text, v, 1.0f, pcm, err);
+        } else {
+            ok = synthesize_http(text, voice, pcm, rate_hz, err);
+        }
+        if (ok) return true;
         if (fallback_ == "none") return false;
         std::string ferr;
         if (synthesize_local(fallback_, text, voice, pcm, rate_hz, ferr)) {
-            std::fprintf(stderr, "[easyai] tts: helper failed (%s) — spoke with %s\n", err.c_str(), fallback_.c_str());
+            std::fprintf(stderr, "[easyai] tts: %s failed (%s) — spoke with %s\n", engine_.c_str(), err.c_str(), fallback_.c_str());
             err.clear();
             return true;
         }

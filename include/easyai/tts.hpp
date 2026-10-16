@@ -8,14 +8,22 @@
 #include <string>
 #include <vector>
 
+#include "easyai/kokoro.hpp"
+
 namespace easyai {
 
 class Tts {
 public:
     struct Config {
-        std::string engine = "auto";   // auto | http | piper | say | espeak | none
-        std::string url;               // engine http: base URL of a helper speaking POST /v1/audio/speech
-                                       // (scripts/easyai_tts_kokoro.py — Kokoro-82M, the natural voice)
+        std::string engine = "auto";   // auto | kokoro | http | piper | say | espeak | none
+        std::string kokoro_model;      // engine kokoro (the natural voice, in-process C++): kokoro-v1.0.onnx
+        std::string kokoro_voices;     //   voices-v1.0.bin
+        std::string kokoro_voice_pt;   //   Kokoro voice ids (default pm_alex / am_michael, both male)
+        std::string kokoro_voice_en;
+        std::string onnxruntime;       //   libonnxruntime path; empty = search
+        std::string espeak_lib;        //   libespeak-ng path; empty = search
+        std::string espeak_data;       //   espeak-ng-data dir; empty = search
+        std::string url;               // engine http: base URL of another box speaking POST /v1/audio/speech
         std::string piper;             // piper binary path (engine piper)
         std::string voice_pt;          // piper: .onnx path; say: voice name; espeak: voice id
         std::string voice_en;
@@ -23,9 +31,10 @@ public:
 
     // Resolves "auto" and checks the engine's binary and voices exist.
     // Returns the engine chosen ("none" when nothing usable) and fills err.
-    // auto = http when url answers /health, else piper, else say (macOS),
-    // else espeak-ng. With http, the best local engine stays as fallback
-    // for when the helper is down.
+    // auto = kokoro when model, voices, onnxruntime and espeak-ng are found,
+    // else http when url answers /health, else piper, else say (macOS),
+    // else espeak-ng. With kokoro or http, the best child-process engine
+    // stays as fallback for a synthesis that fails.
     std::string configure(const Config & cfg, std::string & err);
     const std::string & engine() const { return engine_; }
     const std::string & fallback_engine() const { return fallback_; }
@@ -39,8 +48,10 @@ public:
 
 private:
     std::string engine_ = "none";
-    std::string fallback_ = "none";    // local engine used when http fails
+    std::string fallback_ = "none";    // child-process engine used when kokoro / http fail
     Config      cfg_;
+    Kokoro      kokoro_;
+    std::string kokoro_voice_pt_, kokoro_voice_en_;
     int         piper_rate_pt_ = 0, piper_rate_en_ = 0;
     std::string resolve_voice(const std::string & voice, int & rate_hz) const;
     std::string resolve_local(const std::string & want, std::string & err) const;

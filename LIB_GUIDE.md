@@ -295,8 +295,9 @@ then fails with a clear message.
 
 ### `easyai::Tts`, `easyai::audio`, `easyai::assistant`
 
-`easyai/tts.hpp`: `Tts::configure(cfg, err)` picks piper / `say` /
-espeak-ng as a child process, `synthesize(text, "pt"|"en", pcm, rate,
+`easyai/tts.hpp`: `Tts::configure(cfg, err)` picks Kokoro-82M in-process
+(`easyai/kokoro.hpp`, onnxruntime + espeak-ng via `dlopen`), another
+box over HTTP, or piper / `say` / espeak-ng as a child process, `synthesize(text, "pt"|"en", pcm, rate,
 err)` returns PCM16; `encode_wav_pcm16()` wraps it. `easyai/audio_io.hpp`:
 `audio::Capture` (blocking `read()` of one period, ALSA or CoreAudio) and
 `audio::Playback::play()`. `easyai/assistant_core.hpp`: `Vad`,

@@ -72,6 +72,7 @@ struct Args {
     std::string wake_model = "models/stt/ggml-tiny.bin";
     std::string mic = "default", speaker = "default";
     std::string tts = "auto", voice_pt, voice_en, piper = "piper";
+    std::string kokoro_model, kokoro_voices;   // local Kokoro voice when the endpoint has none
     std::string tools = "datetime,web", external_tools;
     std::string system;                     // file path or inline text
     int         history_turns = kDefaultHistoryTurns, history_idle_s = kDefaultHistoryIdleS;
@@ -96,10 +97,12 @@ std::vector<Key> keys(Args & a) {
         {"--wake-model",     "wake_model",     Key::S, &a.wake_model,     "local whisper ggml for the wake word, or 'server' (default models/stt/ggml-tiny.bin)"},
         {"--mic",            "mic",            Key::S, &a.mic,            "capture device (ALSA name; default)"},
         {"--speaker",        "speaker",        Key::S, &a.speaker,        "playback device (ALSA name; default)"},
-        {"--tts",            "tts",            Key::S, &a.tts,            "auto | server | say | piper | espeak (default auto)"},
+        {"--tts",            "tts",            Key::S, &a.tts,            "auto | server | kokoro | say | piper | espeak (default auto)"},
         {"--voice-pt",       "voice_pt",       Key::S, &a.voice_pt,       "local engine voice for pt (piper .onnx / say / espeak)"},
         {"--voice-en",       "voice_en",       Key::S, &a.voice_en,       "local engine voice for en"},
         {"--piper",          "piper",          Key::S, &a.piper,          "piper binary for the local fallback"},
+        {"--kokoro-model",   "kokoro_model",   Key::S, &a.kokoro_model,   "local Kokoro-82M .onnx (natural voice without a server voice)"},
+        {"--kokoro-voices",  "kokoro_voices",  Key::S, &a.kokoro_voices,  "local Kokoro voices-v1.0.bin"},
         {"--tools",          "tools",          Key::S, &a.tools,          "csv of built-in tools: datetime,web (default) — empty = none"},
         {"--external-tools", "external_tools", Key::S, &a.external_tools, "directory of EASYAI-*.tools manifests (MCP-style external tools)"},
         {"--system",         "system",         Key::S, &a.system,         "system prompt: a file path or inline text (default: built-in)"},
@@ -182,6 +185,7 @@ public:
     Speaker(const Args & a) : a_(a) {
         if (a.tts != "server") {
             easyai::Tts::Config c; c.engine = (a.tts == "auto") ? "auto" : a.tts; c.piper = a.piper; c.voice_pt = a.voice_pt; c.voice_en = a.voice_en;
+            c.kokoro_model = a.kokoro_model; c.kokoro_voices = a.kokoro_voices;
             std::string err;
             local_.configure(c, err);
             local_err_ = err;

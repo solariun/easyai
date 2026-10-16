@@ -3677,7 +3677,7 @@ static void route_health(ServerCtx & ctx, const httplib::Request &,
     j["tls"] = ctx.tls;
     j["tts_available"] = ctx.tts.available();
     j["tts_engine"]    = ctx.tts.engine();
-    if (ctx.tts.engine() == "http") j["tts_fallback"] = ctx.tts.fallback_engine();
+    if (ctx.tts.engine() == "http" || ctx.tts.engine() == "kokoro") j["tts_fallback"] = ctx.tts.fallback_engine();
 
     // Compatibility shims this server speaks. Lets clients
     // auto-detect which API they can use without trial requests.
@@ -3846,9 +3846,13 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "  threads   --stt-threads <n>      whisper threads (0 = its default).\n"
         "\n"
         "[TTS]  text-to-speech (POST /v1/audio/speech, easyai-assistant voice)\n"
-        "  engine    --tts-engine <e>       auto (default) | http | piper | say (macOS) | espeak | none.\n"
-        "  url       --tts-url <base>       engine http: Kokoro helper (easyai_tts_kokoro.py), the natural voice;\n"
-        "                                   auto prefers it when set and answering, local engines stay as fallback.\n"
+        "  engine    --tts-engine <e>       auto (default) | kokoro | http | piper | say (macOS) | espeak | none.\n"
+        "  kokoro_model  --tts-kokoro-model <onnx>   Kokoro-82M, the natural voice, run in-process (C++; onnxruntime\n"
+        "  kokoro_voices --tts-kokoro-voices <bin>   and espeak-ng opened at run time). auto prefers it when both files\n"
+        "                                   exist. kokoro_voice_pt / kokoro_voice_en pick the voices (pm_alex, am_michael).\n"
+        "  onnxruntime --tts-onnxruntime <lib>  libonnxruntime path (default: /opt/easyai/onnxruntime, system, brew).\n"
+        "  espeak_lib / espeak_data         libespeak-ng and its data dir (default: system / brew locations).\n"
+        "  url       --tts-url <base>       engine http: another box's /v1/audio/speech; auto uses it when kokoro is off.\n"
         "  piper     --tts-piper <path>     piper binary (default: piper on PATH).\n"
         "  voice_pt  --tts-voice-pt <v>     piper .onnx path / say voice / espeak voice for pt.\n"
         "  voice_en  --tts-voice-en <v>     same for en. auto picks male defaults per engine.\n"
@@ -4041,8 +4045,15 @@ struct ServerArgs {
     std::string stt_model_path;   // whisper ggml-*.bin (or a symlink to one); empty = no voice transcription
     std::string stt_language = "auto";   // ISO-639-1 or auto
     int         stt_threads  = 0;        // 0 = whisper default
-    std::string tts_engine   = "auto";   // auto|http|piper|say|espeak|none  (POST /v1/audio/speech)
-    std::string tts_url;                 // engine http: Kokoro helper base URL (scripts/easyai_tts_kokoro.py)
+    std::string tts_engine   = "auto";   // auto|kokoro|http|piper|say|espeak|none  (POST /v1/audio/speech)
+    std::string tts_kokoro_model;        // engine kokoro: kokoro-v1.0.onnx (natural voice, C++ in-process)
+    std::string tts_kokoro_voices;       //   voices-v1.0.bin
+    std::string tts_kokoro_voice_pt;     //   Kokoro voice ids (default pm_alex / am_michael)
+    std::string tts_kokoro_voice_en;
+    std::string tts_onnxruntime;         //   libonnxruntime path (empty = search)
+    std::string tts_espeak_lib;          //   libespeak-ng path (empty = search)
+    std::string tts_espeak_data;         //   espeak-ng-data dir (empty = search)
+    std::string tts_url;                 // engine http: another box speaking POST /v1/audio/speech
     std::string tts_piper    = "piper";  // piper binary
     std::string tts_voice_pt;            // piper .onnx / say voice / espeak voice
     std::string tts_voice_en;
@@ -4255,6 +4266,13 @@ static const std::vector<FlagDef> & kFlags() {
         { {"--stt-language"},      "STT",    "language",       "stt_language",   true,  SET_STR(&ServerArgs::stt_language) },
         { {"--stt-threads"},       "STT",    "threads",        "stt_threads",    true,  SET_INT(&ServerArgs::stt_threads) },
         { {"--tts-engine"},        "TTS",    "engine",         "tts_engine",     true,  SET_STR(&ServerArgs::tts_engine) },
+        { {"--tts-kokoro-model"},  "TTS",    "kokoro_model",   "tts_kokoro_model", true, SET_STR(&ServerArgs::tts_kokoro_model) },
+        { {"--tts-kokoro-voices"}, "TTS",    "kokoro_voices",  "tts_kokoro_voices", true, SET_STR(&ServerArgs::tts_kokoro_voices) },
+        { {"--tts-kokoro-voice-pt"}, "TTS",  "kokoro_voice_pt", "tts_kokoro_voice_pt", true, SET_STR(&ServerArgs::tts_kokoro_voice_pt) },
+        { {"--tts-kokoro-voice-en"}, "TTS",  "kokoro_voice_en", "tts_kokoro_voice_en", true, SET_STR(&ServerArgs::tts_kokoro_voice_en) },
+        { {"--tts-onnxruntime"},   "TTS",    "onnxruntime",    "tts_onnxruntime", true, SET_STR(&ServerArgs::tts_onnxruntime) },
+        { {"--tts-espeak-lib"},    "TTS",    "espeak_lib",     "tts_espeak_lib", true,  SET_STR(&ServerArgs::tts_espeak_lib) },
+        { {"--tts-espeak-data"},   "TTS",    "espeak_data",    "tts_espeak_data", true, SET_STR(&ServerArgs::tts_espeak_data) },
         { {"--tts-url"},           "TTS",    "url",            "tts_url",        true,  SET_STR(&ServerArgs::tts_url) },
         { {"--tts-piper"},         "TTS",    "piper",          "tts_piper",      true,  SET_STR(&ServerArgs::tts_piper) },
         { {"--tts-voice-pt"},      "TTS",    "voice_pt",       "tts_voice_pt",   true,  SET_STR(&ServerArgs::tts_voice_pt) },
@@ -7975,12 +7993,15 @@ int main(int argc, char ** argv) {
     {
         easyai::Tts::Config tc;
         tc.engine = args.tts_engine; tc.url = args.tts_url; tc.piper = args.tts_piper;
+        tc.kokoro_model = args.tts_kokoro_model; tc.kokoro_voices = args.tts_kokoro_voices;
+        tc.kokoro_voice_pt = args.tts_kokoro_voice_pt; tc.kokoro_voice_en = args.tts_kokoro_voice_en;
+        tc.onnxruntime = args.tts_onnxruntime; tc.espeak_lib = args.tts_espeak_lib; tc.espeak_data = args.tts_espeak_data;
         tc.voice_pt = args.tts_voice_pt; tc.voice_en = args.tts_voice_en;
         const std::string eng = ctx->tts.configure(tc, ctx->tts_error);
         if (ctx->tts.available())
             std::fprintf(stderr, "[easyai-server] tts: %s%s (POST /v1/audio/speech, voices pt/en)%s\n", eng.c_str(),
-                         eng == "http" ? (" " + args.tts_url).c_str() : "",
-                         eng == "http" ? (", fallback " + ctx->tts.fallback_engine()).c_str() : "");
+                         eng == "http" ? (" " + args.tts_url).c_str() : eng == "kokoro" ? (" " + args.tts_kokoro_model).c_str() : "",
+                         (eng == "http" || eng == "kokoro") ? (", fallback " + ctx->tts.fallback_engine()).c_str() : "");
         else
             std::fprintf(stderr, "[easyai-server] tts: none%s (POST /v1/audio/speech answers 503; set [TTS] engine / piper / voices)\n",
                          ctx->tts_error.empty() ? "" : (" — " + ctx->tts_error).c_str());

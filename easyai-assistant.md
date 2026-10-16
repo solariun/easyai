@@ -102,25 +102,23 @@ tts      = auto        ; OpenAI's /v1/audio/speech answers, voices pt/en map to 
 
 ## 4. Voices
 
-The box's `/v1/audio/speech` (easyai-server, `[TTS]`) uses **Kokoro-82M**,
-a natural neural voice, through the helper `easyai-tts-kokoro.service`
-(`scripts/easyai_tts_kokoro.py` in a Python venv at `/opt/easyai/kokoro`):
-`pm_alex` for Portuguese, `am_michael` for English, both male;
-`--kokoro-voice-pt pm_santa` / `--kokoro-voice-en bm_george` at install,
-or `[TTS]` → helper flags, pick others. **piper** (`pt_BR-faber`,
-`en_US-ryan`) stays installed as the server's automatic fallback when the
-helper is down. On a Mac without a server voice the assistant falls back
-to `say` (Eddy pt-BR, Daniel en-GB); `espeak-ng` is the last resort.
-
-Running the Kokoro helper by hand (Python ≥ 3.10, system `espeak-ng`
-for pt-BR):
+The box's `/v1/audio/speech` (easyai-server, `[TTS]`) runs **Kokoro-82M**
+in-process, in C++ (`easyai::Kokoro`): the ONNX model through
+onnxruntime and the phonemes through espeak-ng, both shared libraries
+opened at run time, no Python. Voices `pm_alex` for Portuguese and
+`am_michael` for English, both male; `--kokoro-voice-pt pm_santa` /
+`--kokoro-voice-en bm_george` at install, or `[TTS] kokoro_voice_pt`,
+pick others. **piper** (`pt_BR-faber`, `en_US-ryan`) stays installed as
+the server's automatic fallback. On a Mac the assistant can carry the
+same voice itself with `[ASSISTANT] kokoro_model` / `kokoro_voices`
+(brew `espeak-ng` and an onnxruntime dylib in `/opt/homebrew/lib` or
+`EASYAI_ONNXRUNTIME`), else `say` (Eddy pt-BR, Daniel en-GB), else
+`espeak-ng`.
 
 ```bash
-python3 -m venv venv && ./venv/bin/pip install kokoro-onnx
 curl -LO https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
 curl -LO https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
-./venv/bin/python scripts/easyai_tts_kokoro.py --model kokoro-v1.0.onnx --voices voices-v1.0.bin --port 8111
-easyai-server ... --tts-url http://127.0.0.1:8111     # or [TTS] url =
+easyai-server ... --tts-kokoro-model kokoro-v1.0.onnx --tts-kokoro-voices voices-v1.0.bin
 ```
 
 ## 5. Limits

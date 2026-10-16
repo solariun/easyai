@@ -183,6 +183,7 @@ set(EASYAI_SOURCES
     src/tts.cpp
     src/audio_io.cpp
     src/assistant_core.cpp
+    src/kokoro.cpp
     # vendored httplib (see header comment above)
     ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor/cpp-httplib/httplib.cpp
 )
@@ -203,6 +204,7 @@ target_include_directories(easyai
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime         # onnxruntime C API header (dlopen at runtime)
             ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor             # nlohmann/json.hpp
             ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor/cpp-httplib) # httplib.h
 # BUILD_INTERFACE wraps the link so the dep doesn't leak into the
@@ -280,6 +282,9 @@ else()
         message(STATUS "easyai: ALSA not found (apt install libasound2-dev) — easyai-assistant builds without audio")
     endif()
 endif()
+
+# Kokoro (src/kokoro.cpp) dlopens libonnxruntime and libespeak-ng at run time.
+target_link_libraries(easyai PRIVATE ${CMAKE_DL_LIBS})
 
 find_package(OpenSSL QUIET)
 if (OpenSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
@@ -454,6 +459,9 @@ if (EASYAI_BUILD_TESTS)
     add_executable(easyai-test-assistant tests/test_assistant.cpp)
     target_link_libraries(easyai-test-assistant PRIVATE easyai)
     add_test(NAME assistant COMMAND easyai-test-assistant)
+    add_executable(easyai-test-kokoro tests/test_kokoro.cpp)
+    target_link_libraries(easyai-test-kokoro PRIVATE easyai)
+    add_test(NAME kokoro COMMAND easyai-test-kokoro)
     add_executable(easyai-test-local-models tests/test_local_models.cpp)
     target_link_libraries(easyai-test-local-models PRIVATE easyai)
     add_test(NAME local_models COMMAND easyai-test-local-models)
