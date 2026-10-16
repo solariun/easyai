@@ -213,6 +213,10 @@ bool Stt::load(const std::string & path) {
 }
 
 bool Stt::transcribe(const float * pcm, std::size_t n, const std::string & language, Result & out) {
+    return transcribe(pcm, n, language, "", out);
+}
+
+bool Stt::transcribe(const float * pcm, std::size_t n, const std::string & language, const std::string & prompt, Result & out) {
     out = Result();
 #if defined(EASYAI_HAVE_WHISPER)
     if (!p_->ctx) { p_->error = "no STT model loaded"; return false; }
@@ -224,6 +228,7 @@ bool Stt::transcribe(const float * pcm, std::size_t n, const std::string & langu
     wp.detect_language = false;
     wp.translate       = false;
     wp.no_context      = true;
+    wp.initial_prompt  = prompt.empty() ? nullptr : prompt.c_str();
     wp.print_progress  = false;
     wp.print_realtime  = false;
     wp.print_timestamps = false;
@@ -256,7 +261,7 @@ bool Stt::transcribe(const float * pcm, std::size_t n, const std::string & langu
     out.language = lang_id >= 0 ? whisper_lang_str(lang_id) : (autodetect ? "" : language);
     return true;
 #else
-    (void) pcm; (void) n; (void) language;
+    (void) pcm; (void) n; (void) language; (void) prompt;
     p_->error = "built without whisper";
     return false;
 #endif

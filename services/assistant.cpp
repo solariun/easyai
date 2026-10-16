@@ -365,6 +365,10 @@ public:
         });
         register_tools();
         aliases_ = default_aliases(a.name);
+        // whisper's prompt: a sentence that names the assistant, so the decoder prefers that
+        // spelling. Never a call phrase ("Hey easy AI."): whisper then takes the real call as
+        // already said and drops it (measured 2026-10-16: 6 of 12 names lost).
+        wake_prompt_ = "O assistente chama-se " + spoken_name(a.name, "en") + ". The assistant is called " + spoken_name(a.name, "en") + ".";
         std::stringstream as(a.name_aliases); std::string al;
         while (std::getline(as, al, ',')) { al.erase(0, al.find_first_not_of(' ')); al.erase(al.find_last_not_of(' ') + 1); if (!al.empty()) aliases_.push_back(al); }
     }
@@ -441,7 +445,7 @@ public:
             std::vector<float> f(pcm.size());
             for (std::size_t i = 0; i < pcm.size(); ++i) f[i] = pcm[i] / 32768.0f;
             easyai::Stt::Result r;
-            if (!wake_.transcribe(f.data(), f.size(), a_.language, r)) return false;
+            if (!wake_.transcribe(f.data(), f.size(), a_.language, wake_prompt_, r)) return false;
             text = r.text; lang = r.language;
             return true;
         }
@@ -450,6 +454,7 @@ public:
             {"file", easyai::encode_wav_pcm16(pcm.data(), pcm.size(), kSampleRate), "speech.wav", "audio/wav"},
             {"model", "whisper-1", "", ""},
             {"response_format", "verbose_json", "", ""},
+            {"prompt", wake_prompt_, "", ""},
         };
         if (a_.language != "auto") items.push_back({"language", a_.language, "", ""});
         auto r = c->Post("/v1/audio/transcriptions", items);
@@ -620,6 +625,7 @@ private:
     easyai::audio::Capture cap_;
     SentenceChunker        chunker_;
     std::vector<std::string> aliases_;
+    std::string            wake_prompt_;
     std::string            lang_ = "en";
     int                    turns_ = 0;
     bool                   server_down_ = false;

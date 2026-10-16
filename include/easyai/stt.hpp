@@ -52,7 +52,10 @@ public:
     void threads(int n);
 
     // language: "" or "auto" = detect; otherwise an ISO-639-1 code.
+    // prompt: text whisper sees before the audio (OpenAI's "prompt"): names and
+    // spellings it should prefer, e.g. "Hey easy AI." for the wake word.
     bool transcribe(const float * pcm, std::size_t n, const std::string & language, Result & out);
+    bool transcribe(const float * pcm, std::size_t n, const std::string & language, const std::string & prompt, Result & out);
 
 private:
     struct Impl;

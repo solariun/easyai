@@ -765,9 +765,12 @@ flowchart LR
    (echoed, otherwise ignored), `language` (`auto` or ISO-639-1),
    `response_format` = `json` (default, `{"text"}`), `text` (plain
    body), `verbose_json` (`text`, `language`, `duration`, `segments[]`
-   with `id`, `start`, `end`, `text`). A raw body with
+   with `id`, `start`, `end`, `text`), `prompt` (OpenAI's field: text
+   whisper sees before the audio, passed as `initial_prompt`; names and
+   spellings to prefer — easyai-assistant sends "The assistant is called
+   easy AI."). A raw body with
    `Content-Type: audio/wav` (or `audio/x-wav`, `audio/wave`) is accepted
-   too, for `curl --data-binary`. Accepted audio: WAV only (see
+   too, for `curl --data-binary`, with the same names as query parameters. Accepted audio: WAV only (see
    decision). Errors: 400 `invalid_request_error` (no file / bad WAV),
    415 `unsupported_media_type` (not WAV), 503 `stt_not_loaded`.
    One transcription at a time per context (`stt_mu`); chat generation
@@ -1632,7 +1635,19 @@ flowchart LR
    "O irreaziai", is not and is left out on purpose). Writing the name
    `easyai` as one word mis-leads Kokoro's phonemizer ("isae"), so the
    greeting spells it through `spoken_name(name, lang)`: "easy AI" for
-   en, "ísi ai" for pt; other names are spoken as written. Words after the name mean the question came in the
+   en, "ísi ai" for pt; other names are spoken as written. Every
+   transcription (local wake model and `/v1/audio/transcriptions`)
+   carries the whisper prompt "O assistente chama-se <spoken en>. The
+   assistant is called <spoken en>." (`Stt::transcribe(..., prompt,
+   ...)` → `initial_prompt`), which makes whisper write the name the way
+   `wake_match` expects. Measured on the same ten call phrases with the
+   prompt: base writes "O easy AI que horas são agora", "Easy AI como
+   você está", "Hey easy AI, what time is it?" (9 of 10 with the name,
+   the tenth "Oi Reazi AI" is an alias now); tiny 9 of 10 as well. A
+   call phrase as prompt ("Hey easy AI. Oi easy AI.") is worse: whisper
+   treats it as text already said and drops the real call in 6 of 12
+   phrases, so the prompt is a sentence *about* the name, never the
+   call itself. Words after the name mean the question came in the
    same breath: the same burst audio is then sent to the STT endpoint
    (the large model) and the words after the name in that transcript
    are the question, so the small model only ever decides the name;
@@ -1641,7 +1656,8 @@ flowchart LR
    to the STT endpoint instead (`wake_model = server`).
 4. **Transcription.** The recorded utterance is sent as PCM16 WAV to
    `stt_endpoint` (default: `endpoint`) `POST /v1/audio/transcriptions`
-   multipart, `response_format=verbose_json`, `language` from
+   multipart, `response_format=verbose_json`, `prompt` (the sentence
+   naming the assistant, rule 3), `language` from
    `[ASSISTANT] language` (`auto` default). The returned `language`
    drives the voice. An empty transcript, or one that is not a question
    (`looks_like_question`: fewer than `kMinQuestionWords = 2` real words
@@ -1814,6 +1830,13 @@ flowchart LR
   list of them; the odd one-word spellings stay in the alias table like
   before. Rejected: a per-language name (one INI key, one name, is what
   was asked), phonetic matching (Soundex and friends are English-only).
+- **Whisper prompt instead of more aliases.** OpenAI's `prompt` /
+  whisper.cpp `initial_prompt` is the documented way to teach whisper a
+  proper noun; one sentence naming the assistant fixed the spelling of
+  "easy AI" in pt and en on tiny and base without touching the
+  matcher. The alias table stays for the spellings that survive it.
+  Rejected: a fine-tuned wake model (training data, days), a keyword
+  spotter (another model and runtime for one word).
 - **Listening beep before the follow-up window** (Gustavo, 2026-10-16:
   "quando terminar a vocalização e começar a ouvir novamente adicione o
   tone de escuta"). The same 880 Hz beep that follows the name, not a

@@ -117,6 +117,9 @@ int main() {
                         r.audio_ms, r.run_ms, r.language.c_str(), r.text.c_str());
             CHECK(r.text.find("country") != std::string::npos);
             CHECK(!r.segments.empty() && r.segments.front().t1_ms > r.segments.front().t0_ms);
+            Stt::Result rp;   // the prompt overload: a glossary sentence must not change a clear transcript
+            CHECK(stt.transcribe(pcm.data(), pcm.size(), "en", "The speaker is called John F. Kennedy.", rp));
+            CHECK(rp.text.find("country") != std::string::npos);
         }
     } else {
         std::printf("skip real transcription: set EASYAI_STT_TEST_MODEL=<ggml-*.bin> (whisper %s)\n",

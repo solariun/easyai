@@ -28,7 +28,9 @@ const char * kEasyAliases[] = {"izi", "isi", "eaz", "iase", "ize", "easi", "izy"
 const char * kMaxAliases[]  = {"maks", "macs", "mex", "mac", "mach", "maxx", "marx", "máx", "mas"};
 // "easyai" as whisper tiny/base wrote it for Kokoro pt-BR ("oi ísi ai") and en ("hey easy AI") voices, 2026-10-16:
 // "O Iziai", "Oisiai" (oi glued), "Oi Ziai", "Eisiai", "Easy I", "O Ijazia", "E ZI", "Gisiai", "Isia", "EasyA", "easy A, I".
-const char * kEasyaiAliases[] = {"iziai", "isiai", "isia", "ziai", "siai", "ezi", "easya", "gisiai", "ijazia", "izai", "isai", "easyeye", "easyay"};
+// With the whisper prompt naming the assistant (2026-10-16): "O easy AI", "Easy AI", "Oi Reazi AI", "Oi, Zia".
+const char * kEasyaiAliases[] = {"iziai", "isiai", "isia", "ziai", "zia", "siai", "ezi", "easya", "gisiai", "ijazia", "izai", "isai",
+                                 "reaziai", "reasiai", "easyeye", "easyay"};
 // Names whose spelling misleads the phonemizer: how to write them for the voice.
 struct SpokenName { const char * name, * en, * pt; };
 const SpokenName kSpokenNames[] = {{"easyai", "easy AI", "ísi ai"}};

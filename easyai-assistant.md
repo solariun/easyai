@@ -52,7 +52,9 @@ levels, every transcript the wake model heard, and timings.
    before the name, the name within two spelling edits or one of its
    known mis-spellings. Whisper writes the default name as "easy AI",
    "easy A I", "Iziai", "Isia"…: up to three consecutive words are joined
-   before the comparison, so all of them are the name. "Hey easy AI,
+   before the comparison, so all of them are the name. Whisper also gets
+   a prompt naming the assistant ("The assistant is called easy AI."),
+   which makes it write the name that way most of the time. "Hey easy AI,
    what time is it?" is answered right away; a bare "oi ísi ai" beeps
    once and listens.
 3. **Question.** Listening ends after `pause_ms` (1500) of silence or

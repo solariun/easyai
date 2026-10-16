@@ -69,7 +69,10 @@ int main() {
     for (const char * t : {"Hey easy AI, what time is it?", "Hey easy A, I, what day is today?", "Hey, easy-a-a-i, what day is today?",
                            "High Easy AI, tell me a joke.", "Easy AI, what is the date today?", "O Iziai que horas são agora.",
                            "Oisiai como você está!", "Oi Ziai, como você está!", "Eisiai me conta uma piada.", "Easy I me conto uma piada.",
-                           "O Ijazia e qual é da te de hoje.", "E ZI que dia é hoje.", "Oi, Gisiai, como você está.", "Oi, Iziai, como você está?"}) {
+                           "O Ijazia e qual é da te de hoje.", "E ZI que dia é hoje.", "Oi, Gisiai, como você está.", "Oi, Iziai, como você está?",
+                           // with the whisper prompt "O assistente chama-se easy AI. The assistant is called easy AI."
+                           "O easy AI que horas são agora.", "E easy AI me conta uma piada.", "Oi Reazi AI, qual é a data de hoje?",
+                           "Easy AI, que dia é hoje.", "Oi, Zia, como você está.", "O Easy AI qual é a data de hoje?"}) {
         w = wake_match(t, "easyai", default_aliases("easyai"));
         if (!w.matched) std::printf("   not matched: %s\n", t);
         CHECK(w.matched && !w.question.empty());

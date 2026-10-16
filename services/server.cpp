@@ -3532,7 +3532,7 @@ static void route_transcriptions(ServerCtx & ctx, const httplib::Request & req,
                                  httplib::Response & res) {
     if (!require_stt(ctx, res)) return;
 
-    std::string audio, language = ctx.stt_language, format = "json";
+    std::string audio, language = ctx.stt_language, format = "json", prompt;
     if (req.is_multipart_form_data()) {
         if (!req.form.has_file("file")) {
             res.status = 400;
@@ -3543,10 +3543,12 @@ static void route_transcriptions(ServerCtx & ctx, const httplib::Request & req,
         audio = req.form.get_file("file").content;
         if (req.form.has_field("language"))        language = req.form.get_field("language");
         if (req.form.has_field("response_format")) format   = req.form.get_field("response_format");
+        if (req.form.has_field("prompt"))          prompt   = req.form.get_field("prompt");
     } else if (is_wav_content_type(req.get_header_value("Content-Type"))) {
         audio = req.body;
         if (req.has_param("language"))        language = req.get_param_value("language");
         if (req.has_param("response_format")) format   = req.get_param_value("response_format");
+        if (req.has_param("prompt"))          prompt   = req.get_param_value("prompt");
     } else {
         res.status = 415;
         res.set_content(error_json("send multipart/form-data with a 'file' field, or a raw body with "
@@ -3567,7 +3569,7 @@ static void route_transcriptions(ServerCtx & ctx, const httplib::Request & req,
     {
         std::lock_guard<std::mutex> lk(ctx.stt_mu);
         if (!require_stt(ctx, res)) return;   // unloaded while we waited
-        ok = ctx.stt.transcribe(pcm.data(), pcm.size(), language, r);
+        ok = ctx.stt.transcribe(pcm.data(), pcm.size(), language, prompt, r);
         if (!ok) err = ctx.stt.last_error();
     }
     if (!ok) {
