@@ -144,9 +144,10 @@ WakeResult wake_match(const std::string & transcript, const std::string & name, 
         bool prefixed = (i == 0);
         if (i > 0) for (const char * p : kWakePrefixes) if (w[i - 1] == p) { prefixed = true; break; }
         bool hit = is_name(w[i]) && prefixed;
-        if (!hit) {   // the call word glued to the name: "oiasse", "heyeasy"
+        if (!hit) {   // the call word glued to the name: "oiasse", "heyeasy" (two-letter call words and longer only)
             for (const char * p : kWakePrefixes) {
                 const std::string ps = p;
+                if (ps.size() < 2) continue;
                 if (w[i].size() > ps.size() + 1 && w[i].compare(0, ps.size(), ps) == 0 && is_name(w[i].substr(ps.size()))) { hit = true; break; }
             }
         }

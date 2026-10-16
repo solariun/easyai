@@ -148,6 +148,15 @@ void Capture::close() {
     p_->opened = false;
 }
 
+void Capture::flush() {
+#if defined(EASYAI_AUDIO_COREAUDIO)
+    std::lock_guard<std::mutex> lk(p_->mu);
+    p_->ready.clear();
+#elif defined(EASYAI_AUDIO_ALSA)
+    if (p_->pcm) { snd_pcm_drop(p_->pcm); snd_pcm_prepare(p_->pcm); }
+#endif
+}
+
 bool Capture::read(std::vector<std::int16_t> & period) {
     if (!p_->opened) { p_->error = "capture not open"; return false; }
 #if defined(EASYAI_AUDIO_COREAUDIO)

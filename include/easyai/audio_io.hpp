@@ -34,6 +34,9 @@ public:
 
     // Blocks until one period is available; false on device failure.
     bool read(std::vector<std::int16_t> & period);
+    // Drops whatever was captured while the caller was busy (its own beep or
+    // voice through the speaker), so it is not heard as a question.
+    void flush();
     const std::string & last_error() const;
 
 private:
