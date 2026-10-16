@@ -130,6 +130,8 @@ int main() {
 
     // --- beep + WAV round trip ---------------------------------------------------
     {
+        auto off = make_off_sound(kSampleRate);
+        CHECK(off.size() == (std::size_t) kSampleRate * 2 * kOffToneMs / 1000 && off.front() == 0);
         auto b = make_beep(kSampleRate, 2);
         CHECK(b.size() == (std::size_t) kSampleRate * (2 * kBeepMs + kBeepGapMs) / 1000);
         CHECK(b.front() == 0 && std::abs((int) b[b.size() / 8]) > 1000);   // half-sine envelope: starts at zero, loud inside

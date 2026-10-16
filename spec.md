@@ -1664,6 +1664,15 @@ flowchart LR
    `say`: `Eddy (Portuguese (Brazil))`, `Daniel`; piper: paths of the
    `.onnx` voices). Capture is muted from the first sentence until
    playback drains plus `kUnmuteMs = 300`.
+5a. **Conversation mode.** After every answer the assistant keeps
+   listening for `[ASSISTANT] followup_ms` (default 2000, 0 = off)
+   without needing the name: speech in that window starts the next
+   question at once (same pause rule), its answer re-opens the window;
+   a noise that is not a question extends it; silence for the whole
+   window ends the conversation with the falling two-tone "off" sound
+   (`make_off_sound`: 660 Hz then 440 Hz, 110 ms each), distinct from
+   the rising single beep that acknowledges the name. The microphone is
+   flushed after every sound and answer so none of them is heard.
 6a. **Own sound never heard.** `Capture::flush()` drops what the device
    buffered during a synchronous beep or a spoken answer; it runs after
    every beep, after the greeting and after each answer (on the box the

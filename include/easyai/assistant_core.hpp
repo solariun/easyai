@@ -99,6 +99,9 @@ std::string guess_language(const std::string & text);
 
 // count beeps of kBeepHz/kBeepMs with kBeepGapMs gaps, PCM16 at rate_hz.
 std::vector<std::int16_t> make_beep(int rate_hz, int count);
+// The "conversation over" sound: two falling tones (kOffHighHz then kOffLowHz).
+constexpr int kOffHighHz = 660, kOffLowHz = 440, kOffToneMs = 110;
+std::vector<std::int16_t> make_off_sound(int rate_hz);
 
 // One line of /proc/asound/pcm: "01-00: ALC245 Analog : ALC245 Analog : playback 1 : capture 1".
 struct PcmDevice {

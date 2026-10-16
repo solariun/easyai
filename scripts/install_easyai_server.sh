@@ -1753,6 +1753,8 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 #   tts_endpoint    base URL for /v1/audio/speech (default: endpoint)
 #   language        auto | pt | en  — forced transcription language (auto detects)
 #   pause_ms        silence that ends a question (ms)
+#   followup_ms     after an answer the assistant keeps listening without the name; this much
+#                   silence ends the conversation with a falling two-tone sound (0 = off)
 #   max_listen_ms   longest question (ms)
 #   wake_model      local whisper ggml for the wake word, or "server" (every burst to stt_endpoint)
 #   mic             ALSA capture device: default, plughw:1,0 … ("default" with no capture
@@ -1778,6 +1780,7 @@ model           = default
 # tts_endpoint    =
 language        = auto
 pause_ms        = 1500
+followup_ms     = 2000
 max_listen_ms   = 20000
 wake_model      = $service_model_dir/ggml-$wake_model.bin
 mic             = default

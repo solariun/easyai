@@ -242,6 +242,17 @@ std::vector<PcmDevice> parse_asound_pcm(const std::string & text) {
     return out;
 }
 
+std::vector<std::int16_t> make_off_sound(int rate_hz) {
+    std::vector<std::int16_t> out;
+    const std::size_t tone = (std::size_t) rate_hz * kOffToneMs / kMsPerSecond;
+    for (int hz : {kOffHighHz, kOffLowHz})
+        for (std::size_t i = 0; i < tone; ++i) {
+            const double env = std::sin(kPi * (double) i / (double) tone);
+            out.push_back((std::int16_t) (kBeepAmp * env * std::sin(2 * kPi * hz * (double) i / rate_hz) * 32767.0));
+        }
+    return out;
+}
+
 std::vector<std::int16_t> make_beep(int rate_hz, int count) {
     std::vector<std::int16_t> out;
     const std::size_t tone = (std::size_t) rate_hz * kBeepMs / kMsPerSecond;

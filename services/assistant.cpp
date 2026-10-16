@@ -43,6 +43,7 @@ constexpr int kRetryS          = 10;      // backoff while the endpoint is down
 constexpr int kMicRetryS       = 15;      // no capture device yet (unplugged USB mic): retry, do not exit
 constexpr int kHttpTimeoutS    = 120;
 constexpr int kDefaultPauseMs  = 1500;
+constexpr int kDefaultFollowupMs = 2000;  // after an answer: keep listening this long for a follow-up, no name needed
 constexpr int kDefaultMaxListenMs = 20000;
 constexpr int kDefaultHistoryTurns = 6;
 constexpr int kDefaultHistoryIdleS = 300;
@@ -72,6 +73,7 @@ struct Args {
     std::string stt_endpoint, tts_endpoint;
     std::string language = "auto";
     int         pause_ms = kDefaultPauseMs, max_listen_ms = kDefaultMaxListenMs;
+    int         followup_ms = kDefaultFollowupMs;
     std::string wake_model = "models/stt/ggml-base.bin";
     std::string mic = "default", speaker = "default";
     std::string tts = "auto", voice_pt, voice_en, piper = "piper";
@@ -99,6 +101,7 @@ std::vector<Key> keys(Args & a) {
         {"--language",       "language",       Key::S, &a.language,       "auto (default) | pt | en — forced transcription language"},
         {"--pause-ms",       "pause_ms",       Key::I, &a.pause_ms,       "silence that ends a question (default 1500)"},
         {"--max-listen-ms",  "max_listen_ms",  Key::I, &a.max_listen_ms,  "longest question (default 20000)"},
+        {"--followup-ms",    "followup_ms",    Key::I, &a.followup_ms,    "after an answer keep listening without the name; silence this long ends the conversation with a falling sound (default 2000, 0 = off)"},
         {"--wake-model",     "wake_model",     Key::S, &a.wake_model,     "local whisper ggml for the wake word, or 'server' (default models/stt/ggml-base.bin)"},
         {"--mic",            "mic",            Key::S, &a.mic,            "capture device (ALSA name; default)"},
         {"--speaker",        "speaker",        Key::S, &a.speaker,        "playback device (ALSA name; default)"},
@@ -490,6 +493,7 @@ public:
     }
 
     void beep(int n) { speaker_.play_pcm(make_beep(kSampleRate, n), kSampleRate); cap_.flush(); }
+    void off_sound() { speaker_.play_pcm(make_off_sound(kSampleRate), kSampleRate); cap_.flush(); }
 
     // Spoken once after the microphone is open: proof the box hears and talks, and how to call it.
     void greet() {
@@ -512,10 +516,22 @@ public:
 
         Vad vad;
         Segmenter idle(kBurstEndMs, kWakeMaxMs), listen(a_.pause_ms, a_.max_listen_ms);
-        bool listening = false;
+        bool listening = false;      // the question after the name is being recorded
+        bool conversation = false;   // after an answer: a follow-up needs no name
         std::vector<std::int16_t> period;
         auto mute_until = std::chrono::steady_clock::now();
+        auto followup_until = mute_until;
         int level_log = 0;
+        // After an answer: listen on for followup_ms; nothing said → falling sound, back to idle.
+        auto after_answer = [&]() {
+            mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs);
+            if (a_.followup_ms > 0) {
+                conversation = true;
+                followup_until = mute_until + std::chrono::milliseconds(a_.followup_ms);
+                listen.reset();
+                if (a_.verbose) std::fprintf(stderr, "[easyai-assistant] conversation: listening %d ms for a follow-up\n", a_.followup_ms);
+            }
+        };
 
         while (!g_stop) {
             if (!cap_.read(period)) { std::fprintf(stderr, "[easyai-assistant] microphone: %s\n", cap_.last_error().c_str()); return 2; }
@@ -523,6 +539,22 @@ public:
             if (a_.verbose && ++level_log % 50 == 0)
                 std::fprintf(stderr, "[easyai-assistant] level %.0f dB floor %.0f dB%s\n", vad.last_db(), vad.floor_db(), speech ? " SPEECH" : "");
             if (speaker_.speaking() || std::chrono::steady_clock::now() < mute_until) { idle.reset(); listen.reset(); continue; }
+
+            if (conversation && !listening) {
+                // follow-up window: speech starts the question directly; silence ends the conversation
+                if (speech) {
+                    listening = true;
+                    listen.push(period.data(), period.size(), speech);
+                    continue;
+                }
+                if (std::chrono::steady_clock::now() >= followup_until) {
+                    conversation = false;
+                    if (a_.verbose) std::fprintf(stderr, "[easyai-assistant] conversation over\n");
+                    off_sound();
+                    mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs);
+                }
+                continue;
+            }
 
             if (!listening) {
                 if (!idle.push(period.data(), period.size(), speech)) continue;
@@ -544,7 +576,7 @@ public:
                     const std::string q = w2.matched && !w2.question.empty() ? w2.question : (wake_.is_loaded() ? "" : w.question);
                     if (!q.empty()) {
                         answer(q, w2.matched ? full_lang : lang);
-                        mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs);
+                        after_answer();
                         if (a_.once) break;
                         continue;
                     }
@@ -562,10 +594,15 @@ public:
             const bool ok = transcribe(utt, false, text, lang);
             if (!ok || !looks_like_question(text)) {   // nothing, or whisper's noise markers / a lone hallucinated word
                 if (a_.verbose && ok) std::fprintf(stderr, "[easyai-assistant] ignored: %s\n", text.c_str());
+                if (conversation) {   // a noise inside the follow-up window: keep the window open a little longer
+                    mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs);
+                    followup_until = mute_until + std::chrono::milliseconds(a_.followup_ms);
+                    continue;
+                }
                 beep(2); mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs); continue;
             }
             answer(text, lang);
-            mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs);
+            after_answer();
             if (a_.once) break;
         }
         return 0;

@@ -63,7 +63,10 @@ levels, every transcript the wake model heard, and timings.
 5. **Voice.** Each complete sentence is sent to `/v1/audio/speech` and
    played while the next one is still being generated. The microphone is
    muted until playback ends plus 300 ms.
-6. **Memory.** The conversation keeps the last `history_turns` turns and
+6. **Follow-ups.** After the answer it keeps listening for `followup_ms`
+   (2 s): speak again without the name and it answers; stay quiet and a
+   falling two-tone sound says the conversation is over.
+7. **Memory.** The conversation keeps the last `history_turns` turns and
    restarts after `history_idle_s` seconds of silence.
 
 ## 3. Configuration — `[ASSISTANT]` in `easyai.ini`
@@ -89,6 +92,7 @@ easyai-assistant --text "que horas são?"   # try the chat + voice path, no micr
 | `stt_endpoint`, `tts_endpoint` | `--stt-endpoint`, `--tts-endpoint` | = endpoint | other boxes for speech in / out |
 | `language` | `--language` | `auto` | force `pt` / `en` transcription |
 | `pause_ms`, `max_listen_ms` | same | 1500, 20000 | end of question |
+| `followup_ms` | `--followup-ms` | 2000 | after an answer keep listening without the name; this much silence ends the conversation with a falling two-tone sound (0 = off) |
 | `wake_model` | `--wake-model` | `models/stt/ggml-base.bin` | local whisper for the name only (a question said in the same breath is re-transcribed by the server's large model); `server` = send every burst to the STT endpoint |
 | `mic`, `speaker` | same | `default` | ALSA device names (`plughw:1,0`). When `default` has no capture (card 0 is HDMI-only on many boxes) the assistant picks the first card that has one, logs it, and the speaker follows that card; `cat /proc/asound/pcm` shows the cards. macOS uses the system default |
 | `tts` | `--tts` | `auto` | `server` / `say` / `piper` / `espeak`; auto = endpoint, else local |
