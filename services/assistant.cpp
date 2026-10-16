@@ -71,7 +71,7 @@ struct Args {
     std::string stt_endpoint, tts_endpoint;
     std::string language = "auto";
     int         pause_ms = kDefaultPauseMs, max_listen_ms = kDefaultMaxListenMs;
-    std::string wake_model = "models/stt/ggml-tiny.bin";
+    std::string wake_model = "models/stt/ggml-base.bin";
     std::string mic = "default", speaker = "default";
     std::string tts = "auto", voice_pt, voice_en, piper = "piper";
     std::string kokoro_model, kokoro_voices;   // local Kokoro voice when the endpoint has none
@@ -97,7 +97,7 @@ std::vector<Key> keys(Args & a) {
         {"--language",       "language",       Key::S, &a.language,       "auto (default) | pt | en — forced transcription language"},
         {"--pause-ms",       "pause_ms",       Key::I, &a.pause_ms,       "silence that ends a question (default 1500)"},
         {"--max-listen-ms",  "max_listen_ms",  Key::I, &a.max_listen_ms,  "longest question (default 20000)"},
-        {"--wake-model",     "wake_model",     Key::S, &a.wake_model,     "local whisper ggml for the wake word, or 'server' (default models/stt/ggml-tiny.bin)"},
+        {"--wake-model",     "wake_model",     Key::S, &a.wake_model,     "local whisper ggml for the wake word, or 'server' (default models/stt/ggml-base.bin)"},
         {"--mic",            "mic",            Key::S, &a.mic,            "capture device (ALSA name; default)"},
         {"--speaker",        "speaker",        Key::S, &a.speaker,        "playback device (ALSA name; default)"},
         {"--tts",            "tts",            Key::S, &a.tts,            "auto | server | kokoro | say | piper | espeak (default auto)"},
@@ -515,11 +515,22 @@ public:
                 if (a_.verbose && !text.empty()) std::fprintf(stderr, "[easyai-assistant] heard: %s\n", text.c_str());
                 const WakeResult w = wake_match(text, a_.name, aliases_);
                 if (!w.matched) continue;
-                if (!w.question.empty() && !wake_.is_loaded()) {   // server transcript is good enough to answer directly
-                    answer(w.question, lang);
-                    mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs);
-                    if (a_.once) break;
-                    continue;
+                if (!w.question.empty()) {
+                    // The question came in the same breath. The small wake model is good
+                    // enough to spot the name, not to transcribe the question: send the same
+                    // audio to the STT endpoint (the large model) and take the words after
+                    // the name from that transcript.
+                    std::string full = text, full_lang = lang;
+                    if (wake_.is_loaded() && !transcribe(burst, false, full, full_lang)) full = text;
+                    if (a_.verbose && wake_.is_loaded()) std::fprintf(stderr, "[easyai-assistant] server heard: %s\n", full.c_str());
+                    const WakeResult w2 = wake_match(full, a_.name, aliases_);
+                    const std::string q = w2.matched && !w2.question.empty() ? w2.question : (wake_.is_loaded() ? "" : w.question);
+                    if (!q.empty()) {
+                        answer(q, w2.matched ? full_lang : lang);
+                        mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs);
+                        if (a_.once) break;
+                        continue;
+                    }
                 }
                 beep(1);
                 listening = true; listen.reset();

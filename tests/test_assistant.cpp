@@ -53,6 +53,10 @@ int main() {
     CHECK(w.matched && w.question == "que horas sao agora");
     w = wake_match("Hey, easy. What time is it?", "easy");
     CHECK(w.matched && w.question == "what time is it");
+    w = wake_match("Oiasse, te olha só agora.", "easy", default_aliases("easy"));   // call word glued to the name (tiny, through a speaker)
+    CHECK(w.matched && w.question == "te olha so agora");
+    w = wake_match("Heyeasy what time", "easy");
+    CHECK(w.matched);
     w = wake_match("oi izi", "easy", {"izi"});                    // operator alias
     CHECK(w.matched);
     w = wake_match("the exam was easy today", "easy", default_aliases("easy"));

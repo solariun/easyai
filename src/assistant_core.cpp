@@ -24,7 +24,7 @@ const char   kFoldTo[]   = {'a','a','a','a','a','e','e','e','e','i','i','i','i',
 
 const char * kWakePrefixes[] = {"hey", "hi", "oi", "o", "ei", "ok", "ola", "alo", "e", "a"};   // "O easy" is how whisper writes "oi easy"
 // Spellings the small whisper models produce for the default name in pt-BR / en.
-const char * kEasyAliases[] = {"izi", "isi", "eaz", "iase", "ize", "easi", "izy", "esy", "ísi", "hizi", "iz"};
+const char * kEasyAliases[] = {"izi", "isi", "eaz", "iase", "ize", "easi", "izy", "esy", "ísi", "hizi", "iz", "asse", "ase", "aise", "azi", "iz", "izze"};
 const char * kPtWords[] = {"que", "nao", "voce", "e", "de", "para", "com", "uma", "um", "isso", "esta", "como", "qual", "quem",
                            "onde", "quando", "por", "me", "eu", "sim", "tudo", "bem", "obrigado", "hora", "hoje"};
 const char * kEnWords[] = {"the", "is", "what", "are", "you", "how", "and", "it", "to", "of", "a", "in", "that", "this",
@@ -141,10 +141,16 @@ WakeResult wake_match(const std::string & transcript, const std::string & name, 
         return false;
     };
     for (std::size_t i = 0; i < w.size(); ++i) {
-        if (!is_name(w[i])) continue;
         bool prefixed = (i == 0);
         if (i > 0) for (const char * p : kWakePrefixes) if (w[i - 1] == p) { prefixed = true; break; }
-        if (!prefixed) continue;
+        bool hit = is_name(w[i]) && prefixed;
+        if (!hit) {   // the call word glued to the name: "oiasse", "heyeasy"
+            for (const char * p : kWakePrefixes) {
+                const std::string ps = p;
+                if (w[i].size() > ps.size() + 1 && w[i].compare(0, ps.size(), ps) == 0 && is_name(w[i].substr(ps.size()))) { hit = true; break; }
+            }
+        }
+        if (!hit) continue;
         r.matched = true;
         std::string q;
         for (std::size_t k = i + 1; k < w.size(); ++k) { if (!q.empty()) q += ' '; q += w[k]; }

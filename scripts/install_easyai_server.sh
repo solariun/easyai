@@ -329,7 +329,8 @@ do_assistant=1                                # easyai-assistant.service: voice 
                                               # and speaker ("hey easy"). Needs whisper. --no-assistant skips.
 assistant_name="easy"                         # --assistant-name <name>: wake word "hey <name>" / "oi <name>"
 assistant_service="easyai-assistant.service"
-wake_model="tiny"                             # small whisper for the wake word (ggml-tiny.bin, 75 MB)
+wake_model="base"                             # small whisper for the wake word (ggml-base.bin, 142 MB; tiny
+                                              # mishears a pt-BR "oi easy" too often)
 do_piper=1                                    # piper TTS for POST /v1/audio/speech (male voices: pt_BR faber,
                                               # en_US ryan). --no-piper → the server has no voice (503).
 piper_version="2023.11.14-2"                  # github.com/rhasspy/piper release
