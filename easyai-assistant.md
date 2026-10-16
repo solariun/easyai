@@ -2,7 +2,7 @@
 
 An always-listening voice assistant that runs on a machine with a
 microphone and a speaker, on Linux (ALSA) and macOS (CoreAudio), with no
-third-party libraries. Say **"hey easy"** or **"oi easy"**, ask, pause,
+third-party libraries. Say **"hey max"** or **"oi max"**, ask, pause,
 and it answers aloud with a male voice in the language you used
 (Portuguese or English). Every network call is OpenAI-shaped, so the same
 binary works against easyai-server, llama-server or OpenAI with an API
@@ -12,7 +12,7 @@ key. Normative text: `spec.md` → "easyai-assistant".
 flowchart LR
   M["mic 16 kHz"] --> V["VAD\n(energy, adaptive floor)"]
   V -->|burst| W["wake word\nlocal whisper tiny"]
-  W -->|hey easy + beep| L["listen until\n1.5 s of silence"]
+  W -->|hey max + beep| L["listen until\n1.5 s of silence"]
   L -->|WAV| S["POST /v1/audio/transcriptions"]
   S -->|text, language| C["POST /v1/chat/completions\n(stream, thinking off,\ntools run here)"]
   C -->|sentence by sentence| T["POST /v1/audio/speech\nor local say / piper"]
@@ -48,8 +48,8 @@ levels, every transcript the wake model heard, and timings.
    wake model (`ggml-tiny.bin`, ~0.3 s on CPU).
 2. **Wake word.** The transcript is normalised (accents folded,
    punctuation dropped) and matched: one of `hey hi oi ei ok ola alo`
-   before the name, the name within one spelling edit. "Hey easy, what
-   time is it?" is answered right away; a bare "oi easy" beeps once and
+   before the name, the name within one spelling edit. "Hey max, what
+   time is it?" is answered right away; a bare "oi max" beeps once and
    listens.
 3. **Question.** Listening ends after `pause_ms` (1500) of silence or
    `max_listen_ms` (20 000). The audio goes as WAV to
@@ -83,9 +83,9 @@ easyai-assistant --text "que horas são?"   # try the chat + voice path, no micr
 
 | INI key | flag | default | meaning |
 |---|---|---|---|
-| `name` | `--name` | `easy` | wake name |
+| `name` | `--name` | `max` | wake name |
 | `name_aliases` | `--name-aliases` | built-in for easy | csv of what whisper hears for the name; run `--verbose` and copy the `heard:` lines |
-| `greeting` | `--greeting` | `en` | `en` / `pt` / `off`: spoken once at start-up ("The easy assistant is online. Say 'hey easy'…") |
+| `greeting` | `--greeting` | `en` | `en` / `pt` / `off`: spoken once at start-up ("The max assistant is online. Say 'hey max'…") |
 | `endpoint` | `--endpoint` | `http://127.0.0.1:8080` | OpenAI-compatible base URL |
 | `api_key` | `--api-key` | | Bearer token (env `EASYAI_API_KEY` as fallback) |
 | `model` | `--model` | `default` | model id in the request |

@@ -66,7 +66,7 @@ const char * kAssistantSystem =
 
 struct Args {
     std::string config = kDefaultConfig;
-    std::string name = "easy";
+    std::string name = "max";
     std::string name_aliases;               // csv of spellings whisper produces for the name
     std::string greeting = "en";            // en | pt | off: spoken once at start-up
     std::string endpoint = kDefaultEndpoint, api_key, model = "default";
@@ -90,8 +90,8 @@ struct Key { const char * flag; const char * ini; enum { S, I, B } type; void * 
 std::vector<Key> keys(Args & a) {
     return {
         {"--config",         nullptr,          Key::S, &a.config,         "INI file (default /etc/easyai/easyai.ini), section [ASSISTANT]"},
-        {"--name",           "name",           Key::S, &a.name,           "wake name: hey <name> / oi <name> (default easy)"},
-        {"--name-aliases",   "name_aliases",   Key::S, &a.name_aliases,   "csv of what whisper hears for the name (easy: izi, eaz, iase... built in); --verbose shows 'heard:' lines to collect them"},
+        {"--name",           "name",           Key::S, &a.name,           "wake name: hey <name> / oi <name> (default max)"},
+        {"--name-aliases",   "name_aliases",   Key::S, &a.name_aliases,   "csv of what whisper hears for the name (max and easy have built-in ones); --verbose shows 'heard:' lines to collect them"},
         {"--greeting",       "greeting",       Key::S, &a.greeting,       "en (default) | pt | off: spoken once at start-up, says it is up and how to call it"},
         {"--endpoint",       "endpoint",       Key::S, &a.endpoint,       "OpenAI-compatible base URL (default http://127.0.0.1:8080)"},
         {"--api-key",        "api_key",        Key::S, &a.api_key,        "Bearer token for the endpoint(s); env EASYAI_API_KEY as fallback"},

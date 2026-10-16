@@ -1558,7 +1558,7 @@ syntax check of the page script clean.
 
 **Plain words.** A separate program, `easyai-assistant`, that listens on the
 machine's own microphone all the time, wakes up when it hears its name
-("hey easy", "oi easy", "ei easy", "ok easy"), records the question until
+("hey max", "oi max", "ei easy", "ok easy"), records the question until
 the speaker pauses for 1.5 s, sends the audio to a speech-to-text
 endpoint, sends the text to a chat endpoint with its own short-answer
 system prompt, and speaks the answer back with a male voice, sentence by
@@ -1607,7 +1607,7 @@ flowchart LR
 3. **Wake word.** Each burst (bounded to `kWakeMaxMs = 4000`) goes to a
    local whisper model `[ASSISTANT] wake_model` (default
    `models/stt/ggml-base.bin`, 142 MB; tiny was measured too weak for a
-   pt-BR "oi easy" through a room). The transcript is lower-cased, punctuation stripped, and
+   pt-BR "oi max" through a room). The transcript is lower-cased, punctuation stripped, and
    matched by `wake_match(text, name, aliases)`: a prefix token in
    `{hey, hi, oi, o, ei, ok, olá, ola, alô, alo}` (whisper writes "oi" as
    "O") followed by the name with Levenshtein distance ≤ `kNameMaxEdits
@@ -1678,9 +1678,9 @@ flowchart LR
    every beep, after the greeting and after each answer (on the box the
    beep itself came back as a "question" before this).
 6b. **Greeting.** `[ASSISTANT] greeting = en|pt|off` (default `en`):
-   once the microphone is open the assistant says "The easy assistant
-   is online. Say 'hey easy' and ask your question." (pt: "O assistente
-   easy está no ar. Diga 'oi easy' e faça a sua pergunta."), so a
+   once the microphone is open the assistant says "The max assistant
+   is online. Say 'hey max' and ask your question." (pt: "O assistente
+   easy está no ar. Diga 'oi max' e faça a sua pergunta."), so a
    restart proves the voice path end to end.
 7. **Availability.** Endpoint down or non-2xx: spoken "servidor
    indisponível" / "server unavailable" once per outage (language =

@@ -21,9 +21,11 @@ const char * kFoldFrom[] = {"á","à","â","ã","ä","é","è","ê","ë","í","�
 const char   kFoldTo[]   = {'a','a','a','a','a','e','e','e','e','i','i','i','i','o','o','o','o','o','u','u','u','u','c','n',
                             'a','a','a','a','a','e','e','e','e','i','i','i','i','o','o','o','o','o','u','u','u','u','c','n'};
 
-const char * kWakePrefixes[] = {"hey", "hi", "oi", "o", "ei", "ok", "ola", "alo", "e", "a"};   // "O easy" is how whisper writes "oi easy"
-// Spellings the small whisper models produce for the default name in pt-BR / en.
-const char * kEasyAliases[] = {"izi", "isi", "eaz", "iase", "ize", "easi", "izy", "esy", "ísi", "hizi", "iz", "asse", "ase", "aise", "azi", "iz", "izze"};
+// Call words, with the spellings whisper gives them: "O max" for "oi max", "Em max" / "É e max" for "ei max", "hoy max".
+const char * kWakePrefixes[] = {"hey", "hi", "oi", "o", "oh", "hoy", "ei", "em", "ok", "ola", "alo", "e", "a"};
+// Spellings the small whisper models produce for the built-in names in pt-BR / en.
+const char * kEasyAliases[] = {"izi", "isi", "eaz", "iase", "ize", "easi", "izy", "esy", "ísi", "hizi", "iz", "asse", "ase", "aise", "azi", "izze"};
+const char * kMaxAliases[]  = {"maks", "macs", "mex", "mac", "mach", "maxx", "marx", "máx", "mas"};
 const char * kPtWords[] = {"que", "nao", "voce", "e", "de", "para", "com", "uma", "um", "isso", "esta", "como", "qual", "quem",
                            "onde", "quando", "por", "me", "eu", "sim", "tudo", "bem", "obrigado", "hora", "hoje"};
 const char * kEnWords[] = {"the", "is", "what", "are", "you", "how", "and", "it", "to", "of", "a", "in", "that", "this",
@@ -125,6 +127,7 @@ int levenshtein(const std::string & a, const std::string & b) {
 std::vector<std::string> default_aliases(const std::string & name) {
     std::vector<std::string> out;
     if (normalize_text(name) == "easy") for (const char * a : kEasyAliases) out.push_back(normalize_text(a));
+    if (normalize_text(name) == "max")  for (const char * a : kMaxAliases)  out.push_back(normalize_text(a));
     return out;
 }
 

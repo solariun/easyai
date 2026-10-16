@@ -57,6 +57,14 @@ int main() {
     CHECK(w.matched && w.question == "te olha so agora");
     w = wake_match("Heyeasy what time", "easy");
     CHECK(w.matched);
+    // the default name "max", as whisper base / tiny heard Kokoro saying it (measured 2026-10-16)
+    for (const char * t : {"Oi Max, que autoção agora.", "Oi Max como você está?", "Em Max me conta uma piada.", "Hey Max, what time is it?",
+                           "Max que dia é hoje.", "hoy max como vos he estado", "É e Max me conta uma piada."}) {
+        w = wake_match(t, "max", default_aliases("max"));
+        if (!w.matched) std::printf("   not matched: %s\n", t);
+        CHECK(w.matched && !w.question.empty());
+    }
+    CHECK(!wake_match("the maximum is ten", "max").matched);
     w = wake_match("oi izi", "easy", {"izi"});                    // operator alias
     CHECK(w.matched);
     w = wake_match("the exam was easy today", "easy", default_aliases("easy"));

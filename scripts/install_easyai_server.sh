@@ -84,7 +84,7 @@
 #                                                    #   below; also --whisper-ref)
 #   ./install_easyai_server.sh --no-whisper          # skip voice transcription (whisper.cpp)
 #   ./install_easyai_server.sh --no-assistant        # skip easyai-assistant.service (voice assistant on
-#                                                    #   the box's mic/speaker; --assistant-name easy)
+#                                                    #   the box's mic/speaker; --assistant-name max)
 #   ./install_easyai_server.sh --no-piper            # skip piper TTS (the fallback voice)
 #   ./install_easyai_server.sh --no-kokoro           # skip Kokoro-82M, the natural voice (in-process C++,
 #                                                    #   onnxruntime lib + espeak-ng; --kokoro-voice-pt pm_santa)
@@ -326,11 +326,11 @@ stt_model="large-v3-turbo-q5_0"               # whisper model downloaded at inst
 stt_hf_repo="ggerganov/whisper.cpp"
 stt_lfs_pointer_max_bytes=4096                # a Git LFS pointer file is ~130 bytes; real weights are MBs
 do_assistant=1                                # easyai-assistant.service: voice assistant on the box's own mic
-                                              # and speaker ("hey easy"). Needs whisper. --no-assistant skips.
-assistant_name="easy"                         # --assistant-name <name>: wake word "hey <name>" / "oi <name>"
+                                              # and speaker ("hey max"). Needs whisper. --no-assistant skips.
+assistant_name="max"                          # --assistant-name <name>: wake word "hey <name>" / "oi <name>"
 assistant_service="easyai-assistant.service"
 wake_model="base"                             # small whisper for the wake word (ggml-base.bin, 142 MB; tiny
-                                              # mishears a pt-BR "oi easy" too often)
+                                              # mishears a pt-BR "oi max" too often)
 do_piper=1                                    # piper TTS for POST /v1/audio/speech (male voices: pt_BR faber,
                                               # en_US ryan). --no-piper → the server has no voice (503).
 piper_version="2023.11.14-2"                  # github.com/rhasspy/piper release
