@@ -81,6 +81,7 @@ easyai-assistant --text "que horas são?"   # try the chat + voice path, no micr
 | INI key | flag | default | meaning |
 |---|---|---|---|
 | `name` | `--name` | `easy` | wake name |
+| `name_aliases` | `--name-aliases` | built-in for easy | csv of what whisper hears for the name; run `--verbose` and copy the `heard:` lines |
 | `endpoint` | `--endpoint` | `http://127.0.0.1:8080` | OpenAI-compatible base URL |
 | `api_key` | `--api-key` | | Bearer token (env `EASYAI_API_KEY` as fallback) |
 | `model` | `--model` | `default` | model id in the request |

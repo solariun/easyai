@@ -66,6 +66,7 @@ const char * kAssistantSystem =
 struct Args {
     std::string config = kDefaultConfig;
     std::string name = "easy";
+    std::string name_aliases;               // csv of spellings whisper produces for the name
     std::string endpoint = kDefaultEndpoint, api_key, model = "default";
     std::string stt_endpoint, tts_endpoint;
     std::string language = "auto";
@@ -87,6 +88,7 @@ std::vector<Key> keys(Args & a) {
     return {
         {"--config",         nullptr,          Key::S, &a.config,         "INI file (default /etc/easyai/easyai.ini), section [ASSISTANT]"},
         {"--name",           "name",           Key::S, &a.name,           "wake name: hey <name> / oi <name> (default easy)"},
+        {"--name-aliases",   "name_aliases",   Key::S, &a.name_aliases,   "csv of what whisper hears for the name (easy: izi, eaz, iase... built in); --verbose shows 'heard:' lines to collect them"},
         {"--endpoint",       "endpoint",       Key::S, &a.endpoint,       "OpenAI-compatible base URL (default http://127.0.0.1:8080)"},
         {"--api-key",        "api_key",        Key::S, &a.api_key,        "Bearer token for the endpoint(s); env EASYAI_API_KEY as fallback"},
         {"--model",          "model",          Key::S, &a.model,          "model id sent in the request (default: default)"},
@@ -357,6 +359,9 @@ public:
             std::fprintf(stderr, "\n[easyai-assistant] tool: %s\n", c.name.c_str());
         });
         register_tools();
+        aliases_ = default_aliases(a.name);
+        std::stringstream as(a.name_aliases); std::string al;
+        while (std::getline(as, al, ',')) { al.erase(0, al.find_first_not_of(' ')); al.erase(al.find_last_not_of(' ') + 1); if (!al.empty()) aliases_.push_back(al); }
     }
 
     void register_tools() {
@@ -508,7 +513,7 @@ public:
                 std::string text, lang;
                 if (!transcribe(burst, true, text, lang)) continue;
                 if (a_.verbose && !text.empty()) std::fprintf(stderr, "[easyai-assistant] heard: %s\n", text.c_str());
-                const WakeResult w = wake_match(text, a_.name);
+                const WakeResult w = wake_match(text, a_.name, aliases_);
                 if (!w.matched) continue;
                 if (!w.question.empty() && !wake_.is_loaded()) {   // server transcript is good enough to answer directly
                     answer(w.question, lang);
@@ -542,6 +547,7 @@ private:
     easyai::Stt            wake_;
     easyai::audio::Capture cap_;
     SentenceChunker        chunker_;
+    std::vector<std::string> aliases_;
     std::string            lang_ = "en";
     int                    turns_ = 0;
     bool                   server_down_ = false;

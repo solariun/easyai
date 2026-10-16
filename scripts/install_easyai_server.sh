@@ -1743,6 +1743,8 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 # voice path without a microphone.
 #
 #   name            wake name: "hey <name>", "oi <name>", "ei <name>", "ok <name>"
+#   name_aliases    csv of spellings whisper produces for the name (for "easy": izi, eaz,
+#                   iase... are built in); run with verbose = 1 and read the "heard:" lines
 #   endpoint        OpenAI-compatible base URL for chat (this server, llama-server, OpenAI)
 #   api_key         Bearer token; the unit passes the server's key as EASYAI_API_KEY
 #   model           model id sent in the request ("default" = whatever the server serves)
@@ -1767,6 +1769,7 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 #   tls_insecure    1 = skip certificate verification (self-signed endpoint)
 [ASSISTANT]
 name            = $assistant_name
+# name_aliases    =
 endpoint        = http://127.0.0.1:$service_port
 # api_key         =
 model           = default

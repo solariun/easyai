@@ -46,6 +46,18 @@ int main() {
     CHECK(w.matched && w.question.empty());
     w = wake_match("hey jarvis what time is it", "easy");
     CHECK(!w.matched);
+    // what whisper tiny / base heard for a Kokoro "Oi easy. Que horas são agora?" on the AI box
+    w = wake_match("O eaz de hora são agora.", "easy", default_aliases("easy"));
+    CHECK(w.matched && w.question == "de hora sao agora");
+    w = wake_match("O iase que horas são agora?", "easy", default_aliases("easy"));
+    CHECK(w.matched && w.question == "que horas sao agora");
+    w = wake_match("Hey, easy. What time is it?", "easy");
+    CHECK(w.matched && w.question == "what time is it");
+    w = wake_match("oi izi", "easy", {"izi"});                    // operator alias
+    CHECK(w.matched);
+    w = wake_match("the exam was easy today", "easy", default_aliases("easy"));
+    CHECK(!w.matched);
+    CHECK(wake_match("hey mix", "max").matched && !wake_match("hey mixt", "max").matched);   // short names keep 1 edit
 
     // --- sentence chunker -------------------------------------------------------
     {
@@ -81,6 +93,16 @@ int main() {
         CHECK(burst_len >= expect - per && burst_len <= expect + per);
         CHECK(speech_periods >= 38 && speech_periods <= 41);   // 800 ms / 20 ms
         CHECK(vad.floor_db() < -40);
+        // constant room noise from the first period: the floor starts there, nothing is speech
+        Vad noisy; Segmenter seg2(kBurstEndMs, kWakeMaxMs); auto hum = noise(3000, 0.05f); int sp2 = 0, b2 = 0;
+        for (std::size_t off = 0; off + per <= hum.size(); off += per) { const bool s = noisy.feed(hum.data() + off, per); sp2 += s; if (seg2.push(hum.data() + off, per, s)) ++b2; }
+        CHECK(sp2 == 0 && b2 == 0 && noisy.floor_db() > -35);
+        // a click (one 20 ms period of "speech") is not a burst
+        Vad v3; Segmenter seg3(kBurstEndMs, kWakeMaxMs); int b3 = 0;
+        auto quiet = noise(1500, 0.002f); auto click = tone(20, 0.5f);
+        std::vector<std::int16_t> seq; seq.insert(seq.end(), quiet.begin(), quiet.end()); seq.insert(seq.end(), click.begin(), click.end()); seq.insert(seq.end(), quiet.begin(), quiet.end());
+        for (std::size_t off = 0; off + per <= seq.size(); off += per) { const bool s = v3.feed(seq.data() + off, per); if (seg3.push(seq.data() + off, per, s)) ++b3; }
+        CHECK(b3 == 0);
     }
 
     // --- language guess ------------------------------------------------------------

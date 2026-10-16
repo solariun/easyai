@@ -22,7 +22,9 @@ const char * kFoldFrom[] = {"á","à","â","ã","ä","é","è","ê","ë","í","�
 const char   kFoldTo[]   = {'a','a','a','a','a','e','e','e','e','i','i','i','i','o','o','o','o','o','u','u','u','u','c','n',
                             'a','a','a','a','a','e','e','e','e','i','i','i','i','o','o','o','o','o','u','u','u','u','c','n'};
 
-const char * kWakePrefixes[] = {"hey", "hi", "oi", "ei", "ok", "ola", "alo", "e", "a"};   // "e aí easy", "ai easy" → whisper variants
+const char * kWakePrefixes[] = {"hey", "hi", "oi", "o", "ei", "ok", "ola", "alo", "e", "a"};   // "O easy" is how whisper writes "oi easy"
+// Spellings the small whisper models produce for the default name in pt-BR / en.
+const char * kEasyAliases[] = {"izi", "isi", "eaz", "iase", "ize", "easi", "izy", "esy", "ísi", "hizi", "iz"};
 const char * kPtWords[] = {"que", "nao", "voce", "e", "de", "para", "com", "uma", "um", "isso", "esta", "como", "qual", "quem",
                            "onde", "quando", "por", "me", "eu", "sim", "tudo", "bem", "obrigado", "hora", "hoje"};
 const char * kEnWords[] = {"the", "is", "what", "are", "you", "how", "and", "it", "to", "of", "a", "in", "that", "this",
@@ -45,6 +47,7 @@ double rms_db(const std::int16_t * pcm, std::size_t n) {
 
 bool Vad::feed(const std::int16_t * pcm, std::size_t n) {
     last_db_ = rms_db(pcm, n);
+    if (!calibrated_) { floor_db_ = std::max(kFloorMinDb, last_db_); calibrated_ = true; return false; }
     const double period_s = (double) n / kSampleRate;
     if (last_db_ < floor_db_) floor_db_ = std::max(kFloorMinDb, last_db_);              // down at once
     else                      floor_db_ = std::min(last_db_, floor_db_ + kFloorRiseDbPerS * period_s);   // up slowly
@@ -53,7 +56,7 @@ bool Vad::feed(const std::int16_t * pcm, std::size_t n) {
 
 Segmenter::Segmenter(int end_silence_ms, int max_ms) : end_silence_ms_(end_silence_ms), max_ms_(max_ms) {}
 
-void Segmenter::reset() { in_burst_ = false; silence_ms_ = burst_ms_ = 0; burst_.clear(); ready_.clear(); }
+void Segmenter::reset() { in_burst_ = false; silence_ms_ = burst_ms_ = speech_ms_ = 0; burst_.clear(); ready_.clear(); }
 
 bool Segmenter::push(const std::int16_t * pcm, std::size_t n, bool speech) {
     const int ms = (int) (n * kMsPerSecond / kSampleRate);
@@ -62,19 +65,22 @@ bool Segmenter::push(const std::int16_t * pcm, std::size_t n, bool speech) {
         const std::size_t keep = (std::size_t) kSampleRate * kPrerollMs / kMsPerSecond;
         if (preroll_.size() > keep) preroll_.erase(preroll_.begin(), preroll_.end() - (std::ptrdiff_t) keep);
         if (!speech) return false;
-        in_burst_ = true; silence_ms_ = 0; burst_ms_ = 0;
+        in_burst_ = true; silence_ms_ = 0; burst_ms_ = 0; speech_ms_ = ms;
         burst_ = preroll_;
         preroll_.clear();
+        burst_.insert(burst_.end(), pcm, pcm + n);
         return false;
     }
     burst_.insert(burst_.end(), pcm, pcm + n);
     burst_ms_ += ms;
+    if (speech) speech_ms_ += ms;
     silence_ms_ = speech ? 0 : silence_ms_ + ms;
     if (silence_ms_ >= end_silence_ms_ || burst_ms_ >= max_ms_) {
-        ready_.swap(burst_);
+        const bool real = speech_ms_ >= kMinSpeechMs;
+        if (real) ready_.swap(burst_);
         burst_.clear();
         in_burst_ = false;
-        return true;
+        return real;
     }
     return false;
 }
@@ -117,13 +123,25 @@ int levenshtein(const std::string & a, const std::string & b) {
     return prev[b.size()];
 }
 
-WakeResult wake_match(const std::string & transcript, const std::string & name) {
+std::vector<std::string> default_aliases(const std::string & name) {
+    std::vector<std::string> out;
+    if (normalize_text(name) == "easy") for (const char * a : kEasyAliases) out.push_back(normalize_text(a));
+    return out;
+}
+
+WakeResult wake_match(const std::string & transcript, const std::string & name, const std::vector<std::string> & aliases) {
     WakeResult r;
     const auto w = words(normalize_text(transcript));
     const std::string nm = normalize_text(name);
     if (w.empty() || nm.empty()) return r;
+    const int max_edits = (int) nm.size() >= kLongNameChars ? kNameMaxEditsLong : kNameMaxEdits;
+    auto is_name = [&](const std::string & word) {
+        if (levenshtein(word, nm) <= max_edits) return true;
+        for (const auto & a : aliases) if (word == normalize_text(a)) return true;
+        return false;
+    };
     for (std::size_t i = 0; i < w.size(); ++i) {
-        if (levenshtein(w[i], nm) > kNameMaxEdits) continue;
+        if (!is_name(w[i])) continue;
         bool prefixed = (i == 0);
         if (i > 0) for (const char * p : kWakePrefixes) if (w[i - 1] == p) { prefixed = true; break; }
         if (!prefixed) continue;

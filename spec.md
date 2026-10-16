@@ -1595,20 +1595,29 @@ flowchart LR
    AudioQueue, device `default`. `[ASSISTANT] mic`, `[ASSISTANT] speaker`.
    Capture is a blocking `read()` of one period (`kPeriodMs = 20`);
    the device clock paces the loop, no polling timer.
-2. **VAD.** Per period RMS in dB. Noise floor = exponential minimum
-   tracker (`kFloorRiseDbPerS = 1`, instant fall). Speech when RMS >
+2. **VAD.** Per period RMS in dB. Noise floor = minimum tracker that
+   starts at the level of the first period (the room as it is; a fixed
+   start made 20 s of constant fan noise count as speech on the box),
+   falls at once and rises `kFloorRiseDbPerS = 1`. Speech when RMS >
    floor + `kSpeechMarginDb = 10`; a burst ends after `kBurstEndMs = 500`
-   of non-speech. Pre-roll `kPrerollMs = 300` is kept so the first
-   syllable is not cut. Listening after wake ends after `pause_ms`
+   of non-speech and is dropped when it holds less than `kMinSpeechMs =
+   200` of speech (clicks). Pre-roll `kPrerollMs = 300` is kept so the
+   first syllable is not cut. Listening after wake ends after `pause_ms`
    (default 1500) of non-speech or `max_listen_ms` (default 20 000).
 3. **Wake word.** Each burst (bounded to `kWakeMaxMs = 4000`) goes to a
    local whisper model `[ASSISTANT] wake_model` (default
    `models/stt/ggml-tiny.bin`; the installer and the Mac fetch script put
    it there). The transcript is lower-cased, punctuation stripped, and
-   matched by `wake_match(text, name)`: a prefix token in
-   `{hey, hi, oi, ei, ok, olá, ola, alô, alo}` followed by the name with
-   Levenshtein distance ≤ `kNameMaxEdits = 1` (whisper spells names
-   loosely). Words after the name are the question when there are ≥ 2 of
+   matched by `wake_match(text, name, aliases)`: a prefix token in
+   `{hey, hi, oi, o, ei, ok, olá, ola, alô, alo}` (whisper writes "oi" as
+   "O") followed by the name with Levenshtein distance ≤ `kNameMaxEdits
+   = 1`, or ≤ `kNameMaxEditsLong = 2` for names of 4+ letters, or equal
+   to one of the aliases: built-in for "easy" (`izi, isi, eaz, iase, ize,
+   easi, izy, esy, ísi, hizi, iz`, what tiny/base produce for a pt-BR
+   speaker) plus `[ASSISTANT] name_aliases`. Measured on the box with a
+   Kokoro-spoken "Oi easy. Que horas são agora?": tiny → "O eaz de hora
+   são agora.", base → "O iase que horas são agora?", both now matched;
+   "Hey, easy. What time is it?" matched as is. Words after the name are the question when there are ≥ 2 of
    them; otherwise the assistant beeps (`kBeepHz = 880`, `kBeepMs = 120`,
    generated, no file) and listens. Without a wake model the burst goes
    to the STT endpoint instead (`wake_model = server`).
