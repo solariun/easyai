@@ -85,7 +85,9 @@
 #   ./install_easyai_server.sh --no-whisper          # skip voice transcription (whisper.cpp)
 #   ./install_easyai_server.sh --no-assistant        # skip easyai-assistant.service (voice assistant on
 #                                                    #   the box's mic/speaker; --assistant-name easy)
-#   ./install_easyai_server.sh --no-piper            # skip piper TTS (POST /v1/audio/speech, male voices)
+#   ./install_easyai_server.sh --no-piper            # skip piper TTS (the fallback voice)
+#   ./install_easyai_server.sh --no-kokoro           # skip Kokoro-82M, the natural voice (Python venv
+#                                                    #   helper unit; --kokoro-voice-pt pm_santa etc.)
 #   ./install_easyai_server.sh --stt-model small     # whisper model to download (default
 #                                                    #   large-v3-turbo-q5_0, 547 MB; "none" = skip)
 #   ./install_easyai_server.sh --tls                 # self-signed https (browser microphone on
@@ -336,6 +338,16 @@ tts_dir="$service_home/tts"
 piper_voices_base="https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
 piper_voice_pt="pt/pt_BR/faber/medium/pt_BR-faber-medium"
 piper_voice_en="en/en_US/ryan/medium/en_US-ryan-medium"
+do_kokoro=1                                   # Kokoro-82M: the natural voice behind /v1/audio/speech.
+                                              # A Python venv helper (easyai-tts-kokoro.service); piper
+                                              # stays as the server's fallback. --no-kokoro skips.
+kokoro_dir="/opt/easyai/kokoro"
+kokoro_port=8111
+kokoro_service="easyai-tts-kokoro.service"
+kokoro_onnx_version="0.6.1"                   # pip kokoro-onnx (needs Python >= 3.10)
+kokoro_files_base="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
+kokoro_voice_pt="pm_alex"                     # pt-BR male (pm_santa is the other one)
+kokoro_voice_en="am_michael"                  # en-US male (bm_george for en-GB)
 do_tls=0                                      # --tls: generate a self-signed certificate
                                               # (CN=<mdns-hostname>.local) under $config_dir
                                               # and enable [SERVER] tls_cert/tls_key so the
@@ -523,6 +535,9 @@ while [[ $# -gt 0 ]]; do
         --with-assistant)   do_assistant=1; shift ;;
         --assistant-name)   assistant_name="$2"; shift 2 ;;
         --no-piper)         do_piper=0; shift ;;
+        --no-kokoro)        do_kokoro=0; shift ;;
+        --kokoro-voice-pt)  kokoro_voice_pt="$2"; shift 2 ;;
+        --kokoro-voice-en)  kokoro_voice_en="$2"; shift 2 ;;
         --stt-model)        stt_model="$2"; shift 2 ;;
         --tls)              do_tls=1; shift ;;
         --no-tls)           do_tls=0; shift ;;
@@ -843,7 +858,8 @@ if [[ $do_install -eq 1 ]]; then
     sudo apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build git ccache pkg-config curl ca-certificates \
         libcurl4-openssl-dev libomp-dev libcap2-bin jq \
-        systemd-coredump patchelf git-lfs libasound2-dev alsa-utils
+        systemd-coredump patchelf git-lfs libasound2-dev alsa-utils \
+        python3-venv python3-pip espeak-ng
 
     case "$backend_resolved" in
         vulkan)
@@ -1691,7 +1707,9 @@ language        = auto
 # browser and easyai-assistant both use this endpoint. engine = none
 # switches it off (503).
 [TTS]
-$([[ $do_piper -eq 1 ]] && echo "engine          = piper" || echo "engine          = none   (install had --no-piper)")
+# auto = the Kokoro helper (url) when it answers, else piper, else none.
+engine          = auto
+$([[ $do_kokoro -eq 1 ]] && echo "url             = http://127.0.0.1:$kokoro_port" || echo "# url             = http://127.0.0.1:$kokoro_port   (install had --no-kokoro)")
 piper           = $piper_dir/piper
 voice_pt        = $tts_dir/$(basename "$piper_voice_pt").onnx
 voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
@@ -2384,6 +2402,72 @@ if [[ $do_service -eq 1 && $do_piper -eq 1 ]]; then
     done
 fi
 
+# ---------- Kokoro-82M natural voice (helper venv + unit) --------------------
+# scripts/easyai_tts_kokoro.py serves POST /v1/audio/speech on 127.0.0.1 with
+# the model loaded once; easyai-server's [TTS] url points at it and keeps
+# piper as fallback. Python stays inside this venv, nothing else changes.
+if [[ $do_service -eq 1 && $do_kokoro -eq 1 ]]; then
+    if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+        warn "Kokoro needs Python >= 3.10 (found $(python3 --version 2>&1)) — skipping the natural voice; piper stays"
+        do_kokoro=0
+    fi
+fi
+if [[ $do_service -eq 1 && $do_kokoro -eq 1 ]]; then
+    sudo install -d -m755 "$kokoro_dir"
+    sudo install -Dm755 "$easyai_dir/scripts/easyai_tts_kokoro.py" "$kokoro_dir/easyai_tts_kokoro.py"
+    if [[ ! -x "$kokoro_dir/venv/bin/python" ]]; then
+        log "creating the Kokoro venv at $kokoro_dir/venv"
+        sudo python3 -m venv "$kokoro_dir/venv"
+    fi
+    log "installing kokoro-onnx $kokoro_onnx_version into the venv (onnxruntime, ~60 MB)"
+    sudo "$kokoro_dir/venv/bin/pip" install -q --upgrade pip
+    if ! sudo "$kokoro_dir/venv/bin/pip" install -q "kokoro-onnx==$kokoro_onnx_version"; then
+        warn "pip install kokoro-onnx failed — natural voice off, piper stays"; do_kokoro=0
+    fi
+fi
+if [[ $do_service -eq 1 && $do_kokoro -eq 1 ]]; then
+    sudo install -d -m755 -o "$service_user" -g "$service_group" "$tts_dir"
+    for f in kokoro-v1.0.onnx voices-v1.0.bin; do
+        [[ -f "$tts_dir/$f" ]] && continue
+        log "downloading Kokoro $f → $tts_dir/$f"
+        if sudo curl -fL --retry 3 --progress-bar -o "$tts_dir/$f.part" "$kokoro_files_base/$f"; then
+            sudo mv "$tts_dir/$f.part" "$tts_dir/$f"; sudo chown "$service_user":"$service_group" "$tts_dir/$f"; sudo chmod 644 "$tts_dir/$f"
+        else
+            sudo rm -f "$tts_dir/$f.part"; warn "Kokoro download failed: $f — natural voice off, piper stays"; do_kokoro=0
+        fi
+    done
+fi
+if [[ $do_service -eq 1 ]]; then
+    if [[ $do_kokoro -eq 1 ]]; then
+        log "writing /etc/systemd/system/$kokoro_service"
+        sudo tee "/etc/systemd/system/$kokoro_service" >/dev/null <<KUNIT
+[Unit]
+Description=easyai natural voice (Kokoro-82M TTS helper on 127.0.0.1:$kokoro_port)
+Documentation=https://github.com/solariun/easy
+After=network.target
+
+[Service]
+Type=simple
+User=$service_user
+Group=$service_group
+WorkingDirectory=$kokoro_dir
+Environment=HOME=$service_home
+ExecStart=$kokoro_dir/venv/bin/python $kokoro_dir/easyai_tts_kokoro.py --host 127.0.0.1 --port $kokoro_port --model $tts_dir/kokoro-v1.0.onnx --voices $tts_dir/voices-v1.0.bin --voice-pt $kokoro_voice_pt --voice-en $kokoro_voice_en
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=$service_home /tmp
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+KUNIT
+    else
+        sudo rm -f "/etc/systemd/system/$kokoro_service"
+    fi
+fi
+
 # ---------- TLS (self-signed) ------------------------------------------------
 # Browsers expose the microphone only on https:// or localhost. --tls makes
 # the box answer https with a self-signed certificate (accept it once per
@@ -2470,8 +2554,8 @@ if [[ $do_service -eq 1 ]]; then
 [Unit]
 Description=easyai OpenAI-compatible LLM server
 Documentation=https://github.com/solariun/easy
-After=network-online.target
-Wants=network-online.target
+After=network-online.target $( [[ $do_kokoro -eq 1 ]] && echo "$kokoro_service" )
+Wants=network-online.target $( [[ $do_kokoro -eq 1 ]] && echo "$kokoro_service" )
 
 # Cap restart attempts: allow up to 2 starts within a 60-second window
 # (initial start + 1 retry on failure), then give up and leave the unit
@@ -2645,6 +2729,7 @@ AUNIT
 
     if [[ $do_enable_now -eq 1 ]]; then
         log "enabling + starting $service_name"
+        [[ -f "/etc/systemd/system/$kokoro_service" ]] && sudo systemctl enable --now "$kokoro_service"
         sudo systemctl enable --now "$service_name"
         [[ -f "/etc/systemd/system/$assistant_service" ]] && sudo systemctl enable --now "$assistant_service"
         sleep 1
@@ -2995,7 +3080,7 @@ printf '  voice     : %s://%s:%s/v1/audio/transcriptions   (%s)\n' "$scheme" \
     printf '              https is self-signed — accept the certificate once per browser; the mic chip needs https or localhost\n'
 printf '  speech    : %s://%s:%s/v1/audio/speech   (%s)\n' "$scheme" \
     "$([[ "$service_host" == "0.0.0.0" ]] && hostname || echo "$service_host")" "$service_port" \
-    "$([[ $do_piper -eq 1 ]] && echo "piper, voices pt_BR faber + en_US ryan" || echo "off: --no-piper")"
+    "$([[ $do_kokoro -eq 1 ]] && echo "Kokoro-82M natural voice ($kokoro_voice_pt / $kokoro_voice_en) via $kokoro_service, piper as fallback" || ([[ $do_piper -eq 1 ]] && echo "piper, voices pt_BR faber + en_US ryan" || echo "off: --no-piper"))"
 printf '  assistant : %s\n' "$([[ $do_assistant -eq 1 && $do_whisper -eq 1 ]] && echo "$assistant_service — say \"hey $assistant_name\" / \"oi $assistant_name\" near the box; journalctl -u easyai-assistant -f" || echo "off: --with-assistant")"
 printf '  health    : %s://localhost:%s/health\n' "$scheme" "$service_port"
 [[ $enable_metrics -eq 1 ]] && \

@@ -3677,6 +3677,7 @@ static void route_health(ServerCtx & ctx, const httplib::Request &,
     j["tls"] = ctx.tls;
     j["tts_available"] = ctx.tts.available();
     j["tts_engine"]    = ctx.tts.engine();
+    if (ctx.tts.engine() == "http") j["tts_fallback"] = ctx.tts.fallback_engine();
 
     // Compatibility shims this server speaks. Lets clients
     // auto-detect which API they can use without trial requests.
@@ -3845,7 +3846,9 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "  threads   --stt-threads <n>      whisper threads (0 = its default).\n"
         "\n"
         "[TTS]  text-to-speech (POST /v1/audio/speech, easyai-assistant voice)\n"
-        "  engine    --tts-engine <e>       auto (default) | piper | say (macOS) | espeak | none.\n"
+        "  engine    --tts-engine <e>       auto (default) | http | piper | say (macOS) | espeak | none.\n"
+        "  url       --tts-url <base>       engine http: Kokoro helper (easyai_tts_kokoro.py), the natural voice;\n"
+        "                                   auto prefers it when set and answering, local engines stay as fallback.\n"
         "  piper     --tts-piper <path>     piper binary (default: piper on PATH).\n"
         "  voice_pt  --tts-voice-pt <v>     piper .onnx path / say voice / espeak voice for pt.\n"
         "  voice_en  --tts-voice-en <v>     same for en. auto picks male defaults per engine.\n"
@@ -4038,7 +4041,8 @@ struct ServerArgs {
     std::string stt_model_path;   // whisper ggml-*.bin (or a symlink to one); empty = no voice transcription
     std::string stt_language = "auto";   // ISO-639-1 or auto
     int         stt_threads  = 0;        // 0 = whisper default
-    std::string tts_engine   = "auto";   // auto|piper|say|espeak|none  (POST /v1/audio/speech)
+    std::string tts_engine   = "auto";   // auto|http|piper|say|espeak|none  (POST /v1/audio/speech)
+    std::string tts_url;                 // engine http: Kokoro helper base URL (scripts/easyai_tts_kokoro.py)
     std::string tts_piper    = "piper";  // piper binary
     std::string tts_voice_pt;            // piper .onnx / say voice / espeak voice
     std::string tts_voice_en;
@@ -4251,6 +4255,7 @@ static const std::vector<FlagDef> & kFlags() {
         { {"--stt-language"},      "STT",    "language",       "stt_language",   true,  SET_STR(&ServerArgs::stt_language) },
         { {"--stt-threads"},       "STT",    "threads",        "stt_threads",    true,  SET_INT(&ServerArgs::stt_threads) },
         { {"--tts-engine"},        "TTS",    "engine",         "tts_engine",     true,  SET_STR(&ServerArgs::tts_engine) },
+        { {"--tts-url"},           "TTS",    "url",            "tts_url",        true,  SET_STR(&ServerArgs::tts_url) },
         { {"--tts-piper"},         "TTS",    "piper",          "tts_piper",      true,  SET_STR(&ServerArgs::tts_piper) },
         { {"--tts-voice-pt"},      "TTS",    "voice_pt",       "tts_voice_pt",   true,  SET_STR(&ServerArgs::tts_voice_pt) },
         { {"--tts-voice-en"},      "TTS",    "voice_en",       "tts_voice_en",   true,  SET_STR(&ServerArgs::tts_voice_en) },
@@ -7969,11 +7974,13 @@ int main(int argc, char ** argv) {
     ctx->default_enable_thinking = args.reasoning;
     {
         easyai::Tts::Config tc;
-        tc.engine = args.tts_engine; tc.piper = args.tts_piper;
+        tc.engine = args.tts_engine; tc.url = args.tts_url; tc.piper = args.tts_piper;
         tc.voice_pt = args.tts_voice_pt; tc.voice_en = args.tts_voice_en;
         const std::string eng = ctx->tts.configure(tc, ctx->tts_error);
         if (ctx->tts.available())
-            std::fprintf(stderr, "[easyai-server] tts: %s (POST /v1/audio/speech, voices pt/en)\n", eng.c_str());
+            std::fprintf(stderr, "[easyai-server] tts: %s%s (POST /v1/audio/speech, voices pt/en)%s\n", eng.c_str(),
+                         eng == "http" ? (" " + args.tts_url).c_str() : "",
+                         eng == "http" ? (", fallback " + ctx->tts.fallback_engine()).c_str() : "");
         else
             std::fprintf(stderr, "[easyai-server] tts: none%s (POST /v1/audio/speech answers 503; set [TTS] engine / piper / voices)\n",
                          ctx->tts_error.empty() ? "" : (" — " + ctx->tts_error).c_str());

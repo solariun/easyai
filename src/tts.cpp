@@ -14,6 +14,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <httplib.h>
+#include <nlohmann/json.hpp>
+
 namespace easyai {
 
 namespace {
@@ -24,6 +27,7 @@ constexpr int         kDefaultPiperRate = 22050;
 constexpr int         kTtsTimeoutMs     = 60000;
 constexpr std::size_t kErrTailBytes     = 2000;
 constexpr std::size_t kWavHeaderBytes   = 44;
+constexpr std::size_t kRiffHeaderBytes  = 12;
 
 bool file_exists(const std::string & p) {
     struct stat st;
@@ -136,31 +140,56 @@ int run_capture(const std::vector<std::string> & argv, const std::string & input
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-std::string Tts::configure(const Config & cfg, std::string & err) {
-    cfg_ = cfg; err.clear();
-    std::string e = cfg.engine.empty() ? "auto" : cfg.engine;
-    const bool piper_ok = on_path(cfg.piper) && (file_exists(cfg.voice_pt) || file_exists(cfg.voice_en));
+std::string Tts::resolve_local(const std::string & want, std::string & err) const {
+    std::string e = want;
+    const bool piper_ok = on_path(cfg_.piper) && (file_exists(cfg_.voice_pt) || file_exists(cfg_.voice_en));
     if (e == "auto") {
-        if (piper_ok)                 e = "piper";
+        if (piper_ok)                  e = "piper";
 #if defined(__APPLE__)
-        else if (on_path("say"))      e = "say";
+        else if (on_path("say"))       e = "say";
 #endif
         else if (on_path("espeak-ng")) e = "espeak";
         else e = "none";
     }
     if (e == "piper" && !piper_ok) {
-        err = "piper: binary '" + cfg.piper + "' or voices (" + cfg.voice_pt + ", " + cfg.voice_en + ") not found";
-        e = "none";
-    } else if (e == "say" && !on_path("say")) {
-        err = "say: not on PATH (macOS only)"; e = "none";
-    } else if (e == "espeak" && !on_path("espeak-ng")) {
-        err = "espeak-ng: not on PATH"; e = "none";
-    } else if (e != "piper" && e != "say" && e != "espeak" && e != "none") {
-        err = "unknown TTS engine '" + e + "' (auto|piper|say|espeak|none)"; e = "none";
+        err = "piper: binary '" + cfg_.piper + "' or voices (" + cfg_.voice_pt + ", " + cfg_.voice_en + ") not found"; return "none";
     }
+    if (e == "say" && !on_path("say")) { err = "say: not on PATH (macOS only)"; return "none"; }
+    if (e == "espeak" && !on_path("espeak-ng")) { err = "espeak-ng: not on PATH"; return "none"; }
+    if (e != "piper" && e != "say" && e != "espeak" && e != "none") {
+        err = "unknown TTS engine '" + e + "' (auto|http|piper|say|espeak|none)"; return "none";
+    }
+    return e;
+}
+
+std::string Tts::configure(const Config & cfg, std::string & err) {
+    cfg_ = cfg; err.clear();
+    std::string e = cfg.engine.empty() ? "auto" : cfg.engine;
+    fallback_ = "none";
+    if (e == "http" || (e == "auto" && !cfg.url.empty())) {
+        httplib::Client c(cfg.url);
+        c.set_connection_timeout(2); c.set_read_timeout(5);
+        auto r = c.Get("/health");
+        if (r && r->status == 200) {
+            engine_ = "http";
+            std::string ferr;
+            fallback_ = resolve_local("auto", ferr);
+            if (cfg_.piper.empty()) cfg_.piper = "piper";
+            if (fallback_ == "say")    { if (cfg_.voice_pt.empty()) cfg_.voice_pt = "Eddy (Portuguese (Brazil))"; if (cfg_.voice_en.empty()) cfg_.voice_en = "Daniel"; }
+            if (fallback_ == "espeak") { if (cfg_.voice_pt.empty()) cfg_.voice_pt = "pt-br"; if (cfg_.voice_en.empty()) cfg_.voice_en = "en"; }
+            if (fallback_ == "piper")  { piper_rate_pt_ = file_exists(cfg_.voice_pt) ? piper_rate(cfg_.voice_pt) : 0; piper_rate_en_ = file_exists(cfg_.voice_en) ? piper_rate(cfg_.voice_en) : 0; }
+            return engine_;
+        }
+        err = "http: " + cfg.url + "/health not answering (" + (r ? std::to_string(r->status) : httplib::to_string(r.error())) + ")";
+        if (e == "http") { engine_ = "none"; return engine_; }
+        err += "; falling back to a local engine";
+    }
+    std::string lerr;
+    e = resolve_local(e == "http" ? "auto" : e, lerr);
+    if (e == "none" && !lerr.empty()) err = err.empty() ? lerr : err + "; " + lerr;
     if (e == "piper") {
-        piper_rate_pt_ = file_exists(cfg.voice_pt) ? piper_rate(cfg.voice_pt) : 0;
-        piper_rate_en_ = file_exists(cfg.voice_en) ? piper_rate(cfg.voice_en) : 0;
+        piper_rate_pt_ = file_exists(cfg_.voice_pt) ? piper_rate(cfg_.voice_pt) : 0;
+        piper_rate_en_ = file_exists(cfg_.voice_en) ? piper_rate(cfg_.voice_en) : 0;
     }
     if (e == "say") {
         if (cfg_.voice_pt.empty()) cfg_.voice_pt = "Eddy (Portuguese (Brazil))";
@@ -175,33 +204,43 @@ std::string Tts::configure(const Config & cfg, std::string & err) {
 }
 
 std::string Tts::resolve_voice(const std::string & voice, int & rate_hz) const {
-    rate_hz = engine_ == "say" ? kSayRateHz : engine_ == "espeak" ? kEspeakRateHz : kDefaultPiperRate;
+    const std::string local = engine_ == "http" ? fallback_ : engine_;
+    rate_hz = local == "say" ? kSayRateHz : local == "espeak" ? kEspeakRateHz : kDefaultPiperRate;
     if (voice == "pt" || voice == "pt-br" || voice == "pt_BR") {
-        if (engine_ == "piper") rate_hz = piper_rate_pt_ ? piper_rate_pt_ : piper_rate_en_;
+        if (local == "piper") rate_hz = piper_rate_pt_ ? piper_rate_pt_ : piper_rate_en_;
         return !cfg_.voice_pt.empty() ? cfg_.voice_pt : cfg_.voice_en;
     }
     if (voice.empty() || voice == "en" || voice == "en-us" || voice == "en_US") {
-        if (engine_ == "piper") rate_hz = piper_rate_en_ ? piper_rate_en_ : piper_rate_pt_;
+        if (local == "piper") rate_hz = piper_rate_en_ ? piper_rate_en_ : piper_rate_pt_;
         return !cfg_.voice_en.empty() ? cfg_.voice_en : cfg_.voice_pt;
     }
-    if (engine_ == "piper") rate_hz = piper_rate(voice);
+    if (local == "piper") rate_hz = piper_rate(voice);
     return voice;   // engine-native voice name or path
 }
 
-bool Tts::synthesize(const std::string & text, const std::string & voice,
-                     std::vector<std::int16_t> & pcm, int & rate_hz, std::string & err) {
-    pcm.clear();
-    if (!available()) { err = "no TTS engine"; return false; }
-    if (text.empty()) { err = "empty text"; return false; }
+bool Tts::synthesize_http(const std::string & text, const std::string & voice,
+                          std::vector<std::int16_t> & pcm, int & rate_hz, std::string & err) {
+    httplib::Client c(cfg_.url);
+    c.set_connection_timeout(2); c.set_read_timeout(kTtsTimeoutMs / 1000);
+    nlohmann::json body{{"model", "tts"}, {"input", text}, {"voice", voice}, {"response_format", "wav"}};
+    auto r = c.Post("/v1/audio/speech", body.dump(), "application/json");
+    if (!r) { err = "http: " + httplib::to_string(r.error()); return false; }
+    if (r->status != 200) { err = "http: " + std::to_string(r->status) + " " + r->body.substr(0, kErrTailBytes); return false; }
+    if (!decode_wav_pcm16(r->body, pcm, rate_hz)) { err = "http: helper returned something that is not PCM16 WAV"; return false; }
+    return true;
+}
+
+bool Tts::synthesize_local(const std::string & engine, const std::string & text, const std::string & voice,
+                           std::vector<std::int16_t> & pcm, int & rate_hz, std::string & err) {
     const std::string v = resolve_voice(voice, rate_hz);
     std::string out, e;
     int rc = -1;
-    if (engine_ == "piper") {
+    if (engine == "piper") {
         rc = run_capture({cfg_.piper, "--model", v, "--output-raw"}, text + "\n", out, e, kTtsTimeoutMs);
-    } else if (engine_ == "espeak") {
+    } else if (engine == "espeak") {
         rc = run_capture({"espeak-ng", "-v", v, "--stdout", "--stdin"}, text, out, e, kTtsTimeoutMs);
         if (rc == 0 && out.size() > kWavHeaderBytes) out.erase(0, kWavHeaderBytes);   // espeak writes a WAV header
-    } else if (engine_ == "say") {
+    } else if (engine == "say") {
         // say cannot stream to stdout; it writes a CAF file. It silently leaves a
         // pre-existing output file empty and appends ".caf" to an extension-less
         // name, so reserve a unique name, remove it, and hand say "<name>.caf".
@@ -220,12 +259,61 @@ bool Tts::synthesize(const std::string & text, const std::string & voice,
         // CAF container: the PCM sits in the 'data' chunk; find it and skip the chunk header (type 4 + size 8 + edit count 4).
         const auto k = out.find("data");
         if (k != std::string::npos) out.erase(0, k + 4 + 8 + 4); else out.clear();
+    } else {
+        err = "no local TTS engine"; return false;
     }
-    if (rc != 0) { err = engine_ + " exited " + std::to_string(rc) + (e.empty() ? "" : ": " + e); return false; }
-    if (out.size() < 2) { err = engine_ + " produced no audio" + (e.empty() ? "" : ": " + e); return false; }
+    if (rc != 0) { err = engine + " exited " + std::to_string(rc) + (e.empty() ? "" : ": " + e); return false; }
+    if (out.size() < 2) { err = engine + " produced no audio" + (e.empty() ? "" : ": " + e); return false; }
     pcm.resize(out.size() / 2);
     std::memcpy(pcm.data(), out.data(), pcm.size() * 2);
     return true;
+}
+
+bool Tts::synthesize(const std::string & text, const std::string & voice,
+                     std::vector<std::int16_t> & pcm, int & rate_hz, std::string & err) {
+    pcm.clear();
+    if (!available()) { err = "no TTS engine"; return false; }
+    if (text.empty()) { err = "empty text"; return false; }
+    if (engine_ == "http") {
+        if (synthesize_http(text, voice, pcm, rate_hz, err)) return true;
+        if (fallback_ == "none") return false;
+        std::string ferr;
+        if (synthesize_local(fallback_, text, voice, pcm, rate_hz, ferr)) {
+            std::fprintf(stderr, "[easyai] tts: helper failed (%s) — spoke with %s\n", err.c_str(), fallback_.c_str());
+            err.clear();
+            return true;
+        }
+        err += "; fallback " + fallback_ + ": " + ferr;
+        return false;
+    }
+    return synthesize_local(engine_, text, voice, pcm, rate_hz, err);
+}
+
+bool decode_wav_pcm16(const std::string & bytes, std::vector<std::int16_t> & pcm, int & rate_hz) {
+    pcm.clear(); rate_hz = 0;
+    if (bytes.size() < kRiffHeaderBytes || bytes.compare(0, 4, "RIFF") != 0 || bytes.compare(8, 4, "WAVE") != 0) return false;
+    const auto * d = (const unsigned char *) bytes.data();
+    std::size_t off = kRiffHeaderBytes; int channels = 1, bits = 16;
+    while (off + 8 <= bytes.size()) {
+        const std::uint32_t len = d[off + 4] | (d[off + 5] << 8) | (d[off + 6] << 16) | ((std::uint32_t) d[off + 7] << 24);
+        const std::size_t body = off + 8;
+        if (bytes.compare(off, 4, "fmt ") == 0 && body + 16 <= bytes.size()) {
+            channels = d[body + 2] | (d[body + 3] << 8);
+            rate_hz  = (int) (d[body + 4] | (d[body + 5] << 8) | (d[body + 6] << 16) | ((std::uint32_t) d[body + 7] << 24));
+            bits     = d[body + 14] | (d[body + 15] << 8);
+        } else if (bytes.compare(off, 4, "data") == 0) {
+            if (bits != 16 || rate_hz <= 0 || channels <= 0) return false;
+            const std::size_t frames = std::min<std::size_t>(len, bytes.size() - body) / (2 * (std::size_t) channels);
+            pcm.resize(frames);
+            for (std::size_t i = 0; i < frames; ++i) {
+                const std::size_t k = body + i * (std::size_t) channels * 2;   // first channel
+                pcm[i] = (std::int16_t) (d[k] | (d[k + 1] << 8));
+            }
+            return true;
+        }
+        off = body + len + (len & 1);
+    }
+    return false;
 }
 
 }  // namespace easyai

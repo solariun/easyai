@@ -97,6 +97,9 @@ int main() {
         std::vector<float> pcm; std::string err;
         CHECK(easyai::decode_wav(wav, pcm, err) && pcm.size() == b.size());
         CHECK(std::fabs(pcm[b.size() / 8] - b[b.size() / 8] / 32768.0f) < 1e-4f);
+        std::vector<std::int16_t> back; int rate = 0;
+        CHECK(easyai::decode_wav_pcm16(wav, back, rate) && rate == kSampleRate && back == b);
+        CHECK(!easyai::decode_wav_pcm16("not a wav", back, rate));
     }
 
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);

@@ -1671,14 +1671,34 @@ flowchart LR
    `tts_not_available` when no engine is configured, 500 on engine
    failure with the engine's stderr tail. One synthesis at a time
    (`tts_mu`).
-10. **Engines.** `[TTS] engine = auto|piper|say|espeak|none`, `piper`
-    (binary path), `voice_pt`, `voice_en` (piper: `.onnx` paths, sample
-    rate read from the sidecar `.onnx.json`; `say`: voice names; espeak:
-    `pt-br`, `en`). The engine is a child process: piper
-    `--model <onnx> --output-raw` (raw PCM16), `say -v <voice> -o <tmp.wav>
-    --data-format=LEI16@22050`, `espeak-ng -v <v> --stdout`. `auto` = piper
-    if the binary and a voice exist, else `say` on macOS, else espeak-ng
-    if on PATH, else none.
+10. **Engines.** `[TTS] engine = auto|http|piper|say|espeak|none`, `url`
+    (engine http), `piper` (binary path), `voice_pt`, `voice_en` (piper:
+    `.onnx` paths, sample rate read from the sidecar `.onnx.json`; `say`:
+    voice names; espeak: `pt-br`, `en`). Local engines are child
+    processes: piper `--model <onnx> --output-raw` (raw PCM16), `say -v
+    <voice> -o <tmp>.caf --data-format=LEI16@22050`, `espeak-ng -v <v>
+    --stdout`. **`http`** forwards the request to a helper that speaks the
+    same `POST /v1/audio/speech` shape on `url` and must answer `GET
+    /health`; the best local engine is kept as **fallback** and used,
+    with one log line, when the helper fails. `auto` = http when `url`
+    is set and answers, else piper if the binary and a voice exist, else
+    `say` on macOS, else espeak-ng if on PATH, else none. `/health` adds
+    `tts_fallback` when the engine is http.
+10a. **Natural voice: Kokoro-82M helper.** `scripts/easyai_tts_kokoro.py`
+    (Python standard library + `kokoro-onnx`, run from a venv the
+    installer creates at `/opt/easyai/kokoro`, unit
+    `easyai-tts-kokoro.service` on `127.0.0.1:8111`) loads
+    `kokoro-v1.0.onnx` + `voices-v1.0.bin` once and serves `POST
+    /v1/audio/speech` `{input, voice, speed}` → PCM16 WAV at 24 kHz, and
+    `GET /health`. Voice map: `pt` → `pm_alex`, `en` → `am_michael`
+    (both male; any Kokoro voice id passes through, language from its
+    first letter: `p` pt-BR, `a` en-US, `b` en-GB). Grapheme-to-phoneme
+    is espeak-ng: the helper prefers the system library (apt
+    `espeak-ng`, brew Cellar) because the one bundled in the
+    `espeakng-loader` wheel ignores the data path it is given (seen on
+    macOS arm64 0.2.4) and aborts on pt-BR. `--espeak-lib` /
+    `--espeak-data` override the search. The installer skips Kokoro when
+    `python3` < 3.10 and says so; piper remains.
 11. **Thinking per request.** `chat_template_kwargs.enable_thinking`
     (boolean) in the request body sets the engine flag for that request
     under the engine lock and restores the server default after it, same
@@ -1695,6 +1715,19 @@ flowchart LR
   libeasyai. A child process keeps the library clean and lets the
   installer swap voices. Rejected: implementing a TTS model in ggml
   (weeks), browser-side speechSynthesis for the assistant (no browser).
+- **Kokoro-82M as the natural voice, behind the same HTTP shape**
+  (Gustavo, 2026-10-16: "quero modelos mais naturais"). Among the models
+  that run on the box's CPU in real time with a male pt-BR voice, Kokoro
+  (Apache-2.0, 82M parameters, ~330 MB) is the clear quality winner;
+  XTTS-v2 is non-commercial and heavy, Orpheus has no pt and wants a
+  GPU, OuteTTS through `llama-tts` is in-tree but weaker and its pt
+  support in the example is not guaranteed. Running it needs
+  onnxruntime and a phonemizer, which only exist conveniently in
+  Python, so it lives in a venv-isolated helper process that speaks the
+  OpenAI shape; the C++ side only gained the `http` engine. The helper
+  keeps the model loaded (a per-sentence process would pay ~0.5 s of
+  load each time). Rejected: dlopen-ing onnxruntime from C++ (the
+  phonemizer is the hard part, not the inference).
 - **Wake word with a local small whisper** rather than a dedicated
   keyword spotter: zero new dependencies, one more use of `easyai::Stt`,
   and tiny is fast enough on the server box; cost is ~0.3 s per burst on
@@ -1726,6 +1759,15 @@ flowchart LR
   room's Portuguese speech.
 - Found while testing: `say` leaves a pre-existing output file empty and
   appends `.caf` to an extension-less name — handled in `Tts`.
+- Kokoro on this Mac (Python 3.12 venv, kokoro-onnx 0.6.1, onnxruntime
+  1.31, brew espeak-ng 1.52): pt-BR `pm_alex` 120 chars → 7.0 s of audio
+  in 2038 ms (first call), en `am_michael` 72 chars → 4.9 s in 1678 ms,
+  `pm_santa` 42 chars → 2.6 s in 565 ms, all 24 kHz, played and clearly
+  more natural than piper. Through easyai-server (`--tts-url`): 200,
+  3.1 s of audio in 687 ms, `/health` `tts_engine: http`, `tts_fallback:
+  say`; with the helper killed the same request answered 200 through
+  `say` with the log line "helper failed … spoke with say"; the assistant
+  `--text` spoke its sentences through the server and Kokoro.
 
 ### Limits
 

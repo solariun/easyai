@@ -104,9 +104,11 @@ landing on it for the first time) sees what shipped recently.
   thinking off, says when it uses a tool) and speaks each sentence as it
   arrives. ALSA on Linux, CoreAudio on macOS. `[ASSISTANT]` in the INI;
   the installer writes `easyai-assistant.service`. Doc: `easyai-assistant.md`.
-- **`POST /v1/audio/speech`** on easyai-server (OpenAI shape) with piper /
-  macOS `say` / espeak-ng as child processes (`[TTS]`); male voices pt-BR
-  and en. `chat_template_kwargs.enable_thinking` is honoured per request.
+- **`POST /v1/audio/speech`** on easyai-server (OpenAI shape). Natural
+  voice: **Kokoro-82M** through a small helper (`scripts/easyai_tts_kokoro.py`,
+  `easyai-tts-kokoro.service`, male `pm_alex` pt-BR / `am_michael` en);
+  piper / macOS `say` / espeak-ng as child-process fallbacks (`[TTS]`).
+  `chat_template_kwargs.enable_thinking` is honoured per request.
 
 ### 2026-10-15 — llama.cpp chat-API port, pinned installer
 

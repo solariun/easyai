@@ -172,34 +172,6 @@ std::unique_ptr<httplib::Client> make_http(const std::string & base, const Args 
     return c;
 }
 
-bool parse_wav_pcm16(const std::string & bytes, std::vector<std::int16_t> & pcm, int & rate) {
-    // Minimal RIFF reader for what /v1/audio/speech returns (PCM16 mono).
-    if (bytes.size() < 12 || bytes.compare(0, 4, "RIFF") != 0) return false;
-    std::size_t off = 12; rate = 0; int channels = 1, bits = 16;
-    while (off + 8 <= bytes.size()) {
-        const std::string id = bytes.substr(off, 4);
-        const std::uint32_t len = (std::uint8_t) bytes[off + 4] | ((std::uint8_t) bytes[off + 5] << 8) |
-                                  ((std::uint8_t) bytes[off + 6] << 16) | ((std::uint32_t) (std::uint8_t) bytes[off + 7] << 24);
-        const std::size_t body = off + 8;
-        if (id == "fmt " && body + 16 <= bytes.size()) {
-            channels = (std::uint8_t) bytes[body + 2];
-            rate = (std::uint8_t) bytes[body + 4] | ((std::uint8_t) bytes[body + 5] << 8) | ((std::uint8_t) bytes[body + 6] << 16);
-            bits = (std::uint8_t) bytes[body + 14];
-        } else if (id == "data") {
-            if (bits != 16 || rate == 0) return false;
-            const std::size_t n = std::min<std::size_t>(len, bytes.size() - body) / 2;
-            pcm.resize(n / channels);
-            for (std::size_t i = 0; i < pcm.size(); ++i) {
-                const std::size_t k = body + i * channels * 2;   // first channel
-                pcm[i] = (std::int16_t) ((std::uint8_t) bytes[k] | ((std::uint8_t) bytes[k + 1] << 8));
-            }
-            return true;
-        }
-        off = body + len + (len & 1);
-    }
-    return false;
-}
-
 // ---------------------------------------------------------------------------
 // Speaker: a queue of sentences spoken in order on its own thread, so the
 // chat stream never waits for the voice. speaking() mutes the microphone.
@@ -278,7 +250,7 @@ private:
             auto c = make_http(a_.tts_endpoint, a_);
             nlohmann::json body{{"model", "tts"}, {"input", it.text}, {"voice", voice}, {"response_format", "wav"}};
             auto r = c->Post("/v1/audio/speech", body.dump(), "application/json");
-            if (r && r->status == 200) ok = parse_wav_pcm16(r->body, pcm, rate);
+            if (r && r->status == 200) ok = easyai::decode_wav_pcm16(r->body, pcm, rate);
             else err = r ? "HTTP " + std::to_string(r->status) : httplib::to_string(r.error());
         }
         if (!ok && local_.available()) ok = local_.synthesize(it.text, voice, pcm, rate, err);

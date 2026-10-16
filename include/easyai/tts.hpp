@@ -13,7 +13,9 @@ namespace easyai {
 class Tts {
 public:
     struct Config {
-        std::string engine = "auto";   // auto | piper | say | espeak | none
+        std::string engine = "auto";   // auto | http | piper | say | espeak | none
+        std::string url;               // engine http: base URL of a helper speaking POST /v1/audio/speech
+                                       // (scripts/easyai_tts_kokoro.py — Kokoro-82M, the natural voice)
         std::string piper;             // piper binary path (engine piper)
         std::string voice_pt;          // piper: .onnx path; say: voice name; espeak: voice id
         std::string voice_en;
@@ -21,8 +23,12 @@ public:
 
     // Resolves "auto" and checks the engine's binary and voices exist.
     // Returns the engine chosen ("none" when nothing usable) and fills err.
+    // auto = http when url answers /health, else piper, else say (macOS),
+    // else espeak-ng. With http, the best local engine stays as fallback
+    // for when the helper is down.
     std::string configure(const Config & cfg, std::string & err);
     const std::string & engine() const { return engine_; }
+    const std::string & fallback_engine() const { return fallback_; }
     bool available() const { return engine_ != "none" && !engine_.empty(); }
 
     // voice: "pt", "en", or an engine voice name/path. Output is PCM16 mono
@@ -33,10 +39,19 @@ public:
 
 private:
     std::string engine_ = "none";
+    std::string fallback_ = "none";    // local engine used when http fails
     Config      cfg_;
     int         piper_rate_pt_ = 0, piper_rate_en_ = 0;
     std::string resolve_voice(const std::string & voice, int & rate_hz) const;
+    std::string resolve_local(const std::string & want, std::string & err) const;
+    bool synthesize_local(const std::string & engine, const std::string & text, const std::string & voice,
+                          std::vector<std::int16_t> & pcm, int & rate_hz, std::string & err);
+    bool synthesize_http(const std::string & text, const std::string & voice,
+                         std::vector<std::int16_t> & pcm, int & rate_hz, std::string & err);
 };
+
+// RIFF/WAVE (PCM16, any channel count → first channel) → samples + rate.
+bool decode_wav_pcm16(const std::string & bytes, std::vector<std::int16_t> & pcm, int & rate_hz);
 
 // Runs argv[0] with the given arguments, feeds `input` on stdin, collects
 // stdout into `out` and the stderr tail into `err`. Returns the exit code,
