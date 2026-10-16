@@ -14,7 +14,6 @@ constexpr double kMinRmsDb      = -100.0;
 constexpr double kPcmFullScale  = 32768.0;
 constexpr float  kBeepAmp       = 0.3f;
 constexpr int    kMsPerSecond   = 1000;
-constexpr int    kMinQuestionWords = 2;
 
 // Accented letters folded to ASCII (UTF-8 two-byte sequences).
 const char * kFoldFrom[] = {"á","à","â","ã","ä","é","è","ê","ë","í","ì","î","ï","ó","ò","ô","õ","ö","ú","ù","û","ü","ç","ñ",
