@@ -150,7 +150,8 @@ landing on it for the first time) sees what shipped recently.
   `models/stt/README.md` (source, commit, SHA-256, license, data) and
   shipped in the repo via Git LFS (`git lfs pull` after a clone, or
   `scripts/fetch_stt_model.sh` to download instead); the installer copies
-  it from the checkout and links `stt.bin`. Enable with `--stt-model
+  it from the checkout and links `stt.bin`. The Kokoro voice model and
+  its voices ship the same way in `models/tts/` (see its README). Enable with `--stt-model
   <file>` or `[STT] model = <file>`.
 - **Model finder** in `/models` and `easyai-cli --llm-manager`: a search
   now shows every HuggingFace match (multi-word, any order), most

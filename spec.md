@@ -1712,7 +1712,12 @@ flowchart LR
     phonemes for a pt-BR and an en sentence are byte-identical to python
     phonemizer 3.4 + espeak-ng 1.52 (asserted in `tests/test_kokoro.cpp`).
     No Python anywhere: the helper script of the first Kokoro commit is
-    removed and the installer deletes its unit and venv on upgrade.
+    removed and the installer deletes its unit and venv on upgrade. The
+    two model files are committed through Git LFS in `models/tts/` with
+    `models/tts/README.md` (source release, upstream model, sizes,
+    SHA-256, Apache-2.0, inputs, languages, voice prefixes); the
+    installer copies them from the checkout and downloads only when it
+    finds LFS pointers, like the STT weight.
 11. **Thinking per request.** `chat_template_kwargs.enable_thinking`
     (boolean) in the request body sets the engine flag for that request
     under the engine lock and restores the server default after it, same

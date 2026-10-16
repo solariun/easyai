@@ -2437,6 +2437,13 @@ if [[ $do_service -eq 1 && $do_kokoro -eq 1 ]]; then
     sudo install -d -m755 -o "$service_user" -g "$service_group" "$tts_dir"
     for f in kokoro-v1.0.onnx voices-v1.0.bin; do
         [[ -f "$tts_dir/$f" ]] && continue
+        # The files ship in the repo through Git LFS (models/tts/); a resolved
+        # checkout is copied, a pointer-only one falls back to the download.
+        if [[ -f "$easyai_dir/models/tts/$f" ]] && [[ $(stat -c %s "$easyai_dir/models/tts/$f") -gt $stt_lfs_pointer_max_bytes ]]; then
+            log "copying Kokoro $f from the repo → $tts_dir/$f"
+            sudo install -m644 -o "$service_user" -g "$service_group" "$easyai_dir/models/tts/$f" "$tts_dir/$f"
+            continue
+        fi
         log "downloading Kokoro $f → $tts_dir/$f"
         if sudo curl -fL --retry 3 --progress-bar -o "$tts_dir/$f.part" "$kokoro_files_base/$f"; then
             sudo mv "$tts_dir/$f.part" "$tts_dir/$f"; sudo chown "$service_user":"$service_group" "$tts_dir/$f"; sudo chmod 644 "$tts_dir/$f"
