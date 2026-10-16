@@ -66,7 +66,7 @@ const char * kAssistantSystem =
 
 struct Args {
     std::string config = kDefaultConfig;
-    std::string name = "max";
+    std::string name = "easyai";
     std::string name_aliases;               // csv of spellings whisper produces for the name
     std::string greeting = "en";            // en | pt | off: spoken once at start-up
     std::string endpoint = kDefaultEndpoint, api_key, model = "default";
@@ -140,7 +140,7 @@ void usage(Args & a) {
     auto dk = keys(d);
     std::fprintf(stderr,
         "Usage: easyai-assistant [options]\n\n"
-        "Voice assistant: listens on the microphone for \"hey %s\" / \"oi %s\", records until a\n"
+        "Voice assistant: listens on the microphone for \"hey %s\" / \"oi %s\" (\"hey easy AI\"), records until a\n"
         "pause, transcribes (POST /v1/audio/transcriptions), answers (POST /v1/chat/completions,\n"
         "thinking off, tools run here) and speaks (POST /v1/audio/speech). Every call is\n"
         "OpenAI-shaped: endpoint can be easyai-server, llama-server or OpenAI with an api_key.\n\n"
@@ -499,9 +499,10 @@ public:
     void greet() {
         if (a_.greeting == "off" || a_.greeting.empty()) return;
         const bool pt = a_.greeting == "pt";
+        const std::string nm = spoken_name(a_.name, pt ? "pt" : "en");
         const std::string text = pt
-            ? "O assistente " + a_.name + " está no ar. Diga \"oi " + a_.name + "\" e faça a sua pergunta."
-            : "The " + a_.name + " assistant is online. Say \"hey " + a_.name + "\" and ask your question.";
+            ? "O assistente " + nm + " está no ar. Diga \"oi " + nm + "\" e faça a sua pergunta."
+            : "The " + nm + " assistant is online. Say \"hey " + nm + "\" and ask your question.";
         std::fprintf(stderr, "[easyai-assistant] greeting (%s): %s\n", pt ? "pt" : "en", text.c_str());
         speaker_.speak(text, pt ? "pt" : "en");
         speaker_.wait_idle();
@@ -522,14 +523,17 @@ public:
         auto mute_until = std::chrono::steady_clock::now();
         auto followup_until = mute_until;
         int level_log = 0;
-        // After an answer: listen on for followup_ms; nothing said → falling sound, back to idle.
+        // After an answer: the listening beep, then listen on for followup_ms; nothing said → falling sound, back to idle.
         auto after_answer = [&]() {
-            mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs);
             if (a_.followup_ms > 0) {
+                beep(1);   // same tone as after the name: "you can speak now"
                 conversation = true;
+                mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs);
                 followup_until = mute_until + std::chrono::milliseconds(a_.followup_ms);
                 listen.reset();
-                if (a_.verbose) std::fprintf(stderr, "[easyai-assistant] conversation: listening %d ms for a follow-up\n", a_.followup_ms);
+                if (a_.verbose) std::fprintf(stderr, "[easyai-assistant] conversation: beep, listening %d ms for a follow-up\n", a_.followup_ms);
+            } else {
+                mute_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(kUnmuteMs);
             }
         };
 

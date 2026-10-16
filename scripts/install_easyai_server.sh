@@ -84,7 +84,7 @@
 #                                                    #   below; also --whisper-ref)
 #   ./install_easyai_server.sh --no-whisper          # skip voice transcription (whisper.cpp)
 #   ./install_easyai_server.sh --no-assistant        # skip easyai-assistant.service (voice assistant on
-#                                                    #   the box's mic/speaker; --assistant-name max)
+#                                                    #   the box's mic/speaker; --assistant-name easyai)
 #   ./install_easyai_server.sh --no-piper            # skip piper TTS (the fallback voice)
 #   ./install_easyai_server.sh --no-kokoro           # skip Kokoro-82M, the natural voice (in-process C++,
 #                                                    #   onnxruntime lib + espeak-ng; --kokoro-voice-pt pm_santa)
@@ -326,11 +326,11 @@ stt_model="large-v3-turbo-q5_0"               # whisper model downloaded at inst
 stt_hf_repo="ggerganov/whisper.cpp"
 stt_lfs_pointer_max_bytes=4096                # a Git LFS pointer file is ~130 bytes; real weights are MBs
 do_assistant=1                                # easyai-assistant.service: voice assistant on the box's own mic
-                                              # and speaker ("hey max"). Needs whisper. --no-assistant skips.
-assistant_name="max"                          # --assistant-name <name>: wake word "hey <name>" / "oi <name>"
+                                              # and speaker ("hey easy AI"). Needs whisper. --no-assistant skips.
+assistant_name="easyai"                          # --assistant-name <name>: wake word "hey <name>" / "oi <name>"
 assistant_service="easyai-assistant.service"
 wake_model="base"                             # small whisper for the wake word (ggml-base.bin, 142 MB; tiny
-                                              # mishears a pt-BR "oi max" too often)
+                                              # mishears a pt-BR "oi easyai" too often)
 do_piper=1                                    # piper TTS for POST /v1/audio/speech (male voices: pt_BR faber,
                                               # en_US ryan). --no-piper → the server has no voice (503).
 piper_version="2023.11.14-2"                  # github.com/rhasspy/piper release
@@ -1743,9 +1743,12 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 # value in effect; `easyai-assistant --text "question"` tests the chat and
 # voice path without a microphone.
 #
-#   name            wake name: "hey <name>", "oi <name>", "ei <name>", "ok <name>"
-#   name_aliases    csv of spellings whisper produces for the name (for "easy": izi, eaz,
-#                   iase... are built in); run with verbose = 1 and read the "heard:" lines
+#   name            wake name: "hey <name>", "oi <name>", "ei <name>", "ok <name>". The default
+#                   easyai is said "hey easy AI" / "oi ísi ai"; whisper may write it as two or
+#                   three words ("easy a i"), the matcher joins them
+#   name_aliases    csv of spellings whisper produces for the name (for "easyai": iziai, isia,
+#                   ziai... are built in); run with verbose = 1 and read the "heard:" lines
+#   greeting        en | pt | off — spoken once at start-up: the assistant is online and how to call it
 #   endpoint        OpenAI-compatible base URL for chat (this server, llama-server, OpenAI)
 #   api_key         Bearer token; the unit passes the server's key as EASYAI_API_KEY
 #   model           model id sent in the request ("default" = whatever the server serves)
@@ -1753,8 +1756,9 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 #   tts_endpoint    base URL for /v1/audio/speech (default: endpoint)
 #   language        auto | pt | en  — forced transcription language (auto detects)
 #   pause_ms        silence that ends a question (ms)
-#   followup_ms     after an answer the assistant keeps listening without the name; this much
-#                   silence ends the conversation with a falling two-tone sound (0 = off)
+#   followup_ms     after an answer the listening beep sounds and the assistant keeps listening
+#                   without the name; this much silence ends the conversation with a falling
+#                   two-tone sound (0 = off)
 #   max_listen_ms   longest question (ms)
 #   wake_model      local whisper ggml for the wake word, or "server" (every burst to stt_endpoint)
 #   mic             ALSA capture device: default, plughw:1,0 … ("default" with no capture
@@ -1773,6 +1777,7 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 [ASSISTANT]
 name            = $assistant_name
 # name_aliases    =
+greeting        = en
 endpoint        = http://127.0.0.1:$service_port
 # api_key         =
 model           = default

@@ -21,11 +21,17 @@ const char * kFoldFrom[] = {"á","à","â","ã","ä","é","è","ê","ë","í","�
 const char   kFoldTo[]   = {'a','a','a','a','a','e','e','e','e','i','i','i','i','o','o','o','o','o','u','u','u','u','c','n',
                             'a','a','a','a','a','e','e','e','e','i','i','i','i','o','o','o','o','o','u','u','u','u','c','n'};
 
-// Call words, with the spellings whisper gives them: "O max" for "oi max", "Em max" / "É e max" for "ei max", "hoy max".
-const char * kWakePrefixes[] = {"hey", "hi", "oi", "o", "oh", "hoy", "ei", "em", "ok", "ola", "alo", "e", "a"};
+// Call words, with the spellings whisper gives them: "O easyai" for "oi easyai", "Em" / "É e" for "ei", "hoy", "High" for "hi".
+const char * kWakePrefixes[] = {"hey", "hi", "high", "oi", "o", "oh", "hoy", "ei", "em", "ok", "ola", "alo", "e", "a"};
 // Spellings the small whisper models produce for the built-in names in pt-BR / en.
 const char * kEasyAliases[] = {"izi", "isi", "eaz", "iase", "ize", "easi", "izy", "esy", "ísi", "hizi", "iz", "asse", "ase", "aise", "azi", "izze"};
 const char * kMaxAliases[]  = {"maks", "macs", "mex", "mac", "mach", "maxx", "marx", "máx", "mas"};
+// "easyai" as whisper tiny/base wrote it for Kokoro pt-BR ("oi ísi ai") and en ("hey easy AI") voices, 2026-10-16:
+// "O Iziai", "Oisiai" (oi glued), "Oi Ziai", "Eisiai", "Easy I", "O Ijazia", "E ZI", "Gisiai", "Isia", "EasyA", "easy A, I".
+const char * kEasyaiAliases[] = {"iziai", "isiai", "isia", "ziai", "siai", "ezi", "easya", "gisiai", "ijazia", "izai", "isai", "easyeye", "easyay"};
+// Names whose spelling misleads the phonemizer: how to write them for the voice.
+struct SpokenName { const char * name, * en, * pt; };
+const SpokenName kSpokenNames[] = {{"easyai", "easy AI", "ísi ai"}};
 const char * kPtWords[] = {"que", "nao", "voce", "e", "de", "para", "com", "uma", "um", "isso", "esta", "como", "qual", "quem",
                            "onde", "quando", "por", "me", "eu", "sim", "tudo", "bem", "obrigado", "hora", "hoje"};
 const char * kEnWords[] = {"the", "is", "what", "are", "you", "how", "and", "it", "to", "of", "a", "in", "that", "this",
@@ -124,39 +130,62 @@ int levenshtein(const std::string & a, const std::string & b) {
     return prev[b.size()];
 }
 
+namespace {
+std::string no_spaces(const std::string & s) { std::string o; for (char c : s) if (c != ' ') o.push_back(c); return o; }
+}
+
 std::vector<std::string> default_aliases(const std::string & name) {
     std::vector<std::string> out;
-    if (normalize_text(name) == "easy") for (const char * a : kEasyAliases) out.push_back(normalize_text(a));
-    if (normalize_text(name) == "max")  for (const char * a : kMaxAliases)  out.push_back(normalize_text(a));
+    const std::string nm = no_spaces(normalize_text(name));
+    if (nm == "easy")   for (const char * a : kEasyAliases)   out.push_back(normalize_text(a));
+    if (nm == "max")    for (const char * a : kMaxAliases)    out.push_back(normalize_text(a));
+    if (nm == "easyai") for (const char * a : kEasyaiAliases) out.push_back(normalize_text(a));
     return out;
+}
+
+std::string spoken_name(const std::string & name, const std::string & lang) {
+    const std::string nm = no_spaces(normalize_text(name));
+    for (const auto & sn : kSpokenNames) if (nm == sn.name) return lang == "pt" ? sn.pt : sn.en;
+    return name;
 }
 
 WakeResult wake_match(const std::string & transcript, const std::string & name, const std::vector<std::string> & aliases) {
     WakeResult r;
     const auto w = words(normalize_text(transcript));
-    const std::string nm = normalize_text(name);
+    const std::string nm = no_spaces(normalize_text(name));
     if (w.empty() || nm.empty()) return r;
     const int max_edits = (int) nm.size() >= kLongNameChars ? kNameMaxEditsLong : kNameMaxEdits;
-    auto is_name = [&](const std::string & word) {
-        if (levenshtein(word, nm) <= max_edits) return true;
-        for (const auto & a : aliases) if (word == normalize_text(a)) return true;
+    std::vector<std::string> al;
+    for (const auto & a : aliases) al.push_back(no_spaces(normalize_text(a)));
+    auto is_name = [&](const std::string & cand) {
+        if (levenshtein(cand, nm) <= max_edits) return true;
+        for (const auto & a : al) if (cand == a) return true;
         return false;
+    };
+    // the name may come back as several words ("easy ai", "easy a i"): try the longest join first
+    auto name_words_at = [&](std::size_t i) -> std::size_t {
+        for (std::size_t n = std::min((std::size_t) kMaxNameWords, w.size() - i); n >= 1; --n) {
+            std::string cand;
+            for (std::size_t k = 0; k < n; ++k) cand += w[i + k];
+            if (is_name(cand)) return n;
+        }
+        return 0;
     };
     for (std::size_t i = 0; i < w.size(); ++i) {
         bool prefixed = (i == 0);
         if (i > 0) for (const char * p : kWakePrefixes) if (w[i - 1] == p) { prefixed = true; break; }
-        bool hit = is_name(w[i]) && prefixed;
-        if (!hit) {   // the call word glued to the name: "oiasse", "heyeasy" (two-letter call words and longer only)
+        std::size_t used = prefixed ? name_words_at(i) : 0;
+        if (used == 0) {   // the call word glued to the name: "oiasse", "heyeasy", "oisiai" (two-letter call words and longer only)
             for (const char * p : kWakePrefixes) {
                 const std::string ps = p;
                 if (ps.size() < 2) continue;
-                if (w[i].size() > ps.size() + 1 && w[i].compare(0, ps.size(), ps) == 0 && is_name(w[i].substr(ps.size()))) { hit = true; break; }
+                if (w[i].size() > ps.size() + 1 && w[i].compare(0, ps.size(), ps) == 0 && is_name(w[i].substr(ps.size()))) { used = 1; break; }
             }
         }
-        if (!hit) continue;
+        if (used == 0) continue;
         r.matched = true;
         std::string q;
-        for (std::size_t k = i + 1; k < w.size(); ++k) { if (!q.empty()) q += ' '; q += w[k]; }
+        for (std::size_t k = i + used; k < w.size(); ++k) { if (!q.empty()) q += ' '; q += w[k]; }
         if ((int) std::count(q.begin(), q.end(), ' ') + 1 >= kMinQuestionWords) r.question = q;
         return r;
     }

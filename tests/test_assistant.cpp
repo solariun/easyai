@@ -65,6 +65,22 @@ int main() {
         CHECK(w.matched && !w.question.empty());
     }
     CHECK(!wake_match("the maximum is ten", "max").matched);
+    // the default name "easyai": whisper writes it as two or three words, or one odd word (measured 2026-10-16, Kokoro pt/en)
+    for (const char * t : {"Hey easy AI, what time is it?", "Hey easy A, I, what day is today?", "Hey, easy-a-a-i, what day is today?",
+                           "High Easy AI, tell me a joke.", "Easy AI, what is the date today?", "O Iziai que horas são agora.",
+                           "Oisiai como você está!", "Oi Ziai, como você está!", "Eisiai me conta uma piada.", "Easy I me conto uma piada.",
+                           "O Ijazia e qual é da te de hoje.", "E ZI que dia é hoje.", "Oi, Gisiai, como você está.", "Oi, Iziai, como você está?"}) {
+        w = wake_match(t, "easyai", default_aliases("easyai"));
+        if (!w.matched) std::printf("   not matched: %s\n", t);
+        CHECK(w.matched && !w.question.empty());
+    }
+    w = wake_match("Hey easy AI, what time is it?", "easyai");
+    CHECK(w.matched && w.question == "what time is it");               // the joined words are the name, not the question
+    w = wake_match("Hey easy a i what day is today", "easyai");
+    CHECK(w.matched && w.question == "what day is today");             // three-word join
+    CHECK(!wake_match("it was an easy day", "easyai").matched);        // "easy" alone without a call word
+    CHECK(!wake_match("this ai is easy", "easyai").matched);
+    CHECK(spoken_name("easyai", "en") == "easy AI" && spoken_name("easyai", "pt") == "ísi ai" && spoken_name("max", "en") == "max");
     w = wake_match("oi izi", "easy", {"izi"});                    // operator alias
     CHECK(w.matched);
     w = wake_match("the exam was easy today", "easy", default_aliases("easy"));

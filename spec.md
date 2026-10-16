@@ -1558,7 +1558,8 @@ syntax check of the page script clean.
 
 **Plain words.** A separate program, `easyai-assistant`, that listens on the
 machine's own microphone all the time, wakes up when it hears its name
-("hey max", "oi max", "ei easy", "ok easy"), records the question until
+("hey easy AI", "oi ísi ai" — the default name is `easyai`; "ei", "ok"
+work too), records the question until
 the speaker pauses for 1.5 s, sends the audio to a speech-to-text
 endpoint, sends the text to a chat endpoint with its own short-answer
 system prompt, and speaks the answer back with a male voice, sentence by
@@ -1607,19 +1608,31 @@ flowchart LR
 3. **Wake word.** Each burst (bounded to `kWakeMaxMs = 4000`) goes to a
    local whisper model `[ASSISTANT] wake_model` (default
    `models/stt/ggml-base.bin`, 142 MB; tiny was measured too weak for a
-   pt-BR "oi max" through a room). The transcript is lower-cased, punctuation stripped, and
+   pt-BR call through a room). The transcript is lower-cased, punctuation stripped, and
    matched by `wake_match(text, name, aliases)`: a prefix token in
-   `{hey, hi, oi, o, ei, ok, olá, ola, alô, alo}` (whisper writes "oi" as
-   "O") followed by the name with Levenshtein distance ≤ `kNameMaxEdits
-   = 1`, or ≤ `kNameMaxEditsLong = 2` for names of 4+ letters, or equal
-   to one of the aliases: built-in for "easy" (`izi, isi, eaz, iase, ize,
-   easi, izy, esy, ísi, hizi, iz`, what tiny/base produce for a pt-BR
-   speaker) plus `[ASSISTANT] name_aliases`. Measured on the box with a
-   Kokoro-spoken "Oi easy. Que horas são agora?": tiny → "O eaz de hora
-   são agora.", base → "O iase que horas são agora?", both now matched;
-   "Hey, easy. What time is it?" matched as is. A call word glued to
-   the name ("oiasse", "heyeasy") matches too, for call words of two
-   letters or more. Words after the name mean the question came in the
+   `{hey, hi, high, oi, o, oh, hoy, ei, em, ok, olá, ola, alô, alo, e, a}`
+   (whisper writes "oi" as "O", "ei" as "Em" / "É e", "hi" as "High")
+   followed by the name. The name may come back as one word or as up to
+   `kMaxNameWords = 3` consecutive words ("easy ai", "easy a i"): the
+   words are joined, longest join first, and the join is the name when
+   its Levenshtein distance is ≤ `kNameMaxEdits = 1`, or ≤
+   `kNameMaxEditsLong = 2` for names of 4+ letters, or when it equals
+   one of the aliases (spaces ignored): built-in for `easyai` (`iziai,
+   isiai, isia, ziai, siai, ezi, easya, gisiai, ijazia, izai, isai,
+   easyeye, easyay`), `easy` and `max`, plus `[ASSISTANT] name_aliases`.
+   The words after the join are the question, so "hey easy AI what time
+   is it" asks "what time is it". A call word glued to the name
+   ("oiasse", "heyeasy", "oisiai") matches too, for call words of two
+   letters or more. Measured 2026-10-16 with Kokoro saying the default
+   name (pt `pm_alex`/`pm_santa` "oi ísi ai", en `am_michael`/`am_adam`
+   "hey easy AI") through whisper tiny and base: en came back as "Hey
+   easy AI", "Hey easy A, I", "Hey, easy-a-a-i", "High Easy AI" (all
+   matched); pt as "O Iziai", "Oisiai", "Oi Ziai", "Eisiai", "Easy I",
+   "O Ijazia", "E ZI", "Oi, Gisiai" (all matched; one of fourteen,
+   "O irreaziai", is not and is left out on purpose). Writing the name
+   `easyai` as one word mis-leads Kokoro's phonemizer ("isae"), so the
+   greeting spells it through `spoken_name(name, lang)`: "easy AI" for
+   en, "ísi ai" for pt; other names are spoken as written. Words after the name mean the question came in the
    same breath: the same burst audio is then sent to the STT endpoint
    (the large model) and the words after the name in that transcript
    are the question, so the small model only ever decides the name;
@@ -1664,24 +1677,30 @@ flowchart LR
    `say`: `Eddy (Portuguese (Brazil))`, `Daniel`; piper: paths of the
    `.onnx` voices). Capture is muted from the first sentence until
    playback drains plus `kUnmuteMs = 300`.
-5a. **Conversation mode.** After every answer the assistant keeps
-   listening for `[ASSISTANT] followup_ms` (default 2000, 0 = off)
-   without needing the name: speech in that window starts the next
-   question at once (same pause rule), its answer re-opens the window;
-   a noise that is not a question extends it; silence for the whole
-   window ends the conversation with the falling two-tone "off" sound
-   (`make_off_sound`: 660 Hz then 440 Hz, 110 ms each), distinct from
-   the rising single beep that acknowledges the name. The microphone is
-   flushed after every sound and answer so none of them is heard.
+5a. **Conversation mode.** After every answer the assistant plays the
+   same single beep that acknowledges the name ("you can speak now")
+   and keeps listening for `[ASSISTANT] followup_ms` (default 2000,
+   0 = off) without needing the name: speech in that window starts the
+   next question at once (same pause rule), its answer ends with the
+   beep again and re-opens the window; a noise that is not a question
+   extends it; silence for the whole window ends the conversation with
+   the falling two-tone "off" sound (`make_off_sound`: 660 Hz then
+   440 Hz, 110 ms each). So the ear hears: name → beep → question →
+   answer → beep → (question → answer → beep …) → off sound. The
+   microphone is flushed after every sound and answer so none of them
+   is heard.
 6a. **Own sound never heard.** `Capture::flush()` drops what the device
    buffered during a synchronous beep or a spoken answer; it runs after
    every beep, after the greeting and after each answer (on the box the
    beep itself came back as a "question" before this).
 6b. **Greeting.** `[ASSISTANT] greeting = en|pt|off` (default `en`):
-   once the microphone is open the assistant says "The max assistant
-   is online. Say 'hey max' and ask your question." (pt: "O assistente
-   easy está no ar. Diga 'oi max' e faça a sua pergunta."), so a
-   restart proves the voice path end to end.
+   once the microphone is open the assistant says "The easy AI assistant
+   is online. Say 'hey easy AI' and ask your question." (pt: "O
+   assistente ísi ai está no ar. Diga 'oi ísi ai' e faça a sua
+   pergunta."), the name through `spoken_name`, so a restart proves the
+   voice path end to end. Whisper base transcribes both greetings with
+   the name intact ("The Easy AI Assistant is online…", "O assistente
+   Isia está no ar…").
 7. **Availability.** Endpoint down or non-2xx: spoken "servidor
    indisponível" / "server unavailable" once per outage (language =
    `[ASSISTANT] language` when not `auto`, else the last heard one, else
@@ -1786,12 +1805,29 @@ flowchart LR
   hundred lines once espeak-ng does the work). Rejected: vendoring
   onnxruntime sources (a multi-hour build), writing a G2P from scratch.
 - **1.5 s pause** as asked; exposed as `pause_ms` because rooms differ.
+- **Wake name `easyai`, said "easy AI"** (Gustavo, 2026-10-16: "renomeie
+  para hey easyai"; earlier names were `easy`, then `max`). Whisper never
+  writes a compound name one way: en gives "easy AI" / "easy A, I" /
+  "easy-a-a-i", pt gives "Iziai" / "Isia" / "Ziai". Joining up to three
+  consecutive words before the edit-distance test (and stripping spaces
+  from aliases) handles the split spellings with one rule instead of a
+  list of them; the odd one-word spellings stay in the alias table like
+  before. Rejected: a per-language name (one INI key, one name, is what
+  was asked), phonetic matching (Soundex and friends are English-only).
+- **Listening beep before the follow-up window** (Gustavo, 2026-10-16:
+  "quando terminar a vocalização e começar a ouvir novamente adicione o
+  tone de escuta"). The same 880 Hz beep that follows the name, not a
+  third sound: one tone means "speak now" wherever it occurs, the
+  falling two-tone means "done". Rejected: a softer or shorter variant
+  (two meanings for one cue is what the user had trouble with).
 
 ### Proof (2026-10-16, macOS; Linux box pending Gustavo's install)
 
-- ctest `assistant` (`tests/test_assistant.cpp`, 25 checks): `wake_match`
+- ctest `assistant` (`tests/test_assistant.cpp`, 73 checks): `wake_match`
   (accents, one-edit misspelling, call words, name first, name inside a
-  sentence rejected, question after the name), `SentenceChunker`
+  sentence rejected, question after the name, the fourteen measured
+  `easyai` transcripts, joined words excluded from the question, "it was
+  an easy day" / "this ai is easy" rejected, `spoken_name`), `SentenceChunker`
   ("3.14", "e.g.", short sentence rides to the newline, flush), VAD +
   `Segmenter` on 2 s noise → 800 ms tone → 1 s noise (one burst of
   pre-roll + tone + end silence, 38–41 speech periods, floor < −40 dB),

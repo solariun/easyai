@@ -22,6 +22,7 @@ constexpr double kFloorMinDb      = -70.0;  // digital silence must not pull the
 constexpr int    kNameMaxEdits    = 1;      // Levenshtein tolerance on the wake name (short names)
 constexpr int    kNameMaxEditsLong = 2;     //   names of kLongNameChars letters or more
 constexpr int    kLongNameChars   = 4;
+constexpr int    kMaxNameWords    = 3;     // "easy a i" is still the name
 constexpr int    kMinSpeechMs     = 200;    // a burst with less real speech than this is noise, never transcribed
 constexpr int    kMinSentenceChars = 24;
 constexpr int    kBeepHz          = 880;
@@ -69,14 +70,20 @@ struct WakeResult {
     bool        matched = false;
     std::string question;   // words after the name (empty = just the call)
 };
-// "hey easy what time is it" → matched, question "what time is it".
-// Accepts hey|hi|oi|o|ei|ok|ola|alo before the name; the name within
-// kNameMaxEdits (kNameMaxEditsLong for long names) or any of `aliases`,
-// the spellings whisper produces for it ("eaz", "iase" for "easy" said in
+// "hey easyai what time is it" → matched, question "what time is it".
+// Accepts hey|hi|oi|o|ei|ok|ola|alo before the name; the name is one word
+// or up to kMaxNameWords consecutive words joined ("easy ai", "easy a i" →
+// "easyai"; longest match first) within kNameMaxEdits (kNameMaxEditsLong
+// for long names) or equal to one of `aliases` (spaces ignored), the
+// spellings whisper produces for it ("iziai", "isia" for "easyai" said in
 // Portuguese). default_aliases(name) gives the built-in ones.
 WakeResult wake_match(const std::string & transcript, const std::string & name,
                       const std::vector<std::string> & aliases = {});
 std::vector<std::string> default_aliases(const std::string & name);
+// How the voice should say the name so it sounds right: "easyai" is spelled
+// "easy AI" for an English voice and "ísi ai" for a Portuguese one (the
+// phonemizer reads "easyai" as one odd word). Other names come back as is.
+std::string spoken_name(const std::string & name, const std::string & lang);
 
 // Cuts streamed text into sentences for TTS without waiting for the end.
 class SentenceChunker {

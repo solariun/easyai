@@ -30,7 +30,7 @@ the lib surface.
 | `easyai-server`      | Drop-in `llama-server` replacement: OpenAI-compat HTTP **with full SSE streaming**, embedded SvelteKit webui, Bearer auth, Prometheus `/metrics`, KV-cache controls, flash-attn, mlock.  Built-in **[MODELS dashboard](MODELS.md)** (`/models`) — native hardware-aware model recommendations, local-model parameters + in-process hot-swap, a GGUF download manager and a whisper voice-model panel, password-gated.  Speaks MCP, OpenAI, Ollama and OpenAI audio (`/v1/audio/transcriptions`, mic chip in the chat) from one process; optional TLS.  Full doc: [`easyai-server.md`](easyai-server.md). |
 | `easyai-mcp-server`  | **Standalone Model Context Protocol provider — no model loaded.** Same tool catalogue as `easyai-server` (built-ins + knowledge tools + external-tools), exposed over `POST /mcp` with a configurable cpp-httplib worker pool (`--threads`) and an in-flight `tools/call` cap (`--max-concurrent-calls`) for thousands-of-clients deployments.  Full doc: [`easyai-mcp-server.md`](easyai-mcp-server.md). |
 | `easyai-library-demo`| Five-line `easyai::Session` template — pair with [`LIB_GUIDE.md`](LIB_GUIDE.md).  The smallest "build an agent, register a tool, chat" program in the repo. |
-| `easyai-assistant`   | Always-listening **voice assistant** for a box with a mic and speaker (Linux ALSA / macOS CoreAudio, no third-party libs): "hey max" / "oi max", 1.5 s pause, answer spoken with a male pt-BR / en voice, thinking off, tools run inside, every call OpenAI-shaped so the INI can point at any provider with a key.  Full doc: [`easyai-assistant.md`](easyai-assistant.md). |
+| `easyai-assistant`   | Always-listening **voice assistant** for a box with a mic and speaker (Linux ALSA / macOS CoreAudio, no third-party libs): "hey easy AI" / "oi ísi ai", 1.5 s pause, answer spoken with a male pt-BR / en voice, thinking off, tools run inside, every call OpenAI-shaped so the INI can point at any provider with a key.  Full doc: [`easyai-assistant.md`](easyai-assistant.md). |
 | `easyai-agent`       | A demo agent showing every built-in tool plus an inline custom tool.                                                                                |
 | `easyai-recipes`     | Tutorial agent paired with `manual.md` — implements `today_is` and `weather` (HTTP-calling) from scratch.                                          |
 | `easyai-chat`        | A bare-bones REPL with no tools — useful as a sanity check.                                                                                          |
@@ -98,7 +98,7 @@ landing on it for the first time) sees what shipped recently.
 ### 2026-10-16 — easyai-assistant + `/v1/audio/speech`
 
 - **`easyai-assistant`**: a separate service that listens on the machine's
-  own microphone, wakes on "hey max" / "oi max", records until a 1.5 s
+  own microphone, wakes on "hey easy AI" / "oi ísi ai", records until a 1.5 s
   pause, transcribes through `/v1/audio/transcriptions`, answers through
   `/v1/chat/completions` with a short-answer system prompt (same language,
   thinking off, says when it uses a tool) and speaks each sentence as it
