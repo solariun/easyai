@@ -151,6 +151,7 @@
   <button data-tab="local">Local models</button>
   <button data-tab="downloads">Downloads</button>
   <button data-tab="status">Status</button>
+  <button data-tab="services">Services</button>
 </nav>
 
 <main>
@@ -245,6 +246,26 @@
       <button class="btn small" onclick="loadStatus()">Refresh</button>
     </div>
     <div id="statusWrap"><div class="empty"><span class="spin"></span> Loading…</div></div>
+  </section>
+
+  <!-- SERVICES: systemd state + start/stop/restart of both units, INI editor -->
+  <section id="tab-services" class="hide">
+    <div class="toolbar" style="margin-bottom:14px">
+      <b style="font-size:15px">Services &amp; configuration</b>
+      <span class="muted small" id="svcMeta"></span>
+      <button class="btn small" style="margin-left:auto" onclick="loadServices()">Refresh</button>
+    </div>
+    <div id="svcWrap"><div class="empty"><span class="spin"></span> Loading…</div></div>
+    <div class="panel stcard" style="margin-top:14px">
+      <h3>easyai.ini <span class="muted" id="cfgPath"></span></h3>
+      <div class="muted small" id="cfgNote" style="margin-bottom:8px"></div>
+      <textarea id="cfgText" spellcheck="false" style="width:100%;min-height:440px;font:12px/1.45 var(--mono);color:var(--fg);background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:10px;resize:vertical;outline:none"></textarea>
+      <div class="toolbar" style="margin:10px 0 0">
+        <button class="btn acc" id="cfgSave" onclick="saveConfig()">Save</button>
+        <button class="btn" onclick="loadConfig()">Reload from disk</button>
+        <span class="muted small" id="cfgStatus"></span>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -743,13 +764,68 @@ async function loadStatus(){
   scheduleStatus();
 }
 
+/* ---------- services + configuration ---------- */
+let SVC_TIMER=null, AUTH_OPEN=false;
+function svcDot(st){const c=st==='active'?'var(--good)':(st==='activating'||st==='deactivating')?'var(--marg)':st==='failed'?'var(--bad)':'var(--mut2)';
+  return `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${c};margin-right:6px;vertical-align:middle"></span>`;}
+async function loadServices(){
+  let d;
+  try{d=await api('/models/api/services');}
+  catch(e){$('#svcWrap').innerHTML='<div class="empty">'+esch(e.message)+'</div>';clearTimeout(SVC_TIMER);SVC_TIMER=setTimeout(loadServices,5000);return;}
+  $('#svcMeta').textContent=(d.manager==='systemd'?'systemd':'no service manager on this host (macOS / container): status and buttons need systemd')+' · updated '+new Date().toLocaleTimeString();
+  const cards=(d.services||[]).map(s=>{
+    const act=(a,label,cls)=>`<button class="btn small ${cls||''}" ${d.manager!=='systemd'?'disabled':''} onclick="svcAction('${s.name}','${a}')">${label}</button>`;
+    const rows=kvrows([['State',svcDot(s.state)+esch(s.state||'unknown')+(s.sub?' <span class="muted">('+esch(s.sub)+')</span>':'')],
+      ['Enabled',esch(s.enabled||'–')],['Since',esch(s.since||'–')],['PID',s.pid||'–']]);
+    const err=s.error?`<div class="muted small" style="margin-top:6px">${esch(s.error)}</div>`:'';
+    return `<div class="panel stcard"><h3>${esch(s.name)}${s.name==='easyai-server'?' <span class="muted">(this server)</span>':''}</h3>
+      <div class="kv">${rows}</div>${err}
+      <div class="toolbar" style="margin:10px 0 0">${act('start','Start')}${act('stop','Stop','danger')}${act('restart','Restart','acc')}
+        <button class="btn small" onclick="svcLog('${s.name}')">Log</button></div>
+      <pre id="log-${s.name}" class="hide" style="font:11px/1.4 var(--mono);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;max-height:260px;overflow:auto;white-space:pre-wrap;margin:10px 0 0"></pre></div>`;}).join('');
+  $('#svcWrap').innerHTML=`<div class="stgrid">${cards}</div>`;
+  clearTimeout(SVC_TIMER);
+  if(!$('#tab-services').classList.contains('hide'))SVC_TIMER=setTimeout(loadServices,5000);
+}
+async function svcAction(name,action){
+  if(action!=='start'&&!confirm(action+' '+name+'?'))return;
+  try{const r=await api('/models/api/services/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,action})});
+    toast(r.note||(name+': '+action+' done'));}
+  catch(e){toast(e.message,true);}
+  setTimeout(loadServices,(name==='easyai-server'&&action!=='start')?4000:800);
+}
+async function svcLog(name){
+  const pre=$('#log-'+name);pre.classList.toggle('hide');if(pre.classList.contains('hide'))return;pre.textContent='…';
+  try{const r=await api('/models/api/services/log?name='+encodeURIComponent(name)+'&lines=80');
+    pre.textContent=(r.lines||[]).join('\n')||(r.error||'(empty)');pre.scrollTop=pre.scrollHeight;}
+  catch(e){pre.textContent=e.message;}
+}
+async function loadConfig(){
+  try{const r=await api('/models/api/config');
+    $('#cfgPath').textContent=r.path;$('#cfgText').value=r.text||'';
+    $('#cfgText').disabled=!r.writable;$('#cfgSave').disabled=!r.writable;
+    $('#cfgNote').innerHTML=(r.exists?'':'<b>the file does not exist yet</b> · ')+
+      (r.writable?'Both services read this file at start-up: <b>Save</b>, then <b>Restart</b> the one whose section you changed.'
+                 :'<b>read-only for the server user</b> — on the box: <code>sudo chmod 660 '+esch(r.path)+'; sudo chmod 2770 '+esch(r.path.replace(/\/[^\/]*$/,''))+'</code> (the installer does this since 2026-10-17).')+
+      (AUTH_OPEN?' <span style="color:var(--marg)">The dashboard has no password: anyone who reaches this page can read the keys in this file — set --webui-password.</span>':'');
+    $('#cfgStatus').textContent=r.bytes+' bytes on disk';}
+  catch(e){$('#cfgNote').textContent=e.message;}
+}
+async function saveConfig(){
+  const text=$('#cfgText').value;$('#cfgStatus').textContent='saving…';
+  try{const r=await api('/models/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+    $('#cfgStatus').textContent='saved '+r.bytes+' bytes'+(r.backup?' · previous copy: '+r.backup:'')+' · restart the service to apply';toast('easyai.ini saved');}
+  catch(e){$('#cfgStatus').textContent='';toast(e.message,true);}
+}
+
 /* ---------- tabs / boot ---------- */
 function switchTab(t){$$('nav.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));
   $$('main > section').forEach(s=>s.classList.toggle('hide',s.id!=='tab-'+t));
   if(t==='local'||t==='downloads')loadLocal();
   if(t==='local')loadStt();
   if(t==='downloads')pollDl();
-  if(t==='status')loadStatus(); else clearTimeout(STATUS_TIMER);}
+  if(t==='status')loadStatus(); else clearTimeout(STATUS_TIMER);
+  if(t==='services'){loadServices();loadConfig();} else clearTimeout(SVC_TIMER);}
 $$('nav.tabs button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
 $('#statusAuto').addEventListener('change',()=>{if($('#statusAuto').checked)loadStatus();else clearTimeout(STATUS_TIMER);});
 ['#f-search','#f-minfit','#f-usecase','#f-quant','#f-sort','#f-limit'].forEach(s=>{
@@ -768,6 +844,7 @@ function applyBrand(a){
 async function init(){
   try{let a=await api('/models/api/auth');
     applyBrand(a);
+    AUTH_OPEN=!a.required;
     if(a.required&&!a.authed){showLogin(true);return;}
     boot();
   }catch(e){/* 401 handled in api() */}

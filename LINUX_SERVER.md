@@ -477,6 +477,29 @@ user might have told you in a past session.
 The installer also injects an authoritative date/time prefix at
 runtime — see `design.md` §5c.
 
+### Editing the INI and restarting from the dashboard
+
+`/models` → **Services** edits `easyai.ini` and starts / stops / restarts
+`easyai-server` and `easyai-assistant`. The installer prepares three
+things for that (re-run it with `--upgrade` on an older install):
+
+| What | Why |
+| --- | --- |
+| `easyai.ini` mode `660`, `/etc/easyai` mode `2770`, both `root:easyai` | the server (user `easyai`) writes `easyai.ini.tmp`, renames it over the file, and keeps the previous content in `easyai.ini.prev` |
+| `/etc/polkit-1/rules.d/50-easyai-services.rules` | lets user `easyai` run `systemctl start/stop/restart` on exactly `easyai-server.service` and `easyai-assistant.service` (polkit action `org.freedesktop.systemd1.manage-units`), nothing else; no sudo, the unit's hardening stays |
+| `SupplementaryGroups=systemd-journal` on `easyai-server.service` | the **Log** button runs `journalctl -u <unit>` |
+
+Check by hand as the service user:
+
+```bash
+sudo -u easyai systemctl restart easyai-assistant.service     # must not ask for a password
+sudo -u easyai journalctl -u easyai-assistant -n 3 --no-pager
+sudo -u easyai test -w /etc/easyai/easyai.ini && echo writable
+```
+
+The INI holds the API keys: set `--webui-password` (the installer's default
+is `0000`) so the Services tab is behind the login overlay.
+
 ### `/etc/easyai/api_key`
 
 If present, the server requires `Authorization: Bearer <key>` on

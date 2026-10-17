@@ -6,6 +6,7 @@
 #include "easyai/tts.hpp"
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -84,6 +85,34 @@ int main() {
     CHECK(!wake_match("it was an easy day", "easyai").matched);        // "easy" alone without a call word
     CHECK(!wake_match("this ai is easy", "easyai").matched);
     CHECK(spoken_name("easyai", "en") == "easy AI" && spoken_name("easyai", "pt") == "ísi ai" && spoken_name("max", "en") == "max");
+    // strict call words (the default since 2026-10-17): "hello max" / "olá max", as whisper tiny/base wrote Kokoro saying them
+    const auto calls = default_call_words();
+    for (const char * t : {"Hello Max, what time is it?", "Hello Max, tell me a joke.", "Olá Max como você está?", "Olá Max, que dia é hoje?",
+                           "Elo Max qual é a data de hoje?", "Elomax qual é a data de hoje?", "Allo Max mi conto ma piade.", "A lo Max me conta uma piada."}) {
+        w = wake_match(t, "max", default_aliases("max"), calls);
+        if (!w.matched) std::printf("   not matched: %s\n", t);
+        CHECK(w.matched && !w.question.empty());
+    }
+    w = wake_match("Hello Max, what time is it?", "max", {}, calls);
+    CHECK(w.matched && w.question == "what time is it");
+    CHECK(!wake_match("Mas eu acho que o máximo é 10 mais ou menos.", "max", default_aliases("max"), calls).matched);
+    CHECK(!wake_match("The maximum is 10 and max out the volume.", "max", default_aliases("max"), calls).matched);
+    CHECK(!wake_match("Max, what time is it?", "max", {}, calls).matched);            // bare name: no wake in strict mode
+    CHECK(!wake_match("hey max what time is it", "max", {}, calls).matched);          // "hey" is not a call word now
+    CHECK(wake_match("oi max que horas", "max", {}, {"oi"}).matched);                 // operator's own list
+    CHECK(wake_match("hey max what time is it", "max").matched);                      // empty list = loose mode
+    // processing sound and microphone gain
+    {
+        const auto th = make_think_sound(kSampleRate);
+        CHECK(th.size() == (std::size_t) 3 * kSampleRate * kThinkToneMs / 1000);
+        CHECK(th.front() == 0 && std::abs(th[th.size() / 6]) > 2000);
+        std::vector<std::int16_t> g = {1000, -1000, 30000};
+        apply_gain_db(g, 6);
+        CHECK(std::abs(g[0] - 1995) <= 2 && g[1] == -g[0] && g[2] == 32767);         // +6 dB doubles, clipped
+        apply_gain_db(g, -6); CHECK(std::abs(g[0] - 1000) <= 2);
+        std::vector<std::int16_t> z = {123}; apply_gain_db(z, 0); CHECK(z[0] == 123);
+        std::vector<std::int16_t> big = {100}; apply_gain_db(big, 90); CHECK(big[0] == 3162);  // bounded to +30 dB
+    }
     w = wake_match("oi izi", "easy", {"izi"});                    // operator alias
     CHECK(w.matched);
     w = wake_match("the exam was easy today", "easy", default_aliases("easy"));

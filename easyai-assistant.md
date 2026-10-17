@@ -2,8 +2,8 @@
 
 An always-listening voice assistant that runs on a machine with a
 microphone and a speaker, on Linux (ALSA) and macOS (CoreAudio), with no
-third-party libraries. Say **"hey easy AI"** or **"oi ísi ai"** (the name
-is `easyai`), ask, pause,
+third-party libraries. Say **"hello Max"** or **"olá Max"** (the name is
+`max`, the call word is required), ask, pause,
 and it answers aloud with a male voice in the language you used
 (Portuguese or English). Every network call is OpenAI-shaped, so the same
 binary works against easyai-server, llama-server or OpenAI with an API
@@ -13,8 +13,8 @@ key. Normative text: `spec.md` → "easyai-assistant".
 flowchart LR
   M["mic 16 kHz"] --> V["VAD\n(energy, adaptive floor)"]
   V -->|burst| W["wake word\nlocal whisper tiny"]
-  W -->|hey easy AI + beep| L["listen until\n1.5 s of silence"]
-  L -->|WAV| S["POST /v1/audio/transcriptions"]
+  W -->|hello max + beep| L["listen until\n1.5 s of silence"]
+  L -->|♪ rising sound, WAV| S["POST /v1/audio/transcriptions"]
   S -->|text, language| C["POST /v1/chat/completions\n(stream, thinking off,\ntools run here)"]
   C -->|sentence by sentence| T["POST /v1/audio/speech\nor local say / piper"]
   T --> P["speaker\n(mic muted meanwhile)"]
@@ -48,22 +48,25 @@ levels, every transcript the wake model heard, and timings.
    pre-roll, ended by 500 ms of silence, at most 4 s) goes to the local
    wake model (`ggml-tiny.bin`, ~0.3 s on CPU).
 2. **Wake word.** The transcript is normalised (accents folded,
-   punctuation dropped) and matched: one of `hey hi oi ei ok ola alo`
-   before the name, the name within two spelling edits or one of its
-   known mis-spellings. Whisper writes the default name as "easy AI",
-   "easy A I", "Iziai", "Isia"…: up to three consecutive words are joined
-   before the comparison, so all of them are the name. Whisper also gets
-   a prompt naming the assistant ("The assistant is called easy AI."),
-   which makes it write the name that way most of the time. "Hey easy AI,
-   what time is it?" is answered right away; a bare "oi ísi ai" beeps
-   once and listens.
+   punctuation dropped) and matched: one of the **call words**
+   (`call_words`, default `hello, olá, alô, hallo, hola`, with the
+   spellings whisper gives them) right before the name, the name within
+   one spelling edit or one of its known mis-spellings. The bare name
+   never wakes it, and neither do "hey" / "oi" unless you put them in
+   `call_words` (an empty value gives the old loose mode, which woke on
+   ordinary talk). Whisper also gets a prompt naming the assistant ("The
+   assistant is called Max."). "Hello Max, what time is it?" is answered
+   right away; a bare "olá Max" beeps once and listens.
 3. **Question.** Listening ends after `pause_ms` (1500) of silence or
-   `max_listen_ms` (20 000). The audio goes as WAV to
+   `max_listen_ms` (20 000). A short rising sound (three quick notes)
+   says the question was taken. The audio goes as WAV to
    `/v1/audio/transcriptions` (`verbose_json`, so the language comes
    back). An empty transcript gives a double beep.
 4. **Answer.** `/v1/chat/completions`, streaming, with the built-in system
-   prompt (short, same language, no lists, no reasoning, announce tools)
-   and `chat_template_kwargs.enable_thinking=false`. Tools run inside the
+   prompt (short, same language, no lists, no reasoning, announce tools,
+   never cite sources) plus an **internal clock** line with the current
+   local date and time, refreshed every turn, so date and time questions
+   need no tool; and `chat_template_kwargs.enable_thinking=false`. Tools run inside the
    assistant exactly like in `easyai-cli`: `datetime`, `web`, and any
    `EASYAI-*.tools` manifests under `external_tools`.
 5. **Voice.** Each complete sentence is sent to `/v1/audio/speech` and
@@ -76,7 +79,9 @@ levels, every transcript the wake model heard, and timings.
    says the conversation is over.
 
    ```
-   "hey easy AI"  ♪beep  "what time is it?"  …answer…  ♪beep  "and tomorrow?"  …answer…  ♪beep  (silence 2 s)  ♪♩ off
+   "hello Max"  ♪beep  "what time is it?"  ♪♪♪  …answer…  ♪beep  "and tomorrow?"  ♪♪♪  …answer…  ♪beep  (silence 2 s)  ♪♩ off
+
+   beep = speak now · ♪♪♪ rising = got it, working · ♪♩ falling = conversation over
    ```
 7. **Memory.** The conversation keeps the last `history_turns` turns and
    restarts after `history_idle_s` seconds of silence.
@@ -95,9 +100,10 @@ easyai-assistant --text "que horas são?"   # try the chat + voice path, no micr
 
 | INI key | flag | default | meaning |
 |---|---|---|---|
-| `name` | `--name` | `easyai` | wake name; `easyai` is said "easy AI" (en) / "ísi ai" (pt) and the matcher joins split spellings ("easy a i") |
-| `name_aliases` | `--name-aliases` | built-in for easyai, easy, max | csv of what whisper hears for the name; run `--verbose` and copy the `heard:` lines |
-| `greeting` | `--greeting` | `en` | `en` / `pt` / `off`: spoken once at start-up ("The easy AI assistant is online. Say 'hey easy AI'…") |
+| `name` | `--name` | `max` | wake name, said right after a call word (`easyai` is also known: said "easy AI" / "ísi ai", split spellings joined) |
+| `call_words` | `--call-words` | `hello, olá, alô, hallo, hola` | the words that must come right before the name; empty = loose mode (hey/oi/… or the bare name), which wakes more often |
+| `name_aliases` | `--name-aliases` | built-in for max, easy, easyai | csv of what whisper hears for the name; run `--verbose` and copy the `heard:` lines |
+| `greeting` | `--greeting` | `en` | `en` / `pt` / `off`: spoken once at start-up ("The max assistant is online. Say 'hello max'…") |
 | `endpoint` | `--endpoint` | `http://127.0.0.1:8080` | OpenAI-compatible base URL |
 | `api_key` | `--api-key` | | Bearer token (env `EASYAI_API_KEY` as fallback) |
 | `model` | `--model` | `default` | model id in the request |
@@ -106,6 +112,7 @@ easyai-assistant --text "que horas são?"   # try the chat + voice path, no micr
 | `pause_ms`, `max_listen_ms` | same | 1500, 20000 | end of question |
 | `followup_ms` | `--followup-ms` | 2000 | after an answer: listening beep, then keep listening without the name; this much silence ends the conversation with a falling two-tone sound (0 = off) |
 | `wake_model` | `--wake-model` | `models/stt/ggml-base.bin` | local whisper for the name only (a question said in the same breath is re-transcribed by the server's large model); `server` = send every burst to the STT endpoint |
+| `mic_gain_db` | `--mic-gain-db` | 0 | software gain on the microphone, −30..30 dB; negative when the verbose log shows levels near 0 dB (hot room), positive for a far mic |
 | `mic`, `speaker` | same | `default` | ALSA device names (`plughw:1,0`). When `default` has no capture (card 0 is HDMI-only on many boxes) the assistant picks the first card that has one, logs it, and the speaker follows that card; `cat /proc/asound/pcm` shows the cards. macOS uses the system default |
 | `tts` | `--tts` | `auto` | `server` / `say` / `piper` / `espeak`; auto = endpoint, else local |
 | `voice_pt`, `voice_en`, `piper` | same | engine defaults | local voices |
@@ -151,3 +158,12 @@ easyai-server ... --tts-kokoro-model kokoro-v1.0.onnx --tts-kokoro-voices voices
 No barge-in while it speaks, no speaker identification, energy VAD (a
 loud TV costs a tiny-whisper run per burst), languages other than pt/en
 are answered in the `en` voice.
+
+## 5. Driving it from the dashboard
+
+`easyai-server` → `/models` → **Services** shows both units (state, since,
+PID), with **Start / Stop / Restart** and a **Log** button (journal tail),
+and an editor for `easyai.ini` with a syntax check and a `.prev` copy of
+the previous content. Save, then Restart `easyai-assistant` to apply a
+change in `[ASSISTANT]`. The buttons work through a polkit rule the
+installer writes; see `LINUX_SERVER.md`.

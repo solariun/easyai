@@ -23,6 +23,9 @@ const char   kFoldTo[]   = {'a','a','a','a','a','e','e','e','e','i','i','i','i',
 
 // Call words, with the spellings whisper gives them: "O easyai" for "oi easyai", "Em" / "É e" for "ei", "hoy", "High" for "hi".
 const char * kWakePrefixes[] = {"hey", "hi", "high", "oi", "o", "oh", "hoy", "ei", "em", "ok", "ola", "alo", "e", "a"};
+// The default call words and the spellings whisper tiny/base gave them for Kokoro "Hello Max" / "Olá Max" / "Alô Max"
+// (2026-10-17): "Hello", "Olá", "Ola", "A lo", "Allo", "Elo", "Elomax" (glued).
+const char * kCallWords[] = {"hello", "olá", "alô", "hallo", "hola", "halo", "allo", "elo", "ola", "alo"};
 // Spellings the small whisper models produce for the built-in names in pt-BR / en.
 const char * kEasyAliases[] = {"izi", "isi", "eaz", "iase", "ize", "easi", "izy", "esy", "ísi", "hizi", "iz", "asse", "ase", "aise", "azi", "izze"};
 const char * kMaxAliases[]  = {"maks", "macs", "mex", "mac", "mach", "maxx", "marx", "máx", "mas"};
@@ -145,17 +148,28 @@ std::vector<std::string> default_aliases(const std::string & name) {
     return out;
 }
 
+std::vector<std::string> default_call_words() {
+    std::vector<std::string> out;
+    for (const char * c : kCallWords) out.push_back(c);
+    return out;
+}
+
 std::string spoken_name(const std::string & name, const std::string & lang) {
     const std::string nm = no_spaces(normalize_text(name));
     for (const auto & sn : kSpokenNames) if (nm == sn.name) return lang == "pt" ? sn.pt : sn.en;
     return name;
 }
 
-WakeResult wake_match(const std::string & transcript, const std::string & name, const std::vector<std::string> & aliases) {
+WakeResult wake_match(const std::string & transcript, const std::string & name, const std::vector<std::string> & aliases,
+                      const std::vector<std::string> & call_words) {
     WakeResult r;
     const auto w = words(normalize_text(transcript));
     const std::string nm = no_spaces(normalize_text(name));
     if (w.empty() || nm.empty()) return r;
+    std::vector<std::string> calls;
+    for (const auto & c : call_words) { const std::string n = normalize_text(c); if (!n.empty()) calls.push_back(n); }
+    const bool strict = !calls.empty();                 // a call word is required, the bare name never wakes
+    if (!strict) for (const char * p : kWakePrefixes) calls.push_back(p);
     const int max_edits = (int) nm.size() >= kLongNameChars ? kNameMaxEditsLong : kNameMaxEdits;
     std::vector<std::string> al;
     for (const auto & a : aliases) al.push_back(no_spaces(normalize_text(a)));
@@ -174,12 +188,11 @@ WakeResult wake_match(const std::string & transcript, const std::string & name, 
         return 0;
     };
     for (std::size_t i = 0; i < w.size(); ++i) {
-        bool prefixed = (i == 0);
-        if (i > 0) for (const char * p : kWakePrefixes) if (w[i - 1] == p) { prefixed = true; break; }
+        bool prefixed = (i == 0 && !strict);
+        if (i > 0) for (const auto & p : calls) if (w[i - 1] == p || (i > 1 && w[i - 2] + w[i - 1] == p)) { prefixed = true; break; }   // "A lo Max"
         std::size_t used = prefixed ? name_words_at(i) : 0;
-        if (used == 0) {   // the call word glued to the name: "oiasse", "heyeasy", "oisiai" (two-letter call words and longer only)
-            for (const char * p : kWakePrefixes) {
-                const std::string ps = p;
+        if (used == 0) {   // the call word glued to the name: "hellomax", "elomax", "oisiai" (two-letter call words and longer only)
+            for (const auto & ps : calls) {
                 if (ps.size() < 2) continue;
                 if (w[i].size() > ps.size() + 1 && w[i].compare(0, ps.size(), ps) == 0 && is_name(w[i].substr(ps.size()))) { used = 1; break; }
             }
@@ -285,6 +298,27 @@ std::vector<std::int16_t> make_off_sound(int rate_hz) {
             out.push_back((std::int16_t) (kBeepAmp * env * std::sin(2 * kPi * hz * (double) i / rate_hz) * 32767.0));
         }
     return out;
+}
+
+std::vector<std::int16_t> make_think_sound(int rate_hz) {
+    std::vector<std::int16_t> out;
+    const std::size_t tone = (std::size_t) rate_hz * kThinkToneMs / kMsPerSecond;
+    for (int hz : kThinkHz)
+        for (std::size_t i = 0; i < tone; ++i) {
+            const double env = std::sin(kPi * (double) i / (double) tone);
+            out.push_back((std::int16_t) (kThinkAmp * env * std::sin(2 * kPi * hz * (double) i / rate_hz) * 32767.0));
+        }
+    return out;
+}
+
+void apply_gain_db(std::vector<std::int16_t> & pcm, int db) {
+    if (db == 0) return;
+    db = std::max(kMicGainMinDb, std::min(kMicGainMaxDb, db));
+    const double g = std::pow(10.0, db / 20.0);
+    for (auto & v : pcm) {
+        const double x = v * g;
+        v = (std::int16_t) std::max(-32768.0, std::min(32767.0, x));
+    }
 }
 
 std::vector<std::int16_t> make_beep(int rate_hz, int count) {

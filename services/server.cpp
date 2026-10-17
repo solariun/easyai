@@ -111,6 +111,9 @@ constexpr std::string_view kBrandSvg = R"SVG(<svg xmlns="http://www.w3.org/2000/
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <sys/stat.h>
+#include <initializer_list>
+#include <map>
 #include <thread>
 #include <dirent.h>      // opendir/readdir for fd-count
 #include <sys/resource.h>// getrusage, RLIMIT_NOFILE
@@ -1553,6 +1556,7 @@ struct ServerCtx {
     std::unique_ptr<easyai::ModelsEngine> models;
     std::string                webui_password;  // empty = /models auth disabled
     std::string                session_token;   // random; expected cookie value
+    std::string                config_path;     // the INI the dashboard's Services tab edits
 
     // INI config (default: /etc/easyai/easyai.ini). Loaded at start-up;
     // empty if the file is missing. The MCP auth lookup table is built
@@ -5175,6 +5179,11 @@ static ordered_json endpoint_directory(const ServerCtx & ctx, const ServerArgs &
     add("Models API",        "GET",  "/models/api/stt",         ui_auth, "voice model: current, local, catalogue");
     add("Models API",        "POST", "/models/api/stt/run",     ui_auth, "hot-swap the voice model {name, link}");
     add("Models API",        "POST", "/models/api/stt/download", ui_auth, "download a whisper model {name}");
+    add("Models API",        "GET",  "/models/api/services",    ui_auth, "systemd state of easyai-server / easyai-assistant + config file info");
+    add("Models API",        "POST", "/models/api/services/action", ui_auth, "start | stop | restart one of the two units {name, action}");
+    add("Models API",        "GET",  "/models/api/services/log", ui_auth, "journal tail of a unit ?name=&lines=");
+    add("Models API",        "GET",  "/models/api/config",      ui_auth, "the INI file (server + assistant sections) as text");
+    add("Models API",        "POST", "/models/api/config",      ui_auth, "save the INI file {text}: checked, previous copy kept; restart to apply");
     return e;
 }
 
@@ -5246,6 +5255,105 @@ static bool models_require_auth(const ServerCtx & ctx,
                     "application/json");
     return false;
 }
+
+// ============================================================================
+// Services + configuration administration (dashboard "Services" tab):
+// GET  /models/api/services         systemd state of the two units + config file info
+// POST /models/api/services/action  {name, action: start|stop|restart}
+// GET  /models/api/services/log     ?name=&lines=   journalctl tail
+// GET  /models/api/config           the INI text
+// POST /models/api/config           {text} → validated, previous copy kept, atomic replace
+// systemctl is called as the service user: the installer's polkit rule lets
+// `easyai` manage exactly these two units, so no sudo and no root here.
+// ============================================================================
+namespace admin {
+
+const char * const kUnits[] = {"easyai-server", "easyai-assistant"};
+constexpr int         kCmdTimeoutMs     = 8000;
+constexpr int         kLogLinesDefault  = 60;
+constexpr int         kLogLinesMax      = 500;
+constexpr std::size_t kConfigMaxBytes   = 1u << 20;   // 1 MiB: an INI is never this big
+constexpr int         kSelfRestartDelayMs = 400;      // let the HTTP reply leave before we go down
+
+static bool unit_ok(const std::string & n) { for (const char * u : kUnits) if (n == u) return true; return false; }
+
+static std::string find_tool(std::initializer_list<const char *> paths) {
+    for (const char * p : paths) if (::access(p, X_OK) == 0) return p;
+    return "";
+}
+static std::string systemctl_bin()  { return find_tool({"/usr/bin/systemctl", "/bin/systemctl"}); }
+static std::string journalctl_bin() { return find_tool({"/usr/bin/journalctl", "/bin/journalctl"}); }
+
+static nlohmann::json service_status(const std::string & name) {
+    nlohmann::json j;
+    j["name"] = name; j["unit"] = name + ".service";
+    const std::string sc = systemctl_bin();
+    if (sc.empty()) { j["state"] = "unknown"; j["error"] = "systemctl not found (no systemd on this host)"; return j; }
+    std::string out, err;
+    const int rc = easyai::run_capture({sc, "show", name + ".service", "-p",
+                                        "LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp,MainPID,Description"},
+                                       "", out, err, kCmdTimeoutMs);
+    if (rc != 0) { j["state"] = "unknown"; j["error"] = err.empty() ? "systemctl show failed" : err; return j; }
+    std::map<std::string, std::string> kv;
+    std::istringstream is(out); std::string line;
+    while (std::getline(is, line)) {
+        const auto eq = line.find('=');
+        if (eq != std::string::npos) kv[line.substr(0, eq)] = line.substr(eq + 1);
+    }
+    j["loaded"]      = kv["LoadState"] == "loaded";
+    j["state"]       = kv["LoadState"] == "loaded" ? kv["ActiveState"] : "not-installed";
+    j["sub"]         = kv["SubState"];
+    j["enabled"]     = kv["UnitFileState"];
+    j["since"]       = kv["ActiveEnterTimestamp"];
+    j["pid"]         = std::atoi(kv["MainPID"].c_str());
+    j["description"] = kv["Description"];
+    return j;
+}
+
+// A quick syntax pass so a typo cannot take both services down at the next
+// start: every non-blank line is a comment, a [section] or key = value.
+static bool ini_text_check(const std::string & text, std::string & err) {
+    std::istringstream is(text); std::string line; int n = 0;
+    while (std::getline(is, line)) {
+        ++n;
+        const auto a = line.find_first_not_of(" \t\r");
+        if (a == std::string::npos) continue;
+        const std::string t = line.substr(a);
+        if (t[0] == '#' || t[0] == ';') continue;
+        if (t[0] == '[') { if (t.find(']') == std::string::npos) { err = "line " + std::to_string(n) + ": section header without ']'"; return false; } continue; }
+        const auto eq = t.find('=');
+        if (eq == std::string::npos || eq == 0) { err = "line " + std::to_string(n) + ": expected [section], key = value, or a # comment"; return false; }
+    }
+    return true;
+}
+
+// Previous content → <path>.prev, new content → <path>.tmp, rename over the
+// original (atomic). When the directory refuses new files, write in place.
+static bool write_config(const std::string & path, const std::string & text, std::string & err, std::string & backup) {
+    backup.clear();
+    std::string old;
+    { std::ifstream in(path, std::ios::binary); if (in) old.assign(std::istreambuf_iterator<char>(in), {}); }
+    if (!old.empty()) {
+        std::ofstream b(path + ".prev", std::ios::binary | std::ios::trunc);
+        if (b && (b << old)) backup = path + ".prev";
+    }
+    struct stat st{}; const bool had = ::stat(path.c_str(), &st) == 0;
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
+        if (o && (o << text)) {
+            o.close();
+            if (had) ::chmod(tmp.c_str(), st.st_mode & 07777);
+            if (std::rename(tmp.c_str(), path.c_str()) == 0) return true;
+            std::remove(tmp.c_str());
+        }
+    }
+    std::ofstream o(path, std::ios::binary | std::ios::trunc);   // directory not writable: in place
+    if (!o || !(o << text)) { err = "cannot write " + path + ": " + std::strerror(errno); return false; }
+    return true;
+}
+
+}  // namespace admin
 
 int main(int argc, char ** argv) {
     ServerArgs args = parse_args(argc, argv);
@@ -8088,6 +8196,7 @@ int main(int argc, char ** argv) {
         }
         ctx->webui_password = args.webui_password;
         ctx->session_token  = gen_session_token();
+        ctx->config_path    = args.config_path;
         ServerCtx * ctxp = ctx.get();
         ctx->models = std::make_unique<easyai::ModelsEngine>(
             dl_dir, &ini_config,
@@ -8626,6 +8735,102 @@ int main(int argc, char ** argv) {
         res.set_content(ctx_ref.models->system_json(httplib::detail::params_to_query_str(req.params)),
                         "application/json");
     });
+    // ---- Services tab: systemd state, start/stop/restart, journal, INI editor ----
+    svr.Get("/models/api/services", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        nlohmann::json j;
+        const bool systemd = !admin::systemctl_bin().empty();
+        j["manager"]   = systemd ? "systemd" : "none";
+        j["available"] = systemd;
+        j["self"]      = "easyai-server";
+        j["services"]  = nlohmann::json::array();
+        for (const char * u : admin::kUnits) j["services"].push_back(admin::service_status(u));
+        struct stat st{};
+        const bool exists = ::stat(ctx_ref.config_path.c_str(), &st) == 0;
+        j["config"] = {{"path", ctx_ref.config_path}, {"exists", exists},
+                       {"writable", ::access(ctx_ref.config_path.c_str(), W_OK) == 0}};
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Get("/models/api/services/log", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        const std::string name = req.get_param_value("name");
+        int lines = req.has_param("lines") ? std::atoi(req.get_param_value("lines").c_str()) : admin::kLogLinesDefault;
+        lines = std::max(1, std::min(admin::kLogLinesMax, lines));
+        if (!admin::unit_ok(name)) { res.status = 400; res.set_content(error_json("unknown service"), "application/json"); return; }
+        nlohmann::json j; j["name"] = name; j["lines"] = nlohmann::json::array();
+        const std::string jc = admin::journalctl_bin();
+        std::string out, err;
+        if (jc.empty()) j["error"] = "journalctl not found";
+        else if (easyai::run_capture({jc, "-u", name + ".service", "-n", std::to_string(lines), "--no-pager", "-o", "short-iso"},
+                                     "", out, err, admin::kCmdTimeoutMs) != 0)
+            j["error"] = err.empty() ? "journalctl failed (is the service user in the systemd-journal group?)" : err;
+        std::istringstream is(out); std::string line;
+        while (std::getline(is, line)) j["lines"].push_back(line);
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Post("/models/api/services/action", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        std::string name, action;
+        try { auto j = nlohmann::json::parse(req.body); name = j.value("name", ""); action = j.value("action", ""); }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
+        if (!admin::unit_ok(name) || (action != "start" && action != "stop" && action != "restart")) {
+            res.status = 400; res.set_content(error_json("name must be easyai-server or easyai-assistant, action start|stop|restart"), "application/json"); return;
+        }
+        const std::string sc = admin::systemctl_bin();
+        if (sc.empty()) { res.status = 501; res.set_content(error_json("no systemd on this host", "not_implemented"), "application/json"); return; }
+        if (name == "easyai-server" && action != "start") {
+            // ourselves: answer first, then let systemd take us down and bring us back
+            std::thread([sc, name, action] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(admin::kSelfRestartDelayMs));
+                std::string out, err;
+                easyai::run_capture({sc, action, name + ".service"}, "", out, err, admin::kCmdTimeoutMs);
+            }).detach();
+            nlohmann::json j; j["ok"] = true; j["note"] = "easyai-server: " + action + " requested — this page reconnects when it is back";
+            res.set_content(j.dump(), "application/json");
+            return;
+        }
+        std::string out, err;
+        const int rc = easyai::run_capture({sc, action, name + ".service"}, "", out, err, admin::kCmdTimeoutMs);
+        if (rc != 0) {
+            res.status = 500;
+            res.set_content(error_json("systemctl " + action + " " + name + " failed: " + (err.empty() ? "exit " + std::to_string(rc) : err)
+                                       + " — the installer's polkit rule /etc/polkit-1/rules.d/50-easyai-services.rules lets the service user manage these units",
+                                       "server_error"), "application/json");
+            return;
+        }
+        nlohmann::json j; j["ok"] = true; j["service"] = admin::service_status(name);
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Get("/models/api/config", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        nlohmann::json j; j["path"] = ctx_ref.config_path;
+        std::string text;
+        struct stat st{};
+        const bool exists = ::stat(ctx_ref.config_path.c_str(), &st) == 0;
+        if (exists) { std::ifstream in(ctx_ref.config_path, std::ios::binary); if (in) text.assign(std::istreambuf_iterator<char>(in), {}); }
+        j["exists"]   = exists;
+        j["writable"] = exists ? ::access(ctx_ref.config_path.c_str(), W_OK) == 0
+                               : ::access(ctx_ref.config_path.substr(0, ctx_ref.config_path.find_last_of('/')).c_str(), W_OK) == 0;
+        j["text"]     = text;
+        j["bytes"]    = text.size();
+        j["mtime"]    = exists ? (long long) st.st_mtime : 0;
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Post("/models/api/config", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        std::string text;
+        try { auto j = nlohmann::json::parse(req.body); if (!j.contains("text") || !j["text"].is_string()) throw 0; text = j["text"].get<std::string>(); }
+        catch (...) { res.status = 400; res.set_content(error_json("body must be {\"text\": \"...\"}"), "application/json"); return; }
+        if (text.size() > admin::kConfigMaxBytes) { res.status = 413; res.set_content(error_json("config larger than 1 MiB"), "application/json"); return; }
+        std::string err, backup;
+        if (!admin::ini_text_check(text, err)) { res.status = 400; res.set_content(error_json("not saved — " + err), "application/json"); return; }
+        if (!admin::write_config(ctx_ref.config_path, text, err, backup)) { res.status = 500; res.set_content(error_json(err, "server_error"), "application/json"); return; }
+        std::fprintf(stderr, "[easyai-server] config: %s saved from the dashboard (%zu bytes%s)\n", ctx_ref.config_path.c_str(), text.size(),
+                     backup.empty() ? "" : (", previous copy " + backup).c_str());
+        nlohmann::json j; j["ok"] = true; j["bytes"] = text.size(); j["backup"] = backup; j["path"] = ctx_ref.config_path;
+        res.set_content(j.dump(), "application/json");
+    });
+
     // Comprehensive runtime status for the dashboard's Status tab: process,
     // running model + live execution, active parameters, enabled services +
     // tool catalogue, request/process metrics, hardware, catalog + download.

@@ -84,7 +84,7 @@
 #                                                    #   below; also --whisper-ref)
 #   ./install_easyai_server.sh --no-whisper          # skip voice transcription (whisper.cpp)
 #   ./install_easyai_server.sh --no-assistant        # skip easyai-assistant.service (voice assistant on
-#                                                    #   the box's mic/speaker; --assistant-name easyai)
+#                                                    #   the box's mic/speaker; --assistant-name max)
 #   ./install_easyai_server.sh --no-piper            # skip piper TTS (the fallback voice)
 #   ./install_easyai_server.sh --no-kokoro           # skip Kokoro-82M, the natural voice (in-process C++,
 #                                                    #   onnxruntime lib + espeak-ng; --kokoro-voice-pt pm_santa)
@@ -326,11 +326,11 @@ stt_model="large-v3-turbo-q5_0"               # whisper model downloaded at inst
 stt_hf_repo="ggerganov/whisper.cpp"
 stt_lfs_pointer_max_bytes=4096                # a Git LFS pointer file is ~130 bytes; real weights are MBs
 do_assistant=1                                # easyai-assistant.service: voice assistant on the box's own mic
-                                              # and speaker ("hey easy AI"). Needs whisper. --no-assistant skips.
-assistant_name="easyai"                          # --assistant-name <name>: wake word "hey <name>" / "oi <name>"
+                                              # and speaker ("hello max"). Needs whisper. --no-assistant skips.
+assistant_name="max"                          # --assistant-name <name>: wake word "hey <name>" / "oi <name>"
 assistant_service="easyai-assistant.service"
 wake_model="base"                             # small whisper for the wake word (ggml-base.bin, 142 MB; tiny
-                                              # mishears a pt-BR "oi easyai" too often)
+                                              # mishears a pt-BR "olá max" too often)
 do_piper=1                                    # piper TTS for POST /v1/audio/speech (male voices: pt_BR faber,
                                               # en_US ryan). --no-piper → the server has no voice (503).
 piper_version="2023.11.14-2"                  # github.com/rhasspy/piper release
@@ -1736,18 +1736,23 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 # ============================================================
 # [ASSISTANT] — easyai-assistant.service (voice assistant)
 # ============================================================
-# Always listening on this box's microphone. "hey <name>" / "oi <name>" wakes
-# it, a pause of pause_ms ends the question, the answer is spoken sentence by
-# sentence. Every key is also a flag (--<key with dashes>); flags win over
+# Always listening on this box's microphone. "hello <name>" / "olá <name>" wakes
+# it, a pause of pause_ms ends the question (a short rising sound says the
+# question was taken), the answer is spoken sentence by sentence and a beep
+# says it listens again. The dashboard (/models → Services) edits this file
+# and restarts the service. Every key is also a flag (--<key with dashes>); flags win over
 # this file. `easyai-assistant --list-options` prints every option with the
 # value in effect; `easyai-assistant --text "question"` tests the chat and
 # voice path without a microphone.
 #
-#   name            wake name: "hey <name>", "oi <name>", "ei <name>", "ok <name>". The default
-#                   easyai is said "hey easy AI" / "oi ísi ai"; whisper may write it as two or
-#                   three words ("easy a i"), the matcher joins them
-#   name_aliases    csv of spellings whisper produces for the name (for "easyai": iziai, isia,
-#                   ziai... are built in); run with verbose = 1 and read the "heard:" lines
+#   name            wake name, said right after a call word: "hello <name>", "olá <name>"
+#   call_words      csv of the words that must come right before the name (default hello, olá,
+#                   alô, hallo, hola — whisper's spellings of them are built in). Empty = loose
+#                   mode: hey/oi/… or the bare name wake it, which fires on ordinary talk
+#   name_aliases    csv of spellings whisper produces for the name (max, easy and easyai have
+#                   built-in ones); run with verbose = 1 and read the "heard:" lines
+#   mic_gain_db     software gain on the microphone, -30..30 dB (0 = as captured). Negative when
+#                   the room saturates the input (levels near 0 dB in the verbose log)
 #   greeting        en | pt | off — spoken once at start-up: the assistant is online and how to call it
 #   endpoint        OpenAI-compatible base URL for chat (this server, llama-server, OpenAI)
 #   api_key         Bearer token; the unit passes the server's key as EASYAI_API_KEY
@@ -1776,7 +1781,9 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 #   tls_insecure    1 = skip certificate verification (self-signed endpoint)
 [ASSISTANT]
 name            = $assistant_name
+call_words      = hello, olá, alô, hallo, hola
 # name_aliases    =
+mic_gain_db     = 0
 greeting        = en
 endpoint        = http://127.0.0.1:$service_port
 # api_key         =
@@ -2247,11 +2254,16 @@ reasoning        = off
 # mcp_allowed = rag_*, datetime, search_web, fetch_web
 # mcp_denied  = bash, write_file
 INI_FILE
-        sudo chmod 640 "$ini_file"
         sudo chown root:"$service_group" "$ini_file"
     else
         log "$ini_file exists — leaving operator edits in place (pass --force to overwrite)"
     fi
+    # The dashboard's Services tab (easyai-server, user $service_user) edits this
+    # file: group-writable file, group-writable directory for the atomic
+    # replace (<ini>.tmp → rename) and the previous copy (<ini>.prev).
+    sudo chmod 660 "$ini_file"
+    sudo chown root:"$service_group" "$config_dir"
+    sudo chmod 2770 "$config_dir"
 
     # ---- favicon: copy operator-supplied icon to /etc/easyai/favicon
     #              and let the unit point easyai-server at it -----------
@@ -2625,7 +2637,7 @@ WorkingDirectory=$service_home
 # Render / video groups give the service access to /dev/dri/* (GPU). The
 # usermod step above adds them to the user, but baking them into the unit
 # means they apply even if the user gets recreated.
-SupplementaryGroups=render video
+SupplementaryGroups=render video systemd-journal
 
 # Make the service much less likely to be picked by the OOM killer when
 # RAM gets tight (model + KV + activations dominate the box's footprint).
@@ -2695,7 +2707,7 @@ UNIT
         log "writing /etc/systemd/system/$assistant_service"
         sudo tee "/etc/systemd/system/$assistant_service" >/dev/null <<AUNIT
 [Unit]
-Description=easyai voice assistant ("hey $assistant_name" on this box's microphone)
+Description=easyai voice assistant ("hello $assistant_name" on this box's microphone)
 Documentation=https://github.com/solariun/easy
 After=easyai-server.service sound.target
 Wants=easyai-server.service
@@ -2770,6 +2782,31 @@ AUNIT
             warn "  This silently strips --external-tools / --RAG / … from the running server."
             warn "  Either remove it (sudo rm '$f') or merge the new flags into it manually."
         done < <(sudo grep -lE '^[[:space:]]*ExecStart=' "$dropin_dir"/*.conf 2>/dev/null || true)
+    fi
+
+    # ---- polkit: let the service user start/stop/restart the two units ----
+    # The dashboard's Services tab calls `systemctl <verb> easyai-*.service`
+    # as $service_user; systemd asks polkit, this rule answers yes for
+    # exactly these two units and nothing else. No sudo, no root in the
+    # server. journalctl for the Log button needs the systemd-journal group.
+    log "writing /etc/polkit-1/rules.d/50-easyai-services.rules"
+    sudo mkdir -p /etc/polkit-1/rules.d
+    sudo tee /etc/polkit-1/rules.d/50-easyai-services.rules >/dev/null <<PKRULES
+// Installed by install_easyai_server.sh: the easyai dashboard (user
+// $service_user) may manage its own two units through systemctl.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "$service_user") {
+        var unit = action.lookup("unit");
+        if (unit == "$service_name" || unit == "$assistant_service") {
+            return polkit.Result.YES;
+        }
+    }
+});
+PKRULES
+    sudo chmod 644 /etc/polkit-1/rules.d/50-easyai-services.rules
+    if getent group systemd-journal >/dev/null; then
+        sudo usermod -aG systemd-journal "$service_user" || true
     fi
 
     sudo systemctl daemon-reload

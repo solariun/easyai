@@ -1560,9 +1560,10 @@ syntax check of the page script clean.
 ## easyai-assistant — voice assistant service + `/v1/audio/speech` (AUTHORITATIVE — 2026-10-16)
 
 **Plain words.** A separate program, `easyai-assistant`, that listens on the
-machine's own microphone all the time, wakes up when it hears its name
-("hey easy AI", "oi ísi ai" — the default name is `easyai`; "ei", "ok"
-work too), records the question until
+machine's own microphone all the time, wakes up when it hears a call
+word and its name ("hello Max", "olá Max" — the default name is `max`,
+the call words are configurable), plays a short rising sound when it
+takes the question, records the question until
 the speaker pauses for 1.5 s, sends the audio to a speech-to-text
 endpoint, sends the text to a chat endpoint with its own short-answer
 system prompt, and speaks the answer back with a male voice, sentence by
@@ -1612,10 +1613,23 @@ flowchart LR
    local whisper model `[ASSISTANT] wake_model` (default
    `models/stt/ggml-base.bin`, 142 MB; tiny was measured too weak for a
    pt-BR call through a room). The transcript is lower-cased, punctuation stripped, and
-   matched by `wake_match(text, name, aliases)`: a prefix token in
-   `{hey, hi, high, oi, o, oh, hoy, ei, em, ok, olá, ola, alô, alo, e, a}`
-   (whisper writes "oi" as "O", "ei" as "Em" / "É e", "hi" as "High")
-   followed by the name. The name may come back as one word or as up to
+   matched by `wake_match(text, name, aliases, call_words)`: one of the
+   **call words** followed by the name. `[ASSISTANT] call_words` (csv,
+   default `hello, olá, alô, hallo, hola`) is strict: the name only
+   wakes right after one of them, never alone; each built-in call word
+   carries the spellings whisper gives it (`default_call_words()`:
+   hello, olá, alô, hallo, hola, halo, allo, elo, ola, alo; "A lo Max"
+   with the call word split in two is joined). An empty list restores
+   the loose pre-2026-10-17 set `{hey, hi, high, oi, o, oh, hoy, ei,
+   em, ok, olá, ola, alô, alo, e, a}` (whisper writes "oi" as "O", "ei"
+   as "Em" / "É e", "hi" as "High") and lets the bare name at the start
+   wake too. Strict is the default because the loose set plus a short
+   name fired on ordinary talk ("e mais", "o máximo"): measured
+   2026-10-17 with Kokoro through whisper tiny and base, "Hello Max"
+   came back as "Hello Max" 9 of 9 times in en, "Olá Max" as "Olá Max",
+   "Elo Max", "Elomax", "Allo Max", "A lo Max" (all matched, one "O
+   Lamá X" lost), and "Mas eu acho que o máximo é dez, mais ou menos" /
+   "The maximum is ten and max out the volume" do not wake. The name may come back as one word or as up to
    `kMaxNameWords = 3` consecutive words ("easy ai", "easy a i"): the
    words are joined, longest join first, and the join is the name when
    its Levenshtein distance is ≤ `kNameMaxEdits = 1`, or ≤
@@ -1623,7 +1637,7 @@ flowchart LR
    one of the aliases (spaces ignored): built-in for `easyai` (`iziai,
    isiai, isia, ziai, siai, ezi, easya, gisiai, ijazia, izai, isai,
    easyeye, easyay`), `easy` and `max`, plus `[ASSISTANT] name_aliases`.
-   The words after the join are the question, so "hey easy AI what time
+   The words after the join are the question, so "hello easy AI what time
    is it" asks "what time is it". A call word glued to the name
    ("oiasse", "heyeasy", "oisiai") matches too, for call words of two
    letters or more. Measured 2026-10-16 with Kokoro saying the default
@@ -1635,7 +1649,7 @@ flowchart LR
    "O irreaziai", is not and is left out on purpose). Writing the name
    `easyai` as one word mis-leads Kokoro's phonemizer ("isae"), so the
    greeting spells it through `spoken_name(name, lang)`: "easy AI" for
-   en, "ísi ai" for pt; other names are spoken as written. Every
+   en, "ísi ai" for pt; other names (`max`) are spoken as written. Every
    transcription (local wake model and `/v1/audio/transcriptions`)
    carries the whisper prompt "O assistente chama-se <spoken en>. The
    assistant is called <spoken en>." (`Stt::transcribe(..., prompt,
@@ -1654,6 +1668,20 @@ flowchart LR
    otherwise the assistant beeps (`kBeepHz = 880`, `kBeepMs = 120`,
    generated, no file) and listens. Without a wake model the burst goes
    to the STT endpoint instead (`wake_model = server`).
+3a. **Processing sound.** The moment the question is taken (the pause
+   ended, or the name and the question came in one breath) the
+   assistant plays `make_think_sound`: a rising C6–E6–G6 arpeggio
+   (`kThinkHz = {1047, 1319, 1568}`, `kThinkToneMs = 45` each, half-sine
+   envelope, `kThinkAmp = 0.22`, 135 ms in all), then transcribes. It is
+   the third sound and means "got it, working": the single beep means
+   "speak now", the falling two-tone means "done". Capture is flushed
+   after it like after every sound.
+3b. **Microphone gain.** `[ASSISTANT] mic_gain_db` (default 0, bounded
+   to `kMicGainMinDb = -30` … `kMicGainMaxDb = 30`) is a software gain
+   applied to every period before the VAD and the wake model
+   (`apply_gain_db`: ×10^(dB/20), clipped to int16). It does not undo a
+   saturated hardware input — for that lower the ALSA capture volume —
+   but it lets a quiet or a hot room be levelled from the INI.
 4. **Transcription.** The recorded utterance is sent as PCM16 WAV to
    `stt_endpoint` (default: `endpoint`) `POST /v1/audio/transcriptions`
    multipart, `response_format=verbose_json`, `prompt` (the sentence
@@ -1668,9 +1696,15 @@ flowchart LR
    streaming. System prompt = `[ASSISTANT] system` (file or inline)
    else the built-in `kAssistantSystem`: answer in ≤ 3 sentences unless
    asked for detail, same language as the question, no lists, no
-   markdown, no reasoning or preamble, and before calling any tool say
+   markdown, no reasoning or preamble, before calling any tool say
    one short sentence naming it ("Vou consultar a ferramenta X." /
-   "Let me check X."). The request carries
+   "Let me check X."), never cite where an answer came from (no
+   sources, sites, links or tool names in the answer itself), and use
+   the internal clock for date and time questions. The **internal
+   clock**: every turn the system prompt is re-set to the base prompt
+   plus `clock_line()` — "Internal clock: Friday, 2026-10-17 14:32
+   (-03)." from `localtime` — so "que horas são" is answered without a
+   tool and a long-running process never drifts. The request carries
    `chat_template_kwargs: {"enable_thinking": false}` and
    `reasoning_effort: "low"`; a server that ignores them still works.
    Tools: `[ASSISTANT] tools` (csv, default `datetime,web`) plus
@@ -1710,13 +1744,12 @@ flowchart LR
    every beep, after the greeting and after each answer (on the box the
    beep itself came back as a "question" before this).
 6b. **Greeting.** `[ASSISTANT] greeting = en|pt|off` (default `en`):
-   once the microphone is open the assistant says "The easy AI assistant
-   is online. Say 'hey easy AI' and ask your question." (pt: "O
-   assistente ísi ai está no ar. Diga 'oi ísi ai' e faça a sua
-   pergunta."), the name through `spoken_name`, so a restart proves the
-   voice path end to end. Whisper base transcribes both greetings with
-   the name intact ("The Easy AI Assistant is online…", "O assistente
-   Isia está no ar…").
+   once the microphone is open the assistant says "The max assistant
+   is online. Say 'hello max' and ask your question." (pt: "O
+   assistente max está no ar. Diga 'olá max' e faça a sua pergunta."),
+   the name through `spoken_name`, the call word "hello" / "olá" (or
+   "hey" / "oi" when `call_words` is empty), so a restart proves the
+   voice path end to end.
 7. **Availability.** Endpoint down or non-2xx: spoken "servidor
    indisponível" / "server unavailable" once per outage (language =
    `[ASSISTANT] language` when not `auto`, else the last heard one, else
@@ -1726,11 +1759,12 @@ flowchart LR
    answer (test mode for the chat and voice path).
 8. **Config.** `[ASSISTANT]` section of the same INI file as the server
    (`/etc/easyai/easyai.ini`, `--config`), every key with a CLI flag:
-   `name`, `endpoint`, `api_key`, `model`, `stt_endpoint`, `tts_endpoint`,
-   `language`, `pause_ms`, `max_listen_ms`, `wake_model`, `mic`,
-   `speaker`, `tts`, `voice_pt`, `voice_en`, `piper`, `tools`,
-   `external_tools`, `system`, `history_turns`, `history_idle_s`,
-   `verbose`.
+   `name`, `call_words`, `name_aliases`, `greeting`, `endpoint`,
+   `api_key`, `model`, `stt_endpoint`, `tts_endpoint`, `language`,
+   `pause_ms`, `followup_ms`, `max_listen_ms`, `wake_model`, `mic`,
+   `mic_gain_db`, `speaker`, `tts`, `voice_pt`, `voice_en`, `piper`,
+   `kokoro_model`, `kokoro_voices`, `tools`, `external_tools`, `system`,
+   `history_turns`, `history_idle_s`, `verbose`, `tls_insecure`.
 
 ### Rules — server
 
@@ -1793,6 +1827,32 @@ flowchart LR
     (boolean) in the request body sets the engine flag for that request
     under the engine lock and restores the server default after it, same
     pattern as `reasoning_effort`. Absent → server default.
+12a. **Services tab** (dashboard `/models` → Services; routes gated like
+   the rest of `/models/api`). `GET /models/api/services` → `manager`
+   (`systemd` | `none`), one entry per unit (`easyai-server`,
+   `easyai-assistant`) from `systemctl show -p LoadState,ActiveState,
+   SubState,UnitFileState,ActiveEnterTimestamp,MainPID`, and the config
+   file's `path` / `exists` / `writable`. `POST /models/api/services/
+   action {name, action}` runs `systemctl start|stop|restart <unit>` as
+   the service user; the installer's polkit rule
+   `/etc/polkit-1/rules.d/50-easyai-services.rules` answers yes for
+   `org.freedesktop.systemd1.manage-units` on exactly those two units
+   for that user, so there is no sudo and no root in the server. A
+   stop/restart of `easyai-server` itself answers first and runs the
+   command `kSelfRestartDelayMs = 400` later from a detached thread.
+   `GET /models/api/services/log?name=&lines=` is `journalctl -u <unit>
+   -n <lines> -o short-iso` (the unit runs with
+   `SupplementaryGroups=systemd-journal`). `GET /models/api/config`
+   returns the INI text; `POST /models/api/config {text}` (≤ 1 MiB)
+   checks every line is a comment, `[section]` or `key = value` (400
+   with the line number otherwise), keeps the previous content in
+   `<ini>.prev`, writes `<ini>.tmp` and renames it over the file
+   (atomic; in-place write when the directory refuses new files). The
+   installer makes the file `660` and the directory `2770`
+   (`root:easyai`) for that. Without systemd (macOS) the status reads
+   `unknown`, the buttons are disabled with 501, and the editor still
+   works. The page warns in the editor when the dashboard has no
+   password, because the file holds the API keys.
 12. **Surface.** `/health` adds `tts_available`, `tts_engine`;
     `/models/api/status.services` adds the same; the endpoint directory
     adds the `Audio` row for `/v1/audio/speech`; the chat UI gets a
@@ -1830,6 +1890,41 @@ flowchart LR
   list of them; the odd one-word spellings stay in the alias table like
   before. Rejected: a per-language name (one INI key, one name, is what
   was asked), phonetic matching (Soundex and friends are English-only).
+- **Strict call words, default "hello / olá"** (Gustavo, 2026-10-17:
+  "altere o nome para Hello Max, porque ainda está ativando muito").
+  The loose set (hey, oi, o, e, a, …) plus a three-letter name within
+  one edit woke on everyday Portuguese ("e mais", "o máximo"); one
+  required call word before the name is the cheapest filter and whisper
+  hears "hello" / "olá" reliably (measured above). `call_words` stays
+  configurable and an empty value keeps the old behaviour. Rejected: a
+  longer name (harder to say), a confidence threshold from whisper (not
+  exposed per word), a second confirmation beep before listening (slow).
+- **A third sound for "processing"** (Gustavo, 2026-10-17: "um tom bem
+  leve e prazeroso e moderno e rápido"). A 135 ms rising major arpeggio
+  at low amplitude: three notes read as "understood, working" and
+  cannot be confused with the single beep ("speak") or the falling pair
+  ("done"). Rejected: reusing the beep (one cue, two meanings, the
+  problem of the day before), a spoken "ok" (slower than the STT it
+  precedes).
+- **Internal clock in the prompt, not a tool call** (Gustavo,
+  2026-10-17: "sempre injetar a data atual e hora como o relógio
+  interno"). A tool round trip costs a second generation; the clock
+  line costs nothing and is always right. `datetime` stays in the tool
+  list for arithmetic (days until…), the prompt says not to call it for
+  the time. Sources are no longer cited in answers (same request): a
+  spoken answer with "according to…" is noise to the ear; the one
+  sentence announcing a tool stays as asked on 2026-10-16.
+- **Dashboard controls the two services through polkit** (Gustavo,
+  2026-10-17: edit both INIs and start/stop/restart from the server's
+  administration). The server runs as `easyai` under `NoNewPrivileges`
+  and a capability bounding set, which rules out sudo; a polkit rule
+  scoped to the two unit names is the designed way for an unprivileged
+  user to drive systemd, and keeps the server free of root. The INI is
+  one file for both services, so the editor is a text editor with a
+  syntax check, not a form (a form would have to know every key of two
+  programs and would hide what the operator typed). Rejected: a
+  setuid helper (more code to audit than a rule), a root-run sidecar,
+  sudoers (needs the unit's hardening relaxed).
 - **Whisper prompt instead of more aliases.** OpenAI's `prompt` /
   whisper.cpp `initial_prompt` is the documented way to teach whisper a
   proper noun; one sentence naming the assistant fixed the spelling of
@@ -1846,11 +1941,19 @@ flowchart LR
 
 ### Proof (2026-10-16, macOS; Linux box pending Gustavo's install)
 
-- ctest `assistant` (`tests/test_assistant.cpp`, 73 checks): `wake_match`
+- ctest `assistant` (`tests/test_assistant.cpp`, 100 checks): `wake_match`
   (accents, one-edit misspelling, call words, name first, name inside a
   sentence rejected, question after the name, the fourteen measured
   `easyai` transcripts, joined words excluded from the question, "it was
-  an easy day" / "this ai is easy" rejected, `spoken_name`), `SentenceChunker`
+  an easy day" / "this ai is easy" rejected, `spoken_name`, strict call
+  words on the eight measured "Hello / Olá / Elo / Elomax / Allo / A lo
+  Max" transcripts, the two false-positive sentences rejected, bare name
+  and "hey" rejected in strict mode, an operator list and the loose
+  mode, `make_think_sound` length and envelope, `apply_gain_db` +6 dB /
+  −6 dB / clipping / bounds), server admin endpoints exercised by hand on
+  macOS (manager `none`, 501 on an action, 400 on a foreign unit, config
+  round trip with `.prev` copy and mode 660 kept, a line without `=`
+  refused with its number), `SentenceChunker`
   ("3.14", "e.g.", short sentence rides to the newline, flush), VAD +
   `Segmenter` on 2 s noise → 800 ms tone → 1 s noise (one burst of
   pre-roll + tone + end silence, 38–41 speech periods, floor < −40 dB),

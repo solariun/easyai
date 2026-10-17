@@ -28,6 +28,8 @@ constexpr int    kMinSentenceChars = 24;
 constexpr int    kBeepHz          = 880;
 constexpr int    kBeepMs          = 120;
 constexpr int    kBeepGapMs       = 80;
+constexpr int    kMicGainMinDb    = -30;    // [ASSISTANT] mic_gain_db range (software gain on every period)
+constexpr int    kMicGainMaxDb    = 30;
 
 double rms_db(const std::int16_t * pcm, std::size_t n);
 
@@ -70,16 +72,23 @@ struct WakeResult {
     bool        matched = false;
     std::string question;   // words after the name (empty = just the call)
 };
-// "hey easyai what time is it" → matched, question "what time is it".
-// Accepts hey|hi|oi|o|ei|ok|ola|alo before the name; the name is one word
-// or up to kMaxNameWords consecutive words joined ("easy ai", "easy a i" →
+// "hello max what time is it" → matched, question "what time is it".
+// The name must follow one of `call_words` (default_call_words(): hello,
+// olá, alô, hallo, hola and the spellings whisper gives them); with an
+// empty list the loose built-in set hey|hi|oi|o|ei|ok|… is used and the
+// name alone at the start also wakes (the pre-2026-10-17 behaviour, kept
+// for operators who set call_words empty). The name is one word or up to
+// kMaxNameWords consecutive words joined ("easy ai", "easy a i" →
 // "easyai"; longest match first) within kNameMaxEdits (kNameMaxEditsLong
 // for long names) or equal to one of `aliases` (spaces ignored), the
-// spellings whisper produces for it ("iziai", "isia" for "easyai" said in
-// Portuguese). default_aliases(name) gives the built-in ones.
+// spellings whisper produces for it. default_aliases(name) gives the
+// built-in ones. A call word glued to the name ("hellomax", "elomax")
+// matches too.
 WakeResult wake_match(const std::string & transcript, const std::string & name,
-                      const std::vector<std::string> & aliases = {});
+                      const std::vector<std::string> & aliases = {},
+                      const std::vector<std::string> & call_words = {});
 std::vector<std::string> default_aliases(const std::string & name);
+std::vector<std::string> default_call_words();
 // How the voice should say the name so it sounds right: "easyai" is spelled
 // "easy AI" for an English voice and "ísi ai" for a Portuguese one (the
 // phonemizer reads "easyai" as one odd word). Other names come back as is.
@@ -108,6 +117,16 @@ std::string guess_language(const std::string & text);
 std::vector<std::int16_t> make_beep(int rate_hz, int count);
 // The "conversation over" sound: two falling tones (kOffHighHz then kOffLowHz).
 constexpr int kOffHighHz = 660, kOffLowHz = 440, kOffToneMs = 110;
+// The "processing" sound: a quick rising C6–E6–G6 arpeggio, soft and short
+// (kThinkToneMs each, kThinkAmp), played when the question is taken and the
+// transcription starts, so the ear knows the pause was understood.
+constexpr int    kThinkHz[]   = {1047, 1319, 1568};
+constexpr int    kThinkToneMs = 45;
+constexpr double kThinkAmp    = 0.22;
+std::vector<std::int16_t> make_think_sound(int rate_hz);
+// Software microphone gain: pcm *= 10^(db/20), clipped to int16; db is
+// bounded to [kMicGainMinDb, kMicGainMaxDb]. 0 leaves the samples alone.
+void apply_gain_db(std::vector<std::int16_t> & pcm, int db);
 std::vector<std::int16_t> make_off_sound(int rate_hz);
 
 // One line of /proc/asound/pcm: "01-00: ALC245 Analog : ALC245 Analog : playback 1 : capture 1".

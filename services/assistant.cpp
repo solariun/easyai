@@ -19,6 +19,7 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -26,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <fstream>
 #include <mutex>
@@ -62,12 +64,25 @@ const char * kAssistantSystem =
     "- Do not think out loud and do not explain your reasoning.\n"
     "- Before calling any tool, say one short sentence naming what you are about to use, in the user's language "
     "(for example \"Vou consultar a ferramenta de data e hora.\" or \"Let me check the web.\"), then call it.\n"
+    "- Never cite where an answer came from: no source names, sites, links or tool names in the answer itself.\n"
+    "- The internal clock below is the current local date and time; answer date and time questions from it, "
+    "without any tool.\n"
     "- If the question is unclear, ask one short question back.\n";
+
+// The internal clock, refreshed for every turn and appended to the system prompt.
+std::string clock_line() {
+    const std::time_t t = std::time(nullptr);
+    char buf[128];
+    std::strftime(buf, sizeof buf, "%A, %Y-%m-%d %H:%M (%Z)", std::localtime(&t));
+    return std::string("Internal clock: ") + buf + ".";
+}
 
 struct Args {
     std::string config = kDefaultConfig;
-    std::string name = "easyai";
+    std::string name = "max";
     std::string name_aliases;               // csv of spellings whisper produces for the name
+    std::string call_words = "hello, olá, alô, hallo, hola";   // csv; the name only wakes after one of these (empty = loose: hey/oi/… or bare name)
+    int         mic_gain_db = 0;            // software gain on the microphone, [kMicGainMinDb, kMicGainMaxDb]
     std::string greeting = "en";            // en | pt | off: spoken once at start-up
     std::string endpoint = kDefaultEndpoint, api_key, model = "default";
     std::string stt_endpoint, tts_endpoint;
@@ -90,8 +105,9 @@ struct Key { const char * flag; const char * ini; enum { S, I, B } type; void * 
 std::vector<Key> keys(Args & a) {
     return {
         {"--config",         nullptr,          Key::S, &a.config,         "INI file (default /etc/easyai/easyai.ini), section [ASSISTANT]"},
-        {"--name",           "name",           Key::S, &a.name,           "wake name: hey <name> / oi <name> (default max)"},
-        {"--name-aliases",   "name_aliases",   Key::S, &a.name_aliases,   "csv of what whisper hears for the name (max and easy have built-in ones); --verbose shows 'heard:' lines to collect them"},
+        {"--name",           "name",           Key::S, &a.name,           "wake name, said after a call word: hello <name> / olá <name> (default max)"},
+        {"--call-words",     "call_words",     Key::S, &a.call_words,     "csv of words that must come right before the name (default hello, olá, alô, hallo, hola); empty = loose mode (hey/oi/… or the bare name), wakes more often"},
+        {"--name-aliases",   "name_aliases",   Key::S, &a.name_aliases,   "csv of what whisper hears for the name (max, easy and easyai have built-in ones); --verbose shows 'heard:' lines to collect them"},
         {"--greeting",       "greeting",       Key::S, &a.greeting,       "en (default) | pt | off: spoken once at start-up, says it is up and how to call it"},
         {"--endpoint",       "endpoint",       Key::S, &a.endpoint,       "OpenAI-compatible base URL (default http://127.0.0.1:8080)"},
         {"--api-key",        "api_key",        Key::S, &a.api_key,        "Bearer token for the endpoint(s); env EASYAI_API_KEY as fallback"},
@@ -104,6 +120,7 @@ std::vector<Key> keys(Args & a) {
         {"--followup-ms",    "followup_ms",    Key::I, &a.followup_ms,    "after an answer keep listening without the name; silence this long ends the conversation with a falling sound (default 2000, 0 = off)"},
         {"--wake-model",     "wake_model",     Key::S, &a.wake_model,     "local whisper ggml for the wake word, or 'server' (default models/stt/ggml-base.bin)"},
         {"--mic",            "mic",            Key::S, &a.mic,            "capture device (ALSA name; default)"},
+        {"--mic-gain-db",    "mic_gain_db",    Key::I, &a.mic_gain_db,    "software gain on the microphone in dB, -30..30 (default 0); negative when the room saturates the input"},
         {"--speaker",        "speaker",        Key::S, &a.speaker,        "playback device (ALSA name; default)"},
         {"--tts",            "tts",            Key::S, &a.tts,            "auto | server | kokoro | say | piper | espeak (default auto)"},
         {"--voice-pt",       "voice_pt",       Key::S, &a.voice_pt,       "local engine voice for pt (piper .onnx / say / espeak)"},
@@ -140,7 +157,7 @@ void usage(Args & a) {
     auto dk = keys(d);
     std::fprintf(stderr,
         "Usage: easyai-assistant [options]\n\n"
-        "Voice assistant: listens on the microphone for \"hey %s\" / \"oi %s\" (\"hey easy AI\"), records until a\n"
+        "Voice assistant: listens on the microphone for \"hello %s\" / \"olá %s\", records until a\n"
         "pause, transcribes (POST /v1/audio/transcriptions), answers (POST /v1/chat/completions,\n"
         "thinking off, tools run here) and speaks (POST /v1/audio/speech). Every call is\n"
         "OpenAI-shaped: endpoint can be easyai-server, llama-server or OpenAI with an api_key.\n\n"
@@ -347,6 +364,7 @@ public:
             std::snprintf(buf, sizeof buf, kAssistantSystem, a.name.c_str());
             sys = buf;
         }
+        base_sys_ = sys;
         cli_.endpoint(a.endpoint).api_key(a.api_key).model(a.model).system(sys)
             .max_tool_hops(kDefaultToolHops).max_tokens(kMaxAnswerTokens).verbose(false)
             .reasoning_effort("low")
@@ -365,6 +383,19 @@ public:
         });
         register_tools();
         aliases_ = default_aliases(a.name);
+        {   // call words: the INI csv, each expanded with the spellings whisper gives it when it is a built-in one
+            std::stringstream cs(a.call_words); std::string c;
+            const auto builtin = default_call_words();
+            while (std::getline(cs, c, ',')) {
+                c.erase(0, c.find_first_not_of(' ')); c.erase(c.find_last_not_of(' ') + 1);
+                if (c.empty()) continue;
+                const std::string n = normalize_text(c);
+                const bool known = std::find(builtin.begin(), builtin.end(), n) != builtin.end()
+                                || n == "ola" || n == "alo" || n == "hello";
+                if (known) { for (const auto & b : builtin) if (std::find(call_words_.begin(), call_words_.end(), b) == call_words_.end()) call_words_.push_back(b); }
+                else call_words_.push_back(n);
+            }
+        }
         // whisper's prompt: a sentence that names the assistant, so the decoder prefers that
         // spelling. Never a call phrase ("Hey easy AI."): whisper then takes the real call as
         // already said and drops it (measured 2026-10-16: 6 of 12 names lost).
@@ -477,6 +508,7 @@ public:
             cli_.clear_history(); turns_ = 0;
         }
         std::fprintf(stderr, "[easyai-assistant] Q (%s): %s\nA: ", lang_.c_str(), question.c_str());
+        cli_.system(base_sys_ + "\n" + clock_line());   // the internal clock, fresh every turn
         chunker_.clear();
         const auto t0 = std::chrono::steady_clock::now();
         std::string reply = cli_.chat(question);
@@ -499,15 +531,17 @@ public:
 
     void beep(int n) { speaker_.play_pcm(make_beep(kSampleRate, n), kSampleRate); cap_.flush(); }
     void off_sound() { speaker_.play_pcm(make_off_sound(kSampleRate), kSampleRate); cap_.flush(); }
+    void think_sound() { speaker_.play_pcm(make_think_sound(kSampleRate), kSampleRate); cap_.flush(); }
 
     // Spoken once after the microphone is open: proof the box hears and talks, and how to call it.
     void greet() {
         if (a_.greeting == "off" || a_.greeting.empty()) return;
         const bool pt = a_.greeting == "pt";
         const std::string nm = spoken_name(a_.name, pt ? "pt" : "en");
+        const std::string call = call_words_.empty() ? (pt ? "oi" : "hey") : (pt ? "olá" : "hello");
         const std::string text = pt
-            ? "O assistente " + nm + " está no ar. Diga \"oi " + nm + "\" e faça a sua pergunta."
-            : "The " + nm + " assistant is online. Say \"hey " + nm + "\" and ask your question.";
+            ? "O assistente " + nm + " está no ar. Diga \"" + call + " " + nm + "\" e faça a sua pergunta."
+            : "The " + nm + " assistant is online. Say \"" + call + " " + nm + "\" and ask your question.";
         std::fprintf(stderr, "[easyai-assistant] greeting (%s): %s\n", pt ? "pt" : "en", text.c_str());
         speaker_.speak(text, pt ? "pt" : "en");
         speaker_.wait_idle();
@@ -517,7 +551,8 @@ public:
     int run() {
         if (!a_.text.empty()) { answer(a_.text, a_.language == "auto" ? "" : a_.language); return 0; }
         if (!open_audio()) return 2;
-        std::fprintf(stderr, "[easyai-assistant] listening for \"hey %s\" / \"oi %s\" (pause %d ms)\n", a_.name.c_str(), a_.name.c_str(), a_.pause_ms);
+        std::fprintf(stderr, "[easyai-assistant] listening for \"%s %s\" (pause %d ms, mic gain %d dB)\n",
+                     call_words_.empty() ? "hey" : call_words_.front().c_str(), a_.name.c_str(), a_.pause_ms, a_.mic_gain_db);
         greet();
 
         Vad vad;
@@ -544,6 +579,7 @@ public:
 
         while (!g_stop) {
             if (!cap_.read(period)) { std::fprintf(stderr, "[easyai-assistant] microphone: %s\n", cap_.last_error().c_str()); return 2; }
+            apply_gain_db(period, a_.mic_gain_db);
             const bool speech = vad.feed(period.data(), period.size());
             if (a_.verbose && ++level_log % 50 == 0)
                 std::fprintf(stderr, "[easyai-assistant] level %.0f dB floor %.0f dB%s\n", vad.last_db(), vad.floor_db(), speech ? " SPEECH" : "");
@@ -571,7 +607,7 @@ public:
                 std::string text, lang;
                 if (!transcribe(burst, true, text, lang)) continue;
                 if (a_.verbose && !text.empty()) std::fprintf(stderr, "[easyai-assistant] heard: %s\n", text.c_str());
-                const WakeResult w = wake_match(text, a_.name, aliases_);
+                const WakeResult w = wake_match(text, a_.name, aliases_, call_words_);
                 if (!w.matched) continue;
                 if (!w.question.empty()) {
                     // The question came in the same breath. The small wake model is good
@@ -579,9 +615,10 @@ public:
                     // audio to the STT endpoint (the large model) and take the words after
                     // the name from that transcript.
                     std::string full = text, full_lang = lang;
+                    think_sound();
                     if (wake_.is_loaded() && !transcribe(burst, false, full, full_lang)) full = text;
                     if (a_.verbose && wake_.is_loaded()) std::fprintf(stderr, "[easyai-assistant] server heard: %s\n", full.c_str());
-                    const WakeResult w2 = wake_match(full, a_.name, aliases_);
+                    const WakeResult w2 = wake_match(full, a_.name, aliases_, call_words_);
                     const std::string q = w2.matched && !w2.question.empty() ? w2.question : (wake_.is_loaded() ? "" : w.question);
                     if (!q.empty()) {
                         answer(q, w2.matched ? full_lang : lang);
@@ -599,6 +636,7 @@ public:
             if (!listen.push(period.data(), period.size(), speech)) continue;
             listening = false;
             auto utt = listen.take();
+            think_sound();   // "got it, working": the pause was understood
             std::string text, lang;
             const bool ok = transcribe(utt, false, text, lang);
             if (!ok || !looks_like_question(text)) {   // nothing, or whisper's noise markers / a lone hallucinated word
@@ -625,7 +663,9 @@ private:
     easyai::audio::Capture cap_;
     SentenceChunker        chunker_;
     std::vector<std::string> aliases_;
+    std::vector<std::string> call_words_;
     std::string            wake_prompt_;
+    std::string            base_sys_;
     std::string            lang_ = "en";
     int                    turns_ = 0;
     bool                   server_down_ = false;

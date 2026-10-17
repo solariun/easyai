@@ -893,6 +893,14 @@ downloading local models. No external binary.
   refuses if `--model` is a real file). **Run + slink** does both.
 - **Downloads** — native libcurl → HuggingFace, into `download_dir`, with
   progress / cancel / list / delete.
+- **Services** — the two systemd units (`easyai-server`, `easyai-assistant`)
+  with state, since, PID, **Start / Stop / Restart** and a journal tail,
+  plus an editor for `easyai.ini` (both services' sections in one file):
+  syntax-checked, previous content kept in `easyai.ini.prev`, atomic
+  replace. Save, then restart the service whose section changed. The
+  buttons need the installer's polkit rule and the unit's
+  `systemd-journal` group (see `LINUX_SERVER.md` §3); without systemd
+  (macOS) the editor works and the buttons are disabled.
 
 If the catalogue can't be found the page still loads and Local models + Downloads
 work fully; only the Recommend tab is limited.
@@ -918,6 +926,11 @@ requires the session cookie when `webui_password` is set):
 | GET | `/models/api/hf/files?repo=<repo>` | List `.gguf` files in a HuggingFace repo (quant picker). |
 | POST | `/models/api/download` | `{repo, filename?}` → start a download (best quant if omitted; whole shard set for a sharded pick). |
 | GET | `/models/api/download/status` · POST `/models/api/download/cancel` | Progress / cancel of the single active download. |
+| GET | `/models/api/services` | `{manager: systemd|none, services:[{name, state, sub, enabled, since, pid}], config:{path, exists, writable}}`. |
+| POST | `/models/api/services/action` | `{name: easyai-server|easyai-assistant, action: start|stop|restart}` → `systemctl` as the service user (polkit rule); the server's own stop/restart answers first, then goes down. 501 without systemd. |
+| GET | `/models/api/services/log?name=&lines=` | `journalctl -u <unit> -n <lines>` → `{lines:[…]}` (≤ 500). |
+| GET | `/models/api/config` | `{path, exists, writable, text, bytes, mtime}` — the INI as text. |
+| POST | `/models/api/config` | `{text}` (≤ 1 MiB) → every line must be a comment, `[section]` or `key = value` (400 with the line number); previous content → `<ini>.prev`, atomic replace; `{ok, bytes, backup}`. Restart to apply. |
 
 **Example.**
 
