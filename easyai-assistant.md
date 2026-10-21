@@ -114,7 +114,7 @@ easyai-assistant --text "que horas são?"   # try the chat + voice path, no micr
 | `wake_model` | `--wake-model` | `models/stt/ggml-base.bin` | local whisper for the name only (a question said in the same breath is re-transcribed by the server's large model); `server` = send every burst to the STT endpoint |
 | `mic_gain_db` | `--mic-gain-db` | 0 | software gain on the microphone, −30..30 dB; negative when the verbose log shows levels near 0 dB (hot room), positive for a far mic |
 | `mic`, `speaker` | same | `default` | ALSA device names (`plughw:1,0`). When `default` has no capture (card 0 is HDMI-only on many boxes) the assistant picks the first card that has one, logs it, and the speaker follows that card; `cat /proc/asound/pcm` shows the cards. macOS uses the system default |
-| `tts` | `--tts` | `auto` | `server` / `say` / `piper` / `espeak`; auto = endpoint, else local |
+| `tts` | `--tts` | `auto` | `server` / `say` / `piper` / `espeak`; auto = endpoint, else local; an endpoint that was still loading at start is retried every 30 s and taken over as soon as it answers |
 | `voice_pt`, `voice_en`, `piper` | same | engine defaults | local voices |
 | `tools` | `--tools` | `datetime,web` | built-in tools; empty = none |
 | `external_tools` | `--external-tools` | | directory of `EASYAI-*.tools` |

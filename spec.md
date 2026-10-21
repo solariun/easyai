@@ -1542,6 +1542,28 @@ temporary copy left; a second run with an unchanged script does not
 restart. `bash -n` and `--help` on the real script pass. On the box the
 proof is the log of the next `--upgrade` that brings a new installer.
 
+**Two more installer rules found on the same box (2026-10-21).**
+
+4. **The INI template runs no commands.** The template is an unquoted
+   heredoc (it expands `$service_port` and friends), so a backtick in a
+   comment is a command substitution: the `[ASSISTANT]` comment
+   `\`easyai-assistant --list-options\`` ran the assistant at install
+   time, pasted its option table into the INI (36 lines "missing '='
+   in entry") and the companion `\`easyai-assistant --text "question"\``
+   asked the still-loading server a question. Backticks in the template
+   are escaped; `tests/test_installer.sh` (ctest `installer`) fails on an
+   unescaped one.
+5. **Only the live library chains are installed.** The build tree keeps
+   versioned files of earlier builds (ninja never deletes
+   `libllama.so.0.7.0` when the pin goes back to a 0.6.0 tree) and
+   `ldconfig` re-points a SONAME link at the highest version it sees:
+   the server built against `libllama-common.so.0.6.0` loaded the stale
+   `0.7.0` and aborted in `common_params` (`std::logic_error`, construction
+   from null). The installer purges `$prefix/lib/easyai` of the llama,
+   ggml, llava, whisper and httplib libraries, copies the symlinks and the
+   files they resolve to (plus unversioned plain `.so` files), and runs
+   `ldconfig -X` (cache only, links untouched).
+
 **Evidence of the bug.** `ai.local` reflogs: llama.cpp
 `pull --ff-only` to `0a1ef309c` at 14:24 (unpinned, the June script),
 easyai `pull --ff-only` 6e721ea → 5834558 at 14:26, binaries installed
@@ -1662,7 +1684,22 @@ flowchart LR
    ALSA knows them (`default`, `plughw:1,0`). macOS: CoreAudio
    AudioQueue, device `default`. `[ASSISTANT] mic`, `[ASSISTANT] speaker`.
    Capture is a blocking `read()` of one period (`kPeriodMs = 20`);
-   the device clock paces the loop, no polling timer.
+   the device clock paces the loop, no polling timer. ALSA playback sets
+   explicit hw params like capture (access, S16, 1 channel, rate near,
+   period `kPlayChunkMs = 250`, buffer `kPlayBuffers = 2` periods), not
+   `snd_pcm_set_params()`: that helper derives the period from a latency
+   and fails with "Unable to get period size for PLAYBACK" behind the
+   plug layer when the card's rate is not an integer multiple of the
+   voice's (ai.local, ALC269VC: 44100 Hz minimum for 24000 Hz Kokoro
+   audio; the ALC245 at 48000 Hz never showed it, 2026-10-21).
+1a. **Voice source.** `[ASSISTANT] tts = auto` (default) or `server`
+   probes the endpoint's `/v1/audio/speech` at start. The server usually
+   starts together with the assistant and answers only once its model is
+   loaded, so a failed probe does not fix the choice: every
+   `kTtsProbeS = 30` s the next sentence is tried on the server first and
+   the first answer switches the voice to it, logged as `voice: server …`;
+   the local engine (Kokoro, piper, espeak) covers the gap. `tts =
+   server` without a local engine prints the answers until then.
 2. **VAD.** Per period RMS in dB. Noise floor = minimum tracker that
    starts at the level of the first period (the room as it is; a fixed
    start made 20 s of constant fan noise count as speech on the box),

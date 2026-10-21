@@ -1214,17 +1214,36 @@ if [[ $do_build -eq 1 ]]; then
     sudo install -d -m755 "$LIB_DEST"
     sudo install -Dm644 "$easyai_dir/build/libeasyai.so" "$LIB_DEST/libeasyai.so" || true
 
-    copied=0
+    # Only the symlinks and the files they resolve to are installed, and the
+    # destination is purged first. The build tree keeps versioned files of
+    # earlier builds (ninja never deletes libllama.so.0.7.0 when the pin goes
+    # back to a 0.6.0 tree), and ldconfig re-points a SONAME link at the
+    # highest version it sees: on 2026-10-21 (ai.local) the server built
+    # against libllama-common 0.6.0 loaded the stale 0.7.0 and aborted in
+    # common_params. Hence: copy the live chain only, and ldconfig -X below
+    # (cache refresh without touching the links).
+    sudo rm -f "$LIB_DEST"/libllama*.so* "$LIB_DEST"/libggml*.so* "$LIB_DEST"/libllava*.so* \
+               "$LIB_DEST"/libwhisper*.so* "$LIB_DEST"/libcpp-httplib*.so*
+    declare -A live_libs=()
     while IFS= read -r so; do
-        [[ -f "$so" || -L "$so" ]] || continue
-        sudo cp -Pf "$so" "$LIB_DEST/$(basename "$so")"
-        copied=$((copied+1))
+        if [[ -L "$so" ]]; then
+            live_libs["$so"]=1
+            live_libs["$(readlink -f "$so")"]=1
+        elif [[ -f "$so" && "$so" == *.so ]]; then
+            live_libs["$so"]=1               # unversioned plain file (no symlink chain)
+        fi
     done < <(find "$easyai_dir/build" \
                   \( -name 'libllama*.so*' -o -name 'libggml*.so*' \
                   -o -name 'libllama-common*.so*' -o -name 'libllava*.so*' \
                   -o -name 'libwhisper*.so*' \
                   -o -name 'libcpp-httplib*.so*' \) -print 2>/dev/null)
-    log "copied $copied shared library entries"
+    copied=0
+    for so in "${!live_libs[@]}"; do
+        [[ -e "$so" || -L "$so" ]] || continue
+        sudo cp -Pf "$so" "$LIB_DEST/$(basename "$so")"
+        copied=$((copied+1))
+    done
+    log "copied $copied shared library entries (symlink chains only; stale versions skipped)"
 
     # Sanity: every SONAME the binary needs must resolve under $LIB_DEST.
     # Print any missing ones now, before the systemd unit tries (and fails)
@@ -1245,7 +1264,7 @@ if [[ $do_build -eq 1 ]]; then
     # $LIB_DEST.
     if [[ -d /etc/ld.so.conf.d ]]; then
         echo "$LIB_DEST" | sudo tee /etc/ld.so.conf.d/easyai.conf >/dev/null
-        sudo ldconfig || true
+        sudo ldconfig -X || true             # -X: refresh the cache, keep the copied links
     fi
 
     if [[ $do_presets -eq 1 ]]; then
@@ -1775,8 +1794,8 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 # question was taken), the answer is spoken sentence by sentence and a beep
 # says it listens again. The dashboard (/models → Services) edits this file
 # and restarts the service. Every key is also a flag (--<key with dashes>); flags win over
-# this file. `easyai-assistant --list-options` prints every option with the
-# value in effect; `easyai-assistant --text "question"` tests the chat and
+# this file. \`easyai-assistant --list-options\` prints every option with the
+# value in effect; \`easyai-assistant --text "question"\` tests the chat and
 # voice path without a microphone.
 #
 #   name            wake name, said right after a call word: "hello <name>", "olá <name>"

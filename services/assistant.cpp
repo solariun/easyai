@@ -44,6 +44,7 @@ constexpr int kUnmuteMs        = 300;     // after the voice stops, before the m
 constexpr int kRetryS          = 10;      // backoff while the endpoint is down
 constexpr int kMicRetryS       = 15;      // no capture device yet (unplugged USB mic): retry, do not exit
 constexpr int kHttpTimeoutS    = 120;
+constexpr int kTtsProbeS       = 30;      // tts=auto/server and the server's voice was down: try it again this often
 constexpr int kDefaultPauseMs  = 1500;
 constexpr int kDefaultFollowupMs = 2000;  // after an answer: keep listening this long for a follow-up, no name needed
 constexpr int kDefaultMaxListenMs = 20000;
@@ -252,13 +253,16 @@ public:
             local_.configure(c, err);
             local_err_ = err;
         }
-        if (a.tts == "auto" || a.tts == "server") {
+        want_server_ = (a.tts == "auto" || a.tts == "server");
+        if (want_server_) {
             auto c = make_http(a.tts_endpoint, a);
             auto r = c->Post("/v1/audio/speech", R"({"input":"ok","voice":"en","response_format":"wav"})", "application/json");
             use_server_ = r && r->status == 200;
-            if (!use_server_ && a.tts == "server")
-                std::fprintf(stderr, "[easyai-assistant] tts: %s/v1/audio/speech not available (%s)\n", a.tts_endpoint.c_str(),
-                             r ? std::to_string(r->status).c_str() : httplib::to_string(r.error()).c_str());
+            last_probe_ = std::chrono::steady_clock::now();
+            if (!use_server_)
+                std::fprintf(stderr, "[easyai-assistant] tts: %s/v1/audio/speech not available yet (%s)%s\n", a.tts_endpoint.c_str(),
+                             r ? std::to_string(r->status).c_str() : httplib::to_string(r.error()).c_str(),
+                             local_.available() ? " — local voice until it answers" : "");
         }
         std::fprintf(stderr, "[easyai-assistant] voice: %s\n", describe().c_str());
         worker_ = std::thread([this] { run(); });
@@ -312,12 +316,22 @@ private:
         std::vector<std::int16_t> pcm; int rate = 0; std::string err;
         const auto t0 = std::chrono::steady_clock::now();
         bool ok = false;
-        if (use_server_) {
+        // The server usually starts with the assistant and answers only once
+        // its model is loaded: when tts=auto/server found it down at start,
+        // try it again every kTtsProbeS with the real sentence and switch to
+        // it the first time it answers (the local engine covers the gap).
+        const auto now = std::chrono::steady_clock::now();
+        const bool retry = want_server_ && !use_server_ && (now - last_probe_) >= std::chrono::seconds(kTtsProbeS);
+        if (use_server_ || retry) {
             auto c = make_http(a_.tts_endpoint, a_);
             nlohmann::json body{{"model", "tts"}, {"input", it.text}, {"voice", voice}, {"response_format", "wav"}};
             auto r = c->Post("/v1/audio/speech", body.dump(), "application/json");
             if (r && r->status == 200) ok = easyai::decode_wav_pcm16(r->body, pcm, rate);
             else err = r ? "HTTP " + std::to_string(r->status) : httplib::to_string(r.error());
+            if (retry) {
+                last_probe_ = now;
+                if (ok) { use_server_ = true; std::fprintf(stderr, "[easyai-assistant] voice: %s\n", describe().c_str()); }
+            }
         }
         if (!ok && local_.available()) ok = local_.synthesize(it.text, voice, pcm, rate, err);
         if (!ok) { std::fprintf(stderr, "[easyai-assistant] tts failed: %s\n", err.c_str()); return; }
@@ -330,6 +344,8 @@ private:
     easyai::Tts             local_;
     std::string             local_err_;
     bool                    use_server_ = false;
+    bool                    want_server_ = false;
+    std::chrono::steady_clock::time_point last_probe_{};
     std::thread             worker_;
     std::mutex              mu_, play_mu_;
     std::condition_variable cv_;

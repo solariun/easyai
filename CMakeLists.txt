@@ -465,6 +465,7 @@ if (EASYAI_BUILD_TESTS)
     add_executable(easyai-test-local-models tests/test_local_models.cpp)
     target_link_libraries(easyai-test-local-models PRIVATE easyai)
     add_test(NAME local_models COMMAND easyai-test-local-models)
+    add_test(NAME installer COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_installer.sh)
 endif()
 
 # ============================================================================

@@ -210,7 +210,7 @@ access unless `--stt-model` names another model.
 | `/usr/bin/easyai-server` | root:root | 755 | the binary |
 | `/usr/bin/easyai-cli` | root:root | 755 | OpenAI-shape client (talks to a remote server) |
 | `/usr/bin/easyai-local` | root:root | 755 | single-process REPL with a local model |
-| `/usr/lib/easyai/` | root:root | 755 | bundled `.so` files (libllama, libggml, libwhisper, libeasyai, …) |
+| `/usr/lib/easyai/` | root:root | 755 | bundled `.so` files (libllama, libggml, libwhisper, libeasyai, …); purged and refilled on every install with the build's live symlink chains only, `ldconfig -X` keeps those links (a stale higher version left behind by an earlier build made the server abort at start) |
 | `/etc/easyai/` | root:easyai | 750 | operator configuration |
 | `/etc/easyai/system.txt_template` | root:easyai | 644 | system prompt template (refreshed on every `--upgrade`); copy to `system.txt` to activate a custom persona |
 | `/etc/easyai/system.txt` | root:easyai | 640 | **NOT installed by default** — created only by the operator (e.g. `sudo cp system.txt_template system.txt`); when present and `SERVER.system_file` is uncommented in `easyai.ini`, replaces the binary's built-in "Deep" prompt |

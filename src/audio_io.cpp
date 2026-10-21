@@ -19,7 +19,8 @@ namespace audio {
 namespace {
 constexpr int kCaptureBuffers    = 4;      // queued periods in flight (CoreAudio) / buffer periods (ALSA)
 constexpr int kMaxQueuedPeriods  = 100;    // 2 s at 20 ms: beyond this the oldest periods are dropped
-constexpr int kPlayChunkMs       = 250;    // playback buffer size
+constexpr int kPlayChunkMs       = 250;    // playback period (CoreAudio buffer / ALSA period)
+constexpr int kPlayBuffers       = 2;      // ALSA playback buffer in periods
 constexpr int kMsPerSecond       = 1000;
 }  // namespace
 
@@ -253,9 +254,28 @@ bool Playback::play(const std::string & device, const std::int16_t * pcm, std::s
     snd_pcm_t * pcm_dev = nullptr;
     int rc = snd_pcm_open(&pcm_dev, device.c_str(), SND_PCM_STREAM_PLAYBACK, 0);
     if (rc < 0) { err = std::string("snd_pcm_open(") + device + "): " + snd_strerror(rc); return false; }
-    const unsigned latency_us = (unsigned) kPlayChunkMs * 2 * kMsPerSecond;
-    rc = snd_pcm_set_params(pcm_dev, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED, 1, (unsigned) rate_hz, 1, latency_us);
-    if (rc < 0) { err = std::string("ALSA playback params: ") + snd_strerror(rc); snd_pcm_close(pcm_dev); return false; }
+    // Explicit hw params, the same path Capture uses. snd_pcm_set_params()
+    // derives the period from a latency and fails with "Unable to get period
+    // size for PLAYBACK: Invalid argument" behind the plug layer when the
+    // card's rate is not an integer multiple of ours (ALC269VC: 44100 Hz
+    // minimum, 24000 Hz Kokoro audio; the ALC245 at 48000 Hz never showed it).
+    unsigned rate = (unsigned) rate_hz;
+    snd_pcm_uframes_t period = (snd_pcm_uframes_t) rate_hz * kPlayChunkMs / kMsPerSecond;
+    snd_pcm_uframes_t buffer = period * kPlayBuffers;
+    snd_pcm_hw_params_t * hw = nullptr;
+    snd_pcm_hw_params_alloca(&hw);
+    rc = snd_pcm_hw_params_any(pcm_dev, hw);
+    if (rc >= 0) rc = snd_pcm_hw_params_set_access(pcm_dev, hw, SND_PCM_ACCESS_RW_INTERLEAVED);
+    if (rc >= 0) rc = snd_pcm_hw_params_set_format(pcm_dev, hw, SND_PCM_FORMAT_S16_LE);
+    if (rc >= 0) rc = snd_pcm_hw_params_set_channels(pcm_dev, hw, 1);
+    if (rc >= 0) rc = snd_pcm_hw_params_set_rate_near(pcm_dev, hw, &rate, nullptr);
+    if (rc >= 0) rc = snd_pcm_hw_params_set_period_size_near(pcm_dev, hw, &period, nullptr);
+    if (rc >= 0) rc = snd_pcm_hw_params_set_buffer_size_near(pcm_dev, hw, &buffer);
+    if (rc >= 0) rc = snd_pcm_hw_params(pcm_dev, hw);
+    if (rc < 0) { err = std::string("ALSA playback hw params: ") + snd_strerror(rc); snd_pcm_close(pcm_dev); return false; }
+    if ((int) rate != rate_hz) { err = "ALSA device cannot play at " + std::to_string(rate_hz) + " Hz (use a plug: device, e.g. plughw:1,0)"; snd_pcm_close(pcm_dev); return false; }
+    rc = snd_pcm_prepare(pcm_dev);
+    if (rc < 0) { err = std::string("snd_pcm_prepare: ") + snd_strerror(rc); snd_pcm_close(pcm_dev); return false; }
     std::size_t off = 0;
     while (off < n) {
         snd_pcm_sframes_t w = snd_pcm_writei(pcm_dev, pcm + off, n - off);
