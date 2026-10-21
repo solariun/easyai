@@ -493,7 +493,7 @@ public:
             for (std::size_t i = 0; i < pcm.size(); ++i) f[i] = pcm[i] / 32768.0f;
             easyai::Stt::Result r;
             if (!wake_.transcribe(f.data(), f.size(), a_.language, wake_prompt_, r)) return false;
-            text = r.text; lang = r.language;
+            text = drop_prompt_echo(r.text, wake_prompt_); lang = r.language;
             return true;
         }
         auto c = make_http(a_.stt_endpoint, a_);
@@ -511,7 +511,7 @@ public:
         }
         try {
             auto j = nlohmann::json::parse(r->body);
-            text = j.value("text", ""); lang = j.value("language", "");
+            text = drop_prompt_echo(j.value("text", ""), wake_prompt_); lang = j.value("language", "");
         } catch (...) { return false; }
         return true;
     }

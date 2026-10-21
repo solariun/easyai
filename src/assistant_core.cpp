@@ -99,6 +99,37 @@ bool Segmenter::push(const std::int16_t * pcm, std::size_t n, bool speech) {
 
 std::vector<std::int16_t> Segmenter::take() { std::vector<std::int16_t> out; out.swap(ready_); return out; }
 
+namespace {
+// "A. B! C?" → {"A", "B", "C"} trimmed, empty pieces dropped.
+std::vector<std::string> split_sentences(const std::string & s) {
+    std::vector<std::string> out; std::string cur;
+    auto flush = [&] {
+        std::size_t b = cur.find_first_not_of(" \t\r\n"), e = cur.find_last_not_of(" \t\r\n");
+        if (b != std::string::npos) out.push_back(cur.substr(b, e - b + 1));
+        cur.clear();
+    };
+    for (char c : s) { if (c == '.' || c == '!' || c == '?') flush(); else cur += c; }
+    flush();
+    return out;
+}
+}  // namespace
+
+std::string drop_prompt_echo(const std::string & transcript, const std::string & prompt) {
+    std::vector<std::string> keys;
+    for (const auto & p : split_sentences(prompt)) { std::string n = normalize_text(p); if (!n.empty()) keys.push_back(n); }
+    if (keys.empty()) return transcript;
+    std::string out;
+    for (const auto & sent : split_sentences(transcript)) {
+        const std::string n = normalize_text(sent);
+        bool echo = false;
+        for (const auto & k : keys) if (n == k) { echo = true; break; }
+        if (echo) continue;
+        if (!out.empty()) out += ' ';
+        out += sent + '.';
+    }
+    return out;
+}
+
 std::string normalize_text(const std::string & s) {
     std::string t;
     t.reserve(s.size());

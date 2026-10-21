@@ -1792,6 +1792,18 @@ flowchart LR
    after dropping whisper's noise markers `*crash*`, `[BLANK_AUDIO]`,
    `(music)`; on the box a beep echo became "phase" and was answered) →
    short double beep, back to idle.
+4a. **Prompt echo.** Whisper given an initial prompt and audio it cannot
+   make out (silence, a far speaker, a noisy room) answers with the prompt
+   itself, repeated: on ai.local (speaker-to-mic SNR about 13 dB) every
+   burst came back as "The assistant is called max. The assistant is
+   called max. …" (2026-10-21). `drop_prompt_echo(transcript, prompt)`
+   (`assistant_core`) removes every sentence of the prompt from the
+   transcript before the wake check and before the question is taken,
+   normalized compare, so such a transcript is empty and wakes nothing;
+   a real sentence after an echoed one survives ("… called max. Hello
+   Max, what time is it?" → "Hello Max, what time is it."). Proof: eight
+   checks in `tests/test_assistant.cpp`.
+
 5. **Chat.** `easyai::Client` to `endpoint` with `api_key`, `model`,
    streaming. System prompt = `[ASSISTANT] system` (file or inline)
    else the built-in `kAssistantSystem`: answer in ≤ 3 sentences unless

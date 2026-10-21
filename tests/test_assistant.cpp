@@ -200,6 +200,18 @@ int main() {
         CHECK(!easyai::decode_wav_pcm16("not a wav", back, rate));
     }
 
+    {   // whisper echoing its own prompt on audio it cannot make out (ai.local, 2026-10-21)
+        const std::string prompt = "O assistente chama-se max. The assistant is called max.";
+        CHECK(drop_prompt_echo("The assistant is called max. The assistant is called max. The assistant is called max.", prompt).empty());
+        CHECK(drop_prompt_echo(" The assistant is called Max! O assistente chama-se Max.", prompt).empty());
+        CHECK(drop_prompt_echo("Hello Max, what time is it?", prompt) == "Hello Max, what time is it.");
+        CHECK(drop_prompt_echo("The assistant is called max. Hello Max, what time is it?", prompt) == "Hello Max, what time is it.");
+        CHECK(drop_prompt_echo("[BLANK_AUDIO]", prompt) == "[BLANK_AUDIO].");
+        CHECK(drop_prompt_echo("Olá Max, como você está?", "").rfind("Olá Max", 0) == 0);
+        CHECK(wake_match(drop_prompt_echo("The assistant is called max. Hello Max, what time is it?", prompt), "max", default_aliases("max"), default_call_words()).matched);
+        CHECK(!wake_match(drop_prompt_echo("The assistant is called max. The assistant is called max.", prompt), "max", default_aliases("max"), default_call_words()).matched);
+    }
+
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;
 }

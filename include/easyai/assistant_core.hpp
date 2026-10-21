@@ -94,6 +94,14 @@ std::vector<std::string> default_call_words();
 // phonemizer reads "easyai" as one odd word). Other names come back as is.
 std::string spoken_name(const std::string & name, const std::string & lang);
 
+// Whisper, given an initial prompt and audio it cannot make out (silence,
+// a far speaker, noise), tends to answer with the prompt itself, repeated:
+// "The assistant is called max. The assistant is called max. …". Removes
+// every sentence of the prompt from the transcript (normalized compare)
+// so such a transcript becomes empty and wakes nothing. Sentences of the
+// prompt end with '.'; the transcript's sentences may end with any of .!?
+std::string drop_prompt_echo(const std::string & transcript, const std::string & prompt);
+
 // Cuts streamed text into sentences for TTS without waiting for the end.
 class SentenceChunker {
 public:
