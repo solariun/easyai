@@ -56,7 +56,8 @@
 #   ./install_easyai_server.sh --webui-title "AI Box"
 #   ./install_easyai_server.sh --webui-icon /path/to/logo.svg   # ico|png|svg|gif|jpg|webp
 #   ./install_easyai_server.sh --webui-password 's3cret'  # /models gate (default 0000)
-#   ./install_easyai_server.sh --upgrade             # git pull + rebuild
+#   ./install_easyai_server.sh --upgrade             # git pull + rebuild (a pull that
+#                                                    #   changes this script restarts it)
 #   ./install_easyai_server.sh --force               # CLEAN-SLATE rewrite:
 #                                                    #   - easyai.ini backed up
 #                                                    #     to .bak then replaced
@@ -192,6 +193,27 @@
 # ============================================================================
 
 set -euo pipefail
+
+# ---------- run from a private copy ------------------------------------------
+# --upgrade pulls the easyai checkout, and this script lives in it. bash
+# reads a script while it runs, so a file that changes underneath executes a
+# mix of old and new lines: on 2026-10-21 the June installer pulled itself to
+# the October one and finished with the June INI (no [STT]/[TTS]/[ASSISTANT]),
+# no whisper.cpp and no pinned llama.cpp. Two guards:
+#   1. the script copies itself to a temporary file and runs from the copy,
+#      which no pull can touch;
+#   2. right after the pull it compares the checkout's installer with the
+#      running copy and, when they differ, starts the new installer once with
+#      the same arguments (see "self-upgrade" below).
+easyai_install_args=("$@")
+easyai_install_origin="${EASYAI_INSTALL_ORIGIN:-$(readlink -f "${BASH_SOURCE[0]}")}"
+if [[ -z "${EASYAI_INSTALL_COPY:-}" ]]; then
+    easyai_install_copy="$(mktemp -t install_easyai_server.XXXXXX)"
+    cp "$easyai_install_origin" "$easyai_install_copy"
+    EASYAI_INSTALL_COPY="$easyai_install_copy" EASYAI_INSTALL_ORIGIN="$easyai_install_origin" \
+        exec bash "$easyai_install_copy" ${easyai_install_args[@]+"${easyai_install_args[@]}"}
+fi
+trap 'rm -f "$EASYAI_INSTALL_COPY"' EXIT
 
 # ---------- defaults --------------------------------------------------------
 src_root="${src_root:-$HOME/opt}"
@@ -1047,6 +1069,18 @@ if [[ $do_whisper -eq 1 ]]; then
     fetch_repo "$whisper_dir" "$whisper_repo" "$whisper_ref"
 fi
 fetch_repo "$easyai_dir" "$easyai_repo" "$easyai_ref"
+# ---- self-upgrade: the pull above may have replaced this very script ------
+# The running copy is the old installer; the checkout now holds the new one.
+# Start the new one once with the original arguments (guarded by
+# EASYAI_INSTALL_REEXEC so two differing files can never loop). The second
+# run pulls again (no-op), finds the files equal and carries on.
+if [[ $do_upgrade -eq 1 && -z "${EASYAI_INSTALL_REEXEC:-}" ]] \
+        && ! cmp -s "$easyai_install_origin" "$EASYAI_INSTALL_COPY"; then
+    log "the upgrade replaced the installer itself — restarting with the new one"
+    rm -f "$EASYAI_INSTALL_COPY"
+    EASYAI_INSTALL_COPY= EASYAI_INSTALL_REEXEC=1 \
+        exec bash "$easyai_install_origin" ${easyai_install_args[@]+"${easyai_install_args[@]}"}
+fi
 # The default voice model ships in the repo through Git LFS
 # (models/stt/ggml-large-v3-turbo-q5_0.bin). Without git-lfs the checkout
 # holds a 130-byte pointer; the voice-model step below detects that and

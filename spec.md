@@ -1485,6 +1485,69 @@ model; the old string API had the same limit. Using the new
 `common_chat_session` (tokenised input, prefill echo) is a larger change
 left for a later port.
 
+## Installer self-upgrade (AUTHORITATIVE — 2026-10-21)
+
+**Plain words.** `install_easyai_server.sh --upgrade` pulls the easyai
+checkout, and the script itself lives in that checkout. bash reads a
+script while it runs it, so when the pull replaces the file the rest of
+the run executes a mix of the old and the new installer. That is what
+happened on `ai.local` on 2026-10-21: the June installer pulled the
+October tree, built it, then wrote the June INI (no `[STT]`, `[TTS]`,
+`[ASSISTANT]`), cloned no whisper.cpp, pinned no llama.cpp and never
+wrote the assistant unit. The operator saw a successful run and no
+assistant. Since this change the installer runs from a private copy and,
+when the pull changed it, starts the new installer once with the same
+arguments.
+
+```mermaid
+flowchart LR
+    A[install_easyai_server.sh<br/>in the checkout] -->|copy to mktemp, exec| B[running copy<br/>old installer]
+    B --> C[git pull --ff-only<br/>checkout now holds the new script]
+    C --> D{cmp checkout script<br/>vs running copy}
+    D -->|equal| E[carry on]
+    D -->|differ, first time| F[exec new script with<br/>the original arguments<br/>EASYAI_INSTALL_REEXEC=1]
+    F --> G[new copy: pull again, no-op,<br/>equal, carry on]
+```
+
+**Rules.**
+
+1. The script copies itself to `mktemp -t install_easyai_server.XXXXXX`
+   and re-executes the copy (`EASYAI_INSTALL_COPY`, `EASYAI_INSTALL_ORIGIN`
+   carry the paths); the copy is removed on exit (`trap … EXIT`). No pull
+   can change the file bash is reading.
+2. Right after `fetch_repo "$easyai_dir"` under `--upgrade`, the checkout's
+   script is compared with the running copy (`cmp -s`). When they differ
+   and `EASYAI_INSTALL_REEXEC` is unset, the new script is started with
+   the arguments saved at entry (`easyai_install_args`) and
+   `EASYAI_INSTALL_REEXEC=1`; the old copy is deleted first. The second run
+   pulls again (already up to date), finds the files equal and continues.
+   Two files that keep differing cannot loop: the guard allows one restart.
+3. `--help` and `--list-tags` go through the copy too (`$0` is the copy;
+   the header comment is the same text).
+
+**Decision.** Copy-and-compare instead of "pull first, then tell the
+operator to run again": the operator's own history on both boxes shows
+the installer run three times in a row for that reason, and the
+mid-run mix is silent. Rejected: `exec` straight after the pull without
+the copy (the lines between the pull and the `exec` would already come
+from the new file); reading the whole script into a function first
+(bash still reads a sourced file incrementally).
+
+**Proof (2026-10-21, macOS).** The two blocks, extracted verbatim from
+the script with `sed`, driven by a fake `fetch_repo` that swaps the
+origin file: version 1 starts, the pull replaces it, the log line
+"restarting with the new one" appears, version 2 runs with
+`--upgrade --force --gtt 29`, `EASYAI_INSTALL_REEXEC=1`, exit 0, no
+temporary copy left; a second run with an unchanged script does not
+restart. `bash -n` and `--help` on the real script pass. On the box the
+proof is the log of the next `--upgrade` that brings a new installer.
+
+**Evidence of the bug.** `ai.local` reflogs: llama.cpp
+`pull --ff-only` to `0a1ef309c` at 14:24 (unpinned, the June script),
+easyai `pull --ff-only` 6e721ea → 5834558 at 14:26, binaries installed
+14:29 from the October tree, INI rewritten 14:29 with the June sections
+only.
+
 ## Running vs default in the local model list (AUTHORITATIVE — 2026-10-15)
 
 **Plain words.** Two different things look like "the model" on the AI box:

@@ -197,7 +197,10 @@ certificate for `<mdns-hostname>.local` and switches the service to
 llama.cpp and whisper.cpp commits easyai was tested against (sha defaults
 at the top of the script, see spec.md "llama.cpp API port"); `--llama-ref
 latest` or `--whisper-ref latest` tracks upstream main instead, and
-`--upgrade` moves an existing checkout to the pinned sha. The default
+`--upgrade` moves an existing checkout to the pinned sha. The script
+runs from a private temporary copy; when the pull replaces the installer
+itself it restarts once with the new one and the same arguments (so one
+`--upgrade` is enough, even from an old checkout). The default
 voice model comes from the easyai checkout itself (Git LFS, `git-lfs`
 is in the apt dependency list), so a fresh install needs no HuggingFace
 access unless `--stt-model` names another model.
