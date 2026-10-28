@@ -238,7 +238,12 @@ std::string Tts::resolve_voice(const std::string & voice, int & rate_hz) const {
         if (local == "piper") rate_hz = piper_rate_en_ ? piper_rate_en_ : piper_rate_pt_;
         return !cfg_.voice_en.empty() ? cfg_.voice_en : cfg_.voice_pt;
     }
-    if (local == "piper") rate_hz = piper_rate(voice);
+    if (local == "piper") {
+        // piper takes a .onnx path; an unknown name would make it abort
+        // ("Model file doesn't exist"), so fall back to the English voice.
+        if (!file_exists(voice)) return resolve_voice("en", rate_hz);
+        rate_hz = piper_rate(voice);
+    }
     return voice;   // engine-native voice name or path
 }
 

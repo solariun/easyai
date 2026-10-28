@@ -75,6 +75,13 @@ int main() {
     v = eng.list_local();
     CHECK(find(v, "dead.gguf") && find(v, "dead.gguf")->link_target == "gone.gguf" && find(v, "dead.gguf")->size_bytes == 0);
     CHECK(eng.delete_local("dead.gguf", e2));
+
+    // --- whisper weights share the directory: the Voice panel path -------
+    std::ofstream(dir / "ggml-tiny.bin") << "ggml"; std::ofstream(dir / "notes.txt") << "x";
+    std::string abs_bin, e3;
+    CHECK(eng.resolve_local("ggml-tiny.bin", abs_bin, e3) && fs::equivalent(abs_bin, dir / "ggml-tiny.bin"));
+    CHECK(!eng.resolve_local("notes.txt", abs_bin, e3) && e3 == "not a model file (.gguf or .bin)");
+    CHECK(eng.delete_local("ggml-tiny.bin", e3) && !fs::exists(dir / "ggml-tiny.bin"));
     CHECK(!fs::exists(fs::symlink_status(dir / "dead.gguf")));
     // deleting the --model link itself removes only the link
     CHECK(eng.delete_local("ai.gguf", e2));

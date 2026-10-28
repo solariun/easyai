@@ -1058,7 +1058,9 @@ bool safe_in_dir(const std::string & dir, const std::string & filename, fs::path
         filename.find('\\') != std::string::npos || filename.find("..") != std::string::npos) {
         err = "invalid filename"; return false;
     }
-    if (!ends_with_ci(filename, ".gguf")) { err = "not a .gguf file"; return false; }
+    // GGUF chat weights and ggml-*.bin whisper weights share the directory
+    // (the Voice panel downloads through this same manager).
+    if (!ends_with_ci(filename, ".gguf") && !ends_with_ci(filename, ".bin")) { err = "not a model file (.gguf or .bin)"; return false; }
     std::error_code ec;
     fs::path root = fs::weakly_canonical(fs::absolute(dir, ec), ec);
     if (ec) { err = "path resolution failed"; return false; }

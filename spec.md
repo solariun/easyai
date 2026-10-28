@@ -818,7 +818,13 @@ flowchart LR
    Slink / Delete, and the catalog with Download. The catalog is the
    whisper.cpp model table (tiny…large-v3-turbo, `.en` and `q5`
    variants) with sizes; `large-v3-turbo-q5_0` is marked recommended
-   for pt-BR + en on a small box.
+   for pt-BR + en on a small box. The shared download manager's filename guard
+   (`safe_in_dir`) accepts `.gguf` **and** `.bin`: whisper weights live in
+   the same directory. Until 2026-10-28 it accepted `.gguf` only, so the
+   Voice panel's Download button had answered 409 "not a .gguf file"
+   since the panel was introduced (found on ai-pro; no download had ever
+   gone through the panel, the local `ggml-*.bin` files were copied by
+   hand).
 9. **Endpoint directory.** `/models/api/status` gains `endpoints`: a
    list of `{family, method, path, auth, description, enabled}` built
    from the routes actually registered (metrics only when `--metrics`,
@@ -862,6 +868,9 @@ the right error; `resample_linear` keeps endpoints and length. When
 `EASYAI_STT_TEST_MODEL` names a whisper model and
 `../whisper.cpp/samples/jfk.wav` exists, the test transcribes it and
 expects the word "country".
+`easyai-test-local-models` (ctest `local_models`) also resolves and
+deletes a `ggml-tiny.bin` through the engine (the Voice panel path) and
+rejects a `.txt`.
 
 Measured 2026-10-15 (macOS, Metal, `ggml-tiny`): the 11.0 s JFK sample
 transcribes in 437 ms from the library and in 457 ms / 68 ms (first /
@@ -1900,7 +1909,11 @@ flowchart LR
     with one log line, when the helper fails. `auto` = http when `url`
     is set and answers, else piper if the binary and a voice exist, else
     `say` on macOS, else espeak-ng if on PATH, else none. `/health` adds
-    `tts_fallback` when the engine is http.
+    `tts_fallback` when the engine is http. A voice name that is neither `pt`/`en` nor an
+    existing file is spoken by piper with the English voice instead of
+    being passed as a model path (piper aborts with "Model file doesn't
+    exist" and leaves a core dump per request; seen on ai-pro,
+    2026-10-28).
 10a. **Natural voice: Kokoro-82M in C++ (`easyai::Kokoro`,
     `src/kokoro.cpp`).** Engine `kokoro`: `[TTS] kokoro_model`
     (`kokoro-v1.0.onnx`), `kokoro_voices` (`voices-v1.0.bin`),
