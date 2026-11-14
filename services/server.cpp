@@ -3886,6 +3886,8 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "\n"
         "[TTS]  text-to-speech (POST /v1/audio/speech, the voice assistant's voice)\n"
         "  engine    --tts-engine <e>       auto (default) | kokoro | http | piper | say (macOS) | espeak | none.\n"
+        "                                   auto = kokoro, else http, else piper, else say, else none — espeak-ng\n"
+        "                                   (robotic) is never chosen automatically, only when set here.\n"
         "  kokoro_model  --tts-kokoro-model <onnx>   Kokoro-82M, the natural voice, run in-process (C++; onnxruntime\n"
         "  kokoro_voices --tts-kokoro-voices <bin>   and espeak-ng opened at run time). auto prefers it when both files\n"
         "                                   exist. kokoro_voice_pt / kokoro_voice_en pick the voices (pm_alex, am_michael).\n"

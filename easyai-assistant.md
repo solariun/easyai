@@ -141,7 +141,7 @@ easyai-server --list-voices           # what to put in [TTS] kokoro_voice_pt / k
 | `wake_model` | `--assistant-wake-model` | `server` | `server` = every burst through the server's own STT; or a whisper ggml path for the name only (a question said in the same breath is re-transcribed by the server's large model); the installer sets `/var/lib/easyai/models/ggml-base.bin` |
 | `mic_gain_db` | `--assistant-mic-gain-db` | 0 | software gain on the microphone, −30..30 dB; negative when the verbose log shows levels near 0 dB (hot room), positive for a far mic |
 | `mic`, `speaker` | `--assistant-mic`, `--assistant-speaker` | `default` | ALSA device names (`plughw:1,0`), from `--list-audio-devices` or the panel. When `default` has no capture (card 0 is HDMI-only on many boxes) the assistant picks the first card that has one, logs it, and the speaker follows that card. macOS uses the system default |
-| `tts` | `--assistant-tts` | `auto` | `auto` / `server` = the server's `[TTS]` engine in-process (or `tts_endpoint` when set); `kokoro` / `piper` / `espeak` / `say` = a local engine inside the assistant |
+| `tts` | `--assistant-tts` | `auto` | `auto` / `server` = the server's `[TTS]` engine in-process (or `tts_endpoint` when set); `kokoro` / `piper` / `espeak` / `say` = a local engine inside the assistant (`espeak`, the robotic voice, only when written here — `auto` never picks it) |
 | `kokoro_model`, `kokoro_voices` | `--assistant-kokoro-model`, `--assistant-kokoro-voices` | | local Kokoro files when `tts` is not the server |
 | `voice_pt`, `voice_en`, `piper` | `--assistant-voice-pt`, `--assistant-voice-en`, `--assistant-piper` | engine defaults | local fallback voices (piper `.onnx`, `say` voice, espeak voice) |
 | `tools` | `--assistant-tools` | `datetime,web` | built-in tools; empty = none |
@@ -208,7 +208,9 @@ fallback when onnxruntime or espeak-ng are missing. On a Mac the
 assistant can carry the same voice itself with `[ASSISTANT] tts = kokoro`,
 `kokoro_model` / `kokoro_voices` (brew `espeak-ng` and an onnxruntime
 dylib in `/opt/homebrew/lib` or `EASYAI_ONNXRUNTIME`), else `say` (Eddy
-pt-BR, Daniel en-GB), else `espeak-ng`.
+pt-BR, Daniel en-GB), else nothing: espeak-ng is never chosen
+automatically — without a natural voice the greeting is skipped and the
+answers are logged, not spoken.
 
 ```bash
 git lfs pull     # models/tts/kokoro-v1.0.onnx + voices-v1.0.bin (sha256 in models/tts/README.md)

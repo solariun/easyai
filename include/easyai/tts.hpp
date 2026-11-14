@@ -34,8 +34,10 @@ public:
     // Returns the engine chosen ("none" when nothing usable) and fills err.
     // auto = kokoro when model, voices, onnxruntime and espeak-ng are found,
     // else http when url answers /health, else piper, else say (macOS),
-    // else espeak-ng. With kokoro or http, the best child-process engine
-    // stays as fallback for a synthesis that fails.
+    // else none — espeak-ng (robotic) is never chosen automatically, only
+    // by an explicit `engine = espeak`. With kokoro or http, the best
+    // natural child-process engine stays as fallback for a synthesis that
+    // fails.
     std::string configure(const Config & cfg, std::string & err);
     const std::string & engine() const { return engine_; }
     const std::string & fallback_engine() const { return fallback_; }

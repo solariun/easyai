@@ -367,7 +367,7 @@ Every key is also a flag `--tts-<key with dashes>`.
 
 | Key | CLI | Default | Meaning |
 | --- | --- | --- | --- |
-| `engine` | `--tts-engine` | `auto` | `auto` / `kokoro` / `http` / `piper` / `say` / `espeak` / `none`. `auto` = kokoro when model + voices + onnxruntime + espeak-ng are found, else http when `url` answers, else piper, else `say` (macOS), else espeak-ng, else none. kokoro and http keep the best child-process engine as fallback. |
+| `engine` | `--tts-engine` | `auto` | `auto` / `kokoro` / `http` / `piper` / `say` / `espeak` / `none`. `auto` = kokoro when model + voices + onnxruntime + espeak-ng are found, else http when `url` answers, else piper, else `say` (macOS), else none — espeak-ng (robotic) is never chosen automatically, only by `engine = espeak`. kokoro and http keep piper / `say` as fallback. |
 | `kokoro_model` | `--tts-kokoro-model` | | Kokoro-82M `kokoro-v1.0.onnx` (the installer: `/var/lib/easyai/tts/`). |
 | `kokoro_voices` | `--tts-kokoro-voices` | | its `voices-v1.0.bin` (54 voices; `--list-voices` and `GET /v1/audio/voices` list them with language, gender and grade). |
 | `kokoro_voice_pt`, `kokoro_voice_en` | `--tts-kokoro-voice-pt`, `--tts-kokoro-voice-en` | `pm_alex`, `am_michael` | the voice behind `voice: pt` / `en`; the Assistant panel's **Voice** pickers write these two keys. |

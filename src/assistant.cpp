@@ -174,7 +174,7 @@ const std::vector<Field> & fields() {
         S("mic",            &C::mic,            "default", "Audio",  "capture device (ALSA name, e.g. plughw:1,0)"),
         S("speaker",        &C::speaker,        "default", "Audio",  "playback device (ALSA name)"),
         I("mic_gain_db",    &C::mic_gain_db,    0, kMicGainMinDb, kMicGainMaxDb, "Audio", "software gain on the microphone in dB; negative when the room saturates the input"),
-        S("tts",            &C::tts,            "auto", "Voice",    "voice engine: auto/server = the server's voice, else a local engine", "auto|server|kokoro|piper|espeak|say"),
+        S("tts",            &C::tts,            "auto", "Voice",    "voice engine: auto/server = the server's voice (Kokoro), else a local engine; espeak (robotic) only when set here by hand, never automatically", "auto|server|kokoro|piper|espeak|say"),
         S("voice_pt",       &C::voice_pt,       "",    "Voice",     "local engine voice for pt (piper .onnx / say / espeak)"),
         S("voice_en",       &C::voice_en,       "",    "Voice",     "local engine voice for en"),
         S("piper",          &C::piper,          "piper", "Voice",   "piper binary for the local fallback"),
@@ -849,6 +849,10 @@ struct Assistant::Impl {
         const std::string text = pt
             ? "O assistente " + nm + " está no ar. Diga \"" + call + " " + nm + "\" e faça a sua pergunta."
             : "The " + nm + " assistant is online. Say \"" + call + " " + nm + "\" and ask your question.";
+        if (!speaker->available()) {   // no natural voice: say nothing rather than anything robotic
+            logf("greeting skipped — %s", speaker->describe().c_str());
+            return;
+        }
         logf("greeting (%s): %s", pt ? "pt" : "en", text.c_str());
         set_state("speaking");
         speaker->speak(text, pt ? "pt" : "en");

@@ -1733,9 +1733,11 @@ flowchart LR
    only once its model is loaded, so a failed probe does not fix the
    choice: every `kTtsProbeS = 30` s the next sentence is tried on the
    server first and the first answer switches the voice to it, logged as
-   `voice: server …`; the local engine (Kokoro, piper, espeak) covers the
-   gap. `tts = server` without a local engine prints the answers until
-   then. `tts = kokoro|piper|espeak|say` forces the local `easyai::Tts`
+   `voice: server …`; the local engine (Kokoro, piper) covers the gap;
+   with none, the greeting is skipped with one log line and answers are
+   logged only — never spoken by espeak-ng (rule 10, 2026-11-14). `tts =
+   server` without a local engine prints the answers until then. `tts =
+   kokoro|piper|espeak|say` forces the local `easyai::Tts`
    built from the `kokoro_*` / `piper` / `voice_*` keys (a Mac next to
    the box, or a server whose `[TTS]` has no engine).
 2. **VAD.** Per period RMS in dB. Noise floor = minimum tracker that
@@ -1884,8 +1886,8 @@ flowchart LR
    plays (one-deep queue). `[ASSISTANT] tts =
    auto|server|kokoro|piper|espeak|say`: `auto` uses the server's voice
    when it answers, else local Kokoro when `kokoro_model` / `kokoro_voices`
-   are set, else `say` on macOS, else `piper` if `[ASSISTANT] piper` is
-   set, else `espeak-ng`. Voice
+   are set, else `piper` if `[ASSISTANT] piper` is set, else `say` on
+   macOS, else nothing (espeak only when written by hand). Voice
    per language: `voice_pt`, `voice_en` (server: `pt`, `en` voice ids;
    `say`: `Eddy (Portuguese (Brazil))`, `Daniel`; piper: paths of the
    `.onnx` voices). Capture is muted from the first sentence until
@@ -1969,7 +1971,11 @@ flowchart LR
     /health`; the best local engine is kept as **fallback** and used,
     with one log line, when the helper fails. `auto` = http when `url`
     is set and answers, else piper if the binary and a voice exist, else
-    `say` on macOS, else espeak-ng if on PATH, else none. `/health` adds
+    `say` on macOS, else none: **espeak-ng is never chosen automatically**,
+    neither as the engine nor as the fallback behind kokoro / http — a box
+    without a natural voice answers 503 and the assistant stays silent and
+    logs why (Gustavo, 2026-11-14: "never use the robotized one"). `engine
+    = espeak` written by hand still works. `/health` adds
     `tts_fallback` when the engine is http. A voice name that is neither `pt`/`en` nor an
     existing file is spoken by piper with the English voice instead of
     being passed as a model path (piper aborts with "Model file doesn't
@@ -2346,10 +2352,24 @@ flowchart LR
   `am_michael` C+, `bm_george` C, pt-BR and es ungraded) are shown in
   the panel and in `models/tts/README.md` so an operator picking a voice
   sees what upstream measured, not a guess. piper (`pt_BR-faber`,
-  `en_US-ryan`) and espeak-ng stay as the fallback when onnxruntime or
-  espeak-ng are missing. Rejected: switching the default to a graded en
+  `en_US-ryan`) stays as the fallback when onnxruntime or espeak-ng are
+  missing; espeak-ng speaks only when an operator writes `engine = espeak`.
+  Rejected: switching the default to a graded en
   voice (the box speaks pt-BR first; `pm_alex` is the natural male pt-BR
   voice and the en pick follows the same male timbre).
+- **The robotic voice is never automatic** (Gustavo, 2026-11-14: "the
+  start up voice was the robotized one … it must be the standard, never
+  use the robotized one"). What he heard was the October standalone
+  `easyai-assistant`, re-installed by a stale copy of the installer, with
+  no server to ask and espeak-ng as its last fallback. espeak-ng stays
+  installed because Kokoro's phonemizer is its library, but `Tts` auto
+  resolution ends at piper / `say`: no engine and no fallback is ever
+  espeak unless `[TTS] engine = espeak` is written by hand, the assistant
+  skips its greeting and logs answers when no natural voice exists, and
+  the installer re-execs the checkout's own installer when the one
+  running is a stale copy (rule 16). Rejected: keeping espeak as a
+  last-resort fallback (one robotic sentence undoes the impression the
+  natural voice makes; silence plus a log line is the honest failure).
 
 ### Proof (2026-10-16, macOS; Linux box pending Gustavo's install)
 

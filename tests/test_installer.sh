@@ -49,4 +49,8 @@ name="libeasyai chain purged";  check grep -q '"\$LIB_DEST"/libeasyai\*\.so\*' "
 name="libeasyai chain copied";  check grep -q "\-name 'libeasyai\*\.so\*'" "$script"
 name="no bare libeasyai.so install"; check test "$(grep -c 'install -Dm644 .*libeasyai\.so"' "$script")" = 0
 name="post-install self-test";  check grep -q 'LD_LIBRARY_PATH="\$LIB_DEST" "\$install_prefix/bin/easyai-server" --config /dev/null --assistant-options' "$script"
+name="re-exec the checkout installer"; check grep -q 'exec bash "\$checkout_installer"' "$script"
+name="reset-failed before start"; check test "$(grep -c 'systemctl reset-failed "\$service_name"' "$script")" -ge 2
+name="purge drops wants links"; check grep -qF '/etc/systemd/system/*.wants/"$unit"' "$script"
+name="espeak never automatic";  check test "$(grep -c 'engine = espeak after apt' "$script")" = 0
 exit $fail

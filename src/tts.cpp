@@ -144,12 +144,16 @@ std::string Tts::resolve_local(const std::string & want, std::string & err) cons
     std::string e = want;
     const bool piper_ok = on_path(cfg_.piper) && (file_exists(cfg_.voice_pt) || file_exists(cfg_.voice_en));
     if (e == "auto") {
+        // Natural voices only. espeak-ng (the robotic voice) is never picked
+        // by auto — not as the engine, not as the fallback: a box without
+        // Kokoro and piper stays silent and says why (Gustavo, 2026-11-14,
+        // after the old standalone assistant greeted him with it).
+        // `engine = espeak` set by hand still works.
         if (piper_ok)                  e = "piper";
 #if defined(__APPLE__)
         else if (on_path("say"))       e = "say";
 #endif
-        else if (on_path("espeak-ng")) e = "espeak";
-        else e = "none";
+        else { e = "none"; if (err.empty()) err = "no natural voice: Kokoro files/onnxruntime not usable and piper not found (espeak-ng is never chosen automatically)"; }
     }
     if (e == "piper" && !piper_ok) {
         err = "piper: binary '" + cfg_.piper + "' or voices (" + cfg_.voice_pt + ", " + cfg_.voice_en + ") not found"; return "none";

@@ -1156,12 +1156,27 @@ fetch_repo "$easyai_dir" "$easyai_repo" "$easyai_ref"
 # Start the new one once with the original arguments (guarded by
 # EASYAI_INSTALL_REEXEC so two differing files can never loop). The second
 # run pulls again (no-op), finds the files equal and carries on.
-if [[ $do_upgrade -eq 1 && -z "${EASYAI_INSTALL_REEXEC:-}" ]] \
-        && ! cmp -s "$easyai_install_origin" "$EASYAI_INSTALL_COPY"; then
-    log "the upgrade replaced the installer itself — restarting with the new one"
+# The installer that builds and installs $easyai_dir must be the one that
+# lives in $easyai_dir. Two ways to end up running another: --upgrade pulled
+# a newer one under this copy's feet, or this copy was started from a stale
+# checkout elsewhere (ai-pro, 2026-11-14: ~/easyai from October ran with
+# --upgrade, built the November sources in ~/opt/easyai, then wrote the
+# October unit for the removed easyai-assistant binary and left the October
+# libeasyai.so.0.1.0 in place — the server died with "symbol lookup error"
+# and the old assistant greeted the room with espeak). Either way: hand over
+# to the checkout's installer once, with the same arguments.
+checkout_installer="$easyai_dir/scripts/install_easyai_server.sh"
+if [[ -z "${EASYAI_INSTALL_REEXEC:-}" && -f "$checkout_installer" ]] \
+        && ! cmp -s "$checkout_installer" "$EASYAI_INSTALL_COPY"; then
+    if [[ "$(readlink -f "$checkout_installer")" != "$easyai_install_origin" ]]; then
+        warn "this installer ($easyai_install_origin) is not the one in the checkout it installs"
+        warn "($checkout_installer) — continuing with the checkout's installer; run that one next time"
+    else
+        log "the upgrade replaced the installer itself — restarting with the new one"
+    fi
     rm -f "$EASYAI_INSTALL_COPY"
-    EASYAI_INSTALL_COPY= EASYAI_INSTALL_REEXEC=1 \
-        exec bash "$easyai_install_origin" ${easyai_install_args[@]+"${easyai_install_args[@]}"}
+    EASYAI_INSTALL_COPY= EASYAI_INSTALL_REEXEC=1 EASYAI_INSTALL_ORIGIN="$(readlink -f "$checkout_installer")" \
+        exec bash "$checkout_installer" ${easyai_install_args[@]+"${easyai_install_args[@]}"}
 fi
 # The default voice model ships in the repo through Git LFS
 # (models/stt/ggml-large-v3-turbo-q5_0.bin). Without git-lfs the checkout
@@ -1909,7 +1924,8 @@ language        = auto
 #   engine          auto | kokoro | http | piper | say | espeak | none
 #                   auto = kokoro when model + voices + onnxruntime + espeak-ng
 #                   are found, else http when url answers, else piper, else none.
-#                   kokoro and http keep the best child-process engine as fallback.
+#                   kokoro and http keep piper as fallback. espeak (the robotic
+#                   voice) is never chosen automatically — only when set here.
 #   kokoro_model    Kokoro-82M .onnx (natural voice, run in-process in C++)
 #   kokoro_voices   its voices-v1.0.bin (54 voices)
 #   kokoro_voice_pt Kokoro voice for Portuguese: pm_alex (default), pm_santa, pf_dora
@@ -1988,7 +2004,7 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 #                   makes the assistant pick the first card that has one and log it)
 #   speaker         ALSA playback device; "default" follows the microphone card
 #   tts             auto | server | kokoro | say | piper | espeak — where the voice comes from
-#                   (auto = the server's [TTS] engine, Kokoro when installed)
+#                   (auto = the server's [TTS] engine, Kokoro when installed; espeak only by hand)
 #   kokoro_model / kokoro_voices   local Kokoro files when tts is not the server
 #   voice_pt / voice_en / piper    local fallback voices (piper .onnx, say, espeak)
 #   tools           csv of built-in tools: datetime, web (empty = none)
@@ -2680,7 +2696,7 @@ if [[ $do_service -eq 1 && $do_piper -eq 1 ]]; then
             *)               piper_arch="" ;;
         esac
         if [[ -z "$piper_arch" ]]; then
-            warn "no piper build for $(uname -m) — /v1/audio/speech stays off (set [TTS] engine = espeak after apt install espeak-ng)"
+            warn "no piper build for $(uname -m) — no fallback voice behind Kokoro on this box"
         else
             piper_tgz="piper_linux_$( [[ "$piper_arch" == "amd64" ]] && echo x86_64 || ( [[ "$piper_arch" == "arm64" ]] && echo aarch64 || echo armv7l ) ).tar.gz"
             log "downloading piper $piper_version ($piper_tgz)"
@@ -2693,7 +2709,7 @@ if [[ $do_service -eq 1 && $do_piper -eq 1 ]]; then
                 [[ -x "$piper_dir/piper" ]] || warn "piper binary not found after extraction"
             else
                 rm -f "/tmp/$piper_tgz"
-                warn "piper download failed or rejected — no piper fallback (Kokoro / espeak remain)"
+                warn "piper download failed or rejected — no fallback voice behind Kokoro"
             fi
         fi
     fi
@@ -2806,9 +2822,11 @@ if [[ $do_service -eq 1 ]]; then
                 || systemctl list-unit-files --no-legend "$unit" 2>/dev/null | grep -qF "$unit"; then
             log "removing the old unit $unit (its job is done by easyai-server now)"
             sudo systemctl disable --now "$unit" 2>/dev/null || true
+            sudo systemctl stop "$unit" 2>/dev/null || true            # --now alone did not always stop it (ai-pro, 2026-11-14)
             sudo systemctl reset-failed "$unit" 2>/dev/null || true
             sudo rm -f  "/etc/systemd/system/$unit"
             sudo rm -rf "/etc/systemd/system/$unit.d"
+            sudo rm -f  /etc/systemd/system/*.wants/"$unit"            # an enable link left by an older disable
             stale_units_removed=1
         fi
     done
@@ -2817,8 +2835,12 @@ if [[ $do_service -eq 1 ]]; then
     fi
     if [[ -e "$install_prefix/bin/easyai-assistant" ]]; then
         log "removing the old binary $install_prefix/bin/easyai-assistant (built into easyai-server now)"
+        sudo pkill -x easyai-assistant 2>/dev/null || true
         sudo rm -f "$install_prefix/bin/easyai-assistant"
     fi
+    # A build tree from before the merge keeps the old binary; an older
+    # installer would copy it back. Nothing builds it any more, so drop it.
+    rm -f "$easyai_dir/build/easyai-assistant" 2>/dev/null || true
     if [[ -e /opt/easyai/kokoro ]]; then
         log "removing the old Python Kokoro helper /opt/easyai/kokoro"
         sudo rm -rf /opt/easyai/kokoro
@@ -3054,11 +3076,13 @@ PKRULES
         # since this run stopped the old assistant unit, the box would be
         # mute until someone restarts it by hand.
         log "restarting $service_name (new binaries, unit and INI; the assistant comes up inside it)"
+        sudo systemctl reset-failed "$service_name" 2>/dev/null || true
         sudo systemctl restart "$service_name"
         sleep 1
         sudo systemctl --no-pager --full status "$service_name" || true
     elif [[ $do_enable_now -eq 1 ]]; then
         log "enabling + starting $service_name"
+        sudo systemctl reset-failed "$service_name" 2>/dev/null || true   # a failed unit (StartLimit hit) must be cleared first
         sudo systemctl enable --now "$service_name"
         sleep 1
         sudo systemctl --no-pager --full status "$service_name" || true
@@ -3413,7 +3437,7 @@ if [[ $do_service -eq 1 && $do_kokoro -eq 1 && $do_build -eq 1 ]]; then
         warn "  check: $ort_dir/lib/libonnxruntime.so present (onnxruntime $ort_version),"
         warn "         espeak-ng installed (apt: espeak-ng libespeak-ng1),"
         warn "         $tts_dir/kokoro-v1.0.onnx + voices-v1.0.bin present, [TTS] engine = auto in $ini_file"
-        warn "  the server falls back to piper / espeak until this is fixed; rerun with --upgrade afterwards"
+        warn "  the server falls back to piper until this is fixed (never to espeak); rerun with --upgrade afterwards"
     fi
 fi
 

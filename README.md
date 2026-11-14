@@ -130,8 +130,8 @@ landing on it for the first time) sees what shipped recently.
 - **`POST /v1/audio/speech`** on easyai-server (OpenAI shape). Natural
   voice: **Kokoro-82M in C++** (`easyai::Kokoro`: onnxruntime and
   espeak-ng opened with `dlopen`, male `pm_alex` pt-BR / `am_michael`
-  en, 24 kHz); piper / macOS `say` / espeak-ng as child-process
-  fallbacks (`[TTS]`).
+  en, 24 kHz); piper / macOS `say` as child-process fallbacks (`[TTS]`);
+  espeak-ng is never chosen automatically.
   `chat_template_kwargs.enable_thinking` is honoured per request.
 
 ### 2026-10-15 — llama.cpp chat-API port, pinned installer

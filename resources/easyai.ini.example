@@ -434,7 +434,8 @@
 ;
 ;   engine          auto | kokoro | http | piper | say | espeak | none
 ;                   auto = kokoro when model + voices + onnxruntime + espeak-ng
-;                   are found, else http when url answers, else piper, else none.
+;                   are found, else http when url answers, else piper, else none
+;                   (espeak, the robotic voice, only when set here — never automatically).
 ;                   kokoro and http keep the best child-process engine as fallback.
 ;   kokoro_model    Kokoro-82M .onnx (natural voice, run in-process in C++)
 ;   kokoro_voices   its voices-v1.0.bin (54 voices; sha256 in models/tts/README.md)
@@ -508,6 +509,7 @@
 ;   speaker         ALSA playback device; "default" follows the microphone card
 ;   tts             auto | server | kokoro | piper | espeak | say — auto/server = the [TTS]
 ;                   engine in-process (or tts_endpoint); the others = a local engine here
+;                   (espeak only by hand; auto never picks the robotic voice)
 ;   kokoro_model / kokoro_voices   local Kokoro files when tts is not the server
 ;   voice_pt / voice_en / piper    local fallback voices (piper .onnx, say, espeak)
 ;   tools           csv of built-in tools: datetime, web (empty = none)
