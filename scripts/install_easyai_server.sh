@@ -1317,7 +1317,12 @@ if [[ $do_build -eq 1 ]]; then
     LIB_DEST="$install_prefix/lib/easyai"
     log "installing shared libs to $LIB_DEST"
     sudo install -d -m755 "$LIB_DEST"
-    sudo install -Dm644 "$easyai_dir/build/libeasyai.so" "$LIB_DEST/libeasyai.so" || true
+    # libeasyai's own chain (libeasyai.so → libeasyai.so.0 → libeasyai.so.0.1.0)
+    # is copied with the others below. Until 2026-11-14 only the bare
+    # libeasyai.so was installed, as a plain file: the binary loads the SONAME
+    # libeasyai.so.0, so the versioned file of the PREVIOUS install stayed in
+    # place and the new easyai-server died at start with "undefined symbol"
+    # (ai-pro: Assistant::key_of_flag missing from the 2026-10-28 library).
 
     # Only the symlinks and the files they resolve to are installed, and the
     # destination is purged first. The build tree keeps versioned files of
@@ -1327,7 +1332,8 @@ if [[ $do_build -eq 1 ]]; then
     # against libllama-common 0.6.0 loaded the stale 0.7.0 and aborted in
     # common_params. Hence: copy the live chain only, and ldconfig -X below
     # (cache refresh without touching the links).
-    sudo rm -f "$LIB_DEST"/libllama*.so* "$LIB_DEST"/libggml*.so* "$LIB_DEST"/libllava*.so* \
+    sudo rm -f "$LIB_DEST"/libeasyai*.so* \
+               "$LIB_DEST"/libllama*.so* "$LIB_DEST"/libggml*.so* "$LIB_DEST"/libllava*.so* \
                "$LIB_DEST"/libwhisper*.so* "$LIB_DEST"/libcpp-httplib*.so*
     declare -A live_libs=()
     while IFS= read -r so; do
@@ -1338,7 +1344,7 @@ if [[ $do_build -eq 1 ]]; then
             live_libs["$so"]=1               # unversioned plain file (no symlink chain)
         fi
     done < <(find "$easyai_dir/build" \
-                  \( -name 'libllama*.so*' -o -name 'libggml*.so*' \
+                  \( -name 'libeasyai*.so*' -o -name 'libllama*.so*' -o -name 'libggml*.so*' \
                   -o -name 'libllama-common*.so*' -o -name 'libllava*.so*' \
                   -o -name 'libwhisper*.so*' \
                   -o -name 'libcpp-httplib*.so*' \) -print 2>/dev/null)
@@ -1362,6 +1368,17 @@ if [[ $do_build -eq 1 ]]; then
             warn "the service will refuse to start until these are present"
         fi
     fi
+    # Self-test: the installed binary must actually run against the installed
+    # libraries. ldd only proves every SONAME resolves to SOME file; it does
+    # not prove that file has the symbols this build needs (a stale
+    # libeasyai.so.0.1.0 passed ldd and killed the service with exit 127).
+    # --assistant-options loads libeasyai, touches no model and exits 0.
+    if ! selftest_out="$(LD_LIBRARY_PATH="$LIB_DEST" "$install_prefix/bin/easyai-server" --config /dev/null --assistant-options 2>&1 >/dev/null)"; then
+        die "the installed easyai-server does not run against $LIB_DEST:
+    $(printf '%s\n' "$selftest_out" | tail -n 2)
+    (the service was NOT restarted; the previous binary is gone — fix the library install and re-run)"
+    fi
+    log "self-test: $install_prefix/bin/easyai-server runs against $LIB_DEST"
 
     # ldconfig is no longer load-bearing (we use LD_LIBRARY_PATH on the
     # unit), but refresh it anyway so easyai-server invoked outside the

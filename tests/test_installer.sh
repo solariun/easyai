@@ -45,4 +45,8 @@ name="voice check --list-voices"; check grep -q -- '--config "\$ini_file" --list
 name="sha256 helper defined";   check grep -q '^verify_sha256()' "$script"
 name="sha256 helper used >= 6"; check test "$(grep -cE '^[^#]*\bverify_sha256 ' "$script")" -ge 6
 name="espeak runtime lib";      check grep -q 'libespeak-ng1' "$script"
+name="libeasyai chain purged";  check grep -q '"\$LIB_DEST"/libeasyai\*\.so\*' "$script"
+name="libeasyai chain copied";  check grep -q "\-name 'libeasyai\*\.so\*'" "$script"
+name="no bare libeasyai.so install"; check test "$(grep -c 'install -Dm644 .*libeasyai\.so"' "$script")" = 0
+name="post-install self-test";  check grep -q 'LD_LIBRARY_PATH="\$LIB_DEST" "\$install_prefix/bin/easyai-server" --config /dev/null --assistant-options' "$script"
 exit $fail

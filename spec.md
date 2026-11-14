@@ -1568,10 +1568,21 @@ proof is the log of the next `--upgrade` that brings a new installer.
    `ldconfig` re-points a SONAME link at the highest version it sees:
    the server built against `libllama-common.so.0.6.0` loaded the stale
    `0.7.0` and aborted in `common_params` (`std::logic_error`, construction
-   from null). The installer purges `$prefix/lib/easyai` of the llama,
-   ggml, llava, whisper and httplib libraries, copies the symlinks and the
-   files they resolve to (plus unversioned plain `.so` files), and runs
-   `ldconfig -X` (cache only, links untouched).
+   from null). The installer purges `$prefix/lib/easyai` of the easyai,
+   llama, ggml, llava, whisper and httplib libraries, copies the symlinks
+   and the files they resolve to (plus unversioned plain `.so` files), and
+   runs `ldconfig -X` (cache only, links untouched). libeasyai's own chain
+   joined the list on 2026-11-14: until then only the bare `libeasyai.so`
+   was installed, as a plain file, while the binary loads the SONAME
+   `libeasyai.so.0` — so the versioned file of the previous install stayed
+   and the first upgrade that changed libeasyai's exported symbols
+   (`Assistant::key_of_flag`, ai-pro) killed the service at start with
+   `symbol lookup error`, exit 127, which `ldd` cannot see (every SONAME
+   resolved). After copying, the installer runs the installed binary once
+   against `$prefix/lib/easyai` (`--config /dev/null --assistant-options`,
+   no model, exit 0) and `die`s before touching the unit when it does not
+   run; `tests/test_installer.sh` checks the chain, the purge and the
+   self-test.
 
 **Evidence of the bug.** `ai.local` reflogs: llama.cpp
 `pull --ff-only` to `0a1ef309c` at 14:24 (unpinned, the June script),
