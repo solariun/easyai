@@ -1933,27 +1933,6 @@ bool hf_build_entry(const HfHit & h, ModelEntry & out, std::uint64_t & best_size
     return true;
 }
 
-// Build a snapshot entry from a search hit WITHOUT a per-repo tree call:
-// params come from the repo name (fallback 7B) and the quant defaults to
-// Q4_K_M (the scorer still picks the best quant that fits the hardware). This
-// keeps a full-list refresh to a single HF API call.
-void build_light_entry(const HfHit & h, ModelEntry & out) {
-    out = ModelEntry{};
-    out.name = h.repo; out.provider = h.owner; out.quantization = "Q4_K_M";
-    auto pn = params_from_name(h.repo);
-    double pb = pn ? *pn : 7.0;
-    out.parameters_raw = (std::uint64_t) (pb * 1e9); out.has_params_raw = true;
-    char pc[32];
-    if (pb >= 1) std::snprintf(pc, sizeof(pc), "%.1fB", pb);
-    else         std::snprintf(pc, sizeof(pc), "%dM", (int) std::round(pb * 1000));
-    out.parameter_count = pc;
-    out.context_length = 0; out.is_moe = false;
-    out.release_date = h.last_modified;
-    out.min_ram_gb = pb * quant_bpp("Q4_K_M") + 0.5;
-    out.recommended_ram_gb = out.min_ram_gb * 1.25;
-    out.gguf_sources = { { h.repo, h.owner } };
-}
-
 // ---- persisted catalog cache (lives in the configured data dir) ------------
 // We store only the raw HF hits (the catalog is GGUF-bounded and small); the
 // scoreable entry is rebuilt cheaply via build_light_entry on load. Serving
@@ -2000,6 +1979,31 @@ bool load_catalog_file(const std::string & path, std::vector<HfHit> & hits, std:
 
 }  // namespace
 #endif  // EASYAI_HAVE_CURL
+
+// No curl needed: a snapshot entry from a search hit is built from the hit
+// alone, so this stays outside the EASYAI_HAVE_CURL block — models_json()
+// calls it in every build (the -DEASYAI_WITH_CURL=OFF cross builds of the CI
+// failed on it, 2026-11-14).
+// Build a snapshot entry from a search hit WITHOUT a per-repo tree call:
+// params come from the repo name (fallback 7B) and the quant defaults to
+// Q4_K_M (the scorer still picks the best quant that fits the hardware). This
+// keeps a full-list refresh to a single HF API call.
+void build_light_entry(const HfHit & h, ModelEntry & out) {
+    out = ModelEntry{};
+    out.name = h.repo; out.provider = h.owner; out.quantization = "Q4_K_M";
+    auto pn = params_from_name(h.repo);
+    double pb = pn ? *pn : 7.0;
+    out.parameters_raw = (std::uint64_t) (pb * 1e9); out.has_params_raw = true;
+    char pc[32];
+    if (pb >= 1) std::snprintf(pc, sizeof(pc), "%.1fB", pb);
+    else         std::snprintf(pc, sizeof(pc), "%dM", (int) std::round(pb * 1000));
+    out.parameter_count = pc;
+    out.context_length = 0; out.is_moe = false;
+    out.release_date = h.last_modified;
+    out.min_ram_gb = pb * quant_bpp("Q4_K_M") + 0.5;
+    out.recommended_ram_gb = out.min_ram_gb * 1.25;
+    out.gguf_sources = { { h.repo, h.owner } };
+}
 
 void ModelsEngine::start_refresh(bool force) {
     {
