@@ -108,6 +108,52 @@
   .toolrow:first-child{border-top:none;padding-top:0}
   .toolrow b{font-family:var(--mono);font-size:12px}
 
+  /* assistant tab (DESIGN §5): state pill, switch, form fields, level meter, log */
+  .pill.acc{color:#ffd9bf;border-color:rgba(255,130,54,.5);background:rgba(255,130,54,.12)}
+  .pill.state{padding:3px 11px;font-size:12px;display:inline-flex;align-items:center;gap:7px;text-transform:capitalize}
+  .dot-live.bad{background:var(--bad);animation:none;box-shadow:none}
+  .dot-live.off{background:var(--mut2);animation:none;box-shadow:none}
+  .switch{display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none;position:relative}
+  .toolbar label.switch{flex-direction:row;align-items:center;font-size:13px;color:var(--fg)}
+  .switch input{position:absolute;opacity:0;width:0;height:0;margin:0}
+  .switch .sl{width:34px;height:20px;border-radius:999px;background:var(--line);border:1px solid var(--line2);position:relative;
+    transition:background .15s,border-color .15s;flex:0 0 auto}
+  .switch .sl::after{content:'';position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--mut);transition:left .15s,background .15s}
+  .switch input:checked+.sl{background:rgba(94,194,122,.35);border-color:rgba(94,194,122,.6)}
+  .switch input:checked+.sl::after{left:16px;background:var(--good)}
+  .switch input:focus-visible+.sl{outline:2px solid var(--acc);outline-offset:2px}
+  .switch input:disabled+.sl{opacity:.45}
+  .asgrid .stcol.asform{flex:1.5 1 380px}
+  .fgroup{margin-top:14px;border-top:1px solid var(--line2);padding-top:10px}
+  .fgroup:first-of-type{margin-top:0;border-top:none;padding-top:0}
+  .fgroup h3{margin:0 0 6px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut2);display:flex;align-items:center;gap:8px}
+  .fgroup h3 .btn{margin-left:auto;text-transform:none;letter-spacing:0;font-size:12px}
+  .fld{display:grid;grid-template-columns:150px 1fr;gap:2px 12px;align-items:start;padding:7px 0;border-bottom:1px dashed var(--line2)}
+  .fld:last-child{border-bottom:none}
+  .fld>label{font-size:13px;padding-top:7px;color:var(--fg);text-transform:capitalize}
+  .fld>label code{font-family:var(--mono);font-size:11px;color:var(--mut2);display:block;text-transform:none}
+  .fld .ctl{min-width:0}
+  .fld .ctl input:not([type=checkbox]):not([type=range]),.fld .ctl select,.fld .ctl textarea{width:100%}
+  .fld .ctl textarea{font:inherit;color:var(--fg);background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:7px 9px;outline:none;min-height:72px;resize:vertical}
+  .fld .ctl textarea:focus{border-color:var(--acc)}
+  .fld .help{grid-column:2;font-size:11px;color:var(--mut2);line-height:1.35}
+  .fld.changed>label{color:#ffd9bf}
+  .fld.changed>label::after{content:' •';color:var(--acc)}
+  .fld .pair{display:flex;gap:10px;align-items:center}
+  .fld .pair input[type=range]{flex:1;min-width:80px;padding:0;background:transparent;border:none;accent-color:var(--acc)}
+  .fld .pair input[type=number]{width:96px;flex:0 0 auto}
+  .fld .pair .unit{color:var(--mut2);font-size:12px}
+  .fld .chk{display:inline-flex;align-items:center;gap:8px;padding-top:7px;cursor:pointer}
+  .fld .chk input{width:auto;accent-color:var(--acc);margin:0}
+  .meter{position:relative;height:10px;border-radius:5px;background:var(--line);overflow:hidden;margin:6px 0 4px}
+  .meter>i{display:block;height:100%;background:var(--good);transition:width .25s}
+  .meter.speech>i{background:var(--acc)}
+  .meter>b{position:absolute;top:0;bottom:0;width:2px;background:var(--marg)}
+  .aslog{font:11px/1.4 var(--mono);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px;max-height:340px;overflow:auto;white-space:pre-wrap;margin:0;color:var(--fg)}
+  .answer{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:8px;white-space:pre-wrap;font-size:13px;color:var(--fg)}
+  #asFoot{position:sticky;bottom:0;background:var(--card);padding-top:10px;border-top:1px solid var(--line2);margin:14px 0 0}
+  @media (max-width:640px){.fld{grid-template-columns:1fr}.fld .help{grid-column:1}.fld>label{padding-top:0}}
+
   /* login */
   .overlay{position:fixed;inset:0;background:rgba(15,18,19,.86);display:flex;align-items:center;justify-content:center;z-index:50}
   .login{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px;width:330px;text-align:center}
@@ -150,6 +196,7 @@
   <button data-tab="recommend" class="active">Recommend</button>
   <button data-tab="local">Local models</button>
   <button data-tab="downloads">Downloads</button>
+  <button data-tab="assistant">Assistant</button>
   <button data-tab="status">Status</button>
   <button data-tab="services">Services</button>
 </nav>
@@ -236,6 +283,57 @@
     </div>
   </section>
 
+  <!-- ASSISTANT: the voice assistant built into easyai-server (GET/POST /models/api/assistant/*) -->
+  <section id="tab-assistant" class="hide">
+    <div class="toolbar" style="margin-bottom:14px">
+      <b style="font-size:15px">Assistant</b>
+      <span class="pill state ghost" id="asState" aria-live="polite"><span class="dot-live off"></span>off</span>
+      <span class="muted small" id="asSince"></span>
+      <div class="sep"></div>
+    <div class="muted small hide" id="asAuthNote" style="color:var(--marg);margin:-6px 0 12px">The dashboard has no password: anyone who reaches this page can read what the room said (last heard, log), speak through the speaker and change the microphone — set --webui-password.</div>
+      <button class="btn small" id="asStart" onclick="asAction('start')" title="Start the listening loop now (runtime only; the INI is not changed)">Start</button>
+      <button class="btn small danger" id="asStop" onclick="asAction('stop')" title="Stop the listening loop now (runtime only; the INI is not changed)">Stop</button>
+      <button class="btn small" id="asRestart" onclick="asAction('restart')" title="Stop and start again with the saved configuration">Restart</button>
+      <label class="switch" style="margin-left:auto" title="[ASSISTANT] enabled — saved to the INI and applied at once: on starts the assistant with the server, off stops it">
+        <input type="checkbox" id="asEnabled" onchange="asToggleEnabled(this)"><span class="sl" aria-hidden="true"></span><span>Enabled</span></label>
+      <button class="btn small" onclick="loadAssistant()" title="Reload options, devices, voices and status">Refresh</button>
+    </div>
+    <div class="stgrid asgrid">
+      <div class="stcol">
+        <div class="panel stcard"><h3>Now</h3><div id="asNow"><div class="empty"><span class="spin"></span> Loading…</div></div></div>
+        <div class="panel stcard"><h3>Test</h3>
+          <form onsubmit="asSay(event)" class="toolbar" style="margin:0 0 4px">
+            <input id="asSayText" placeholder="text to speak" style="flex:1;min-width:160px" maxlength="500" aria-label="Text to speak">
+            <select id="asSayLang" aria-label="Language of the text" title="Voice language: auto detects from the text">
+              <option value="auto">auto</option><option value="pt">pt</option><option value="en">en</option></select>
+            <button class="btn acc small" id="asSayBtn" type="submit" title="Speak the text on the configured speaker with the configured voice">Say</button>
+          </form>
+          <div class="muted small" id="asSayOut" style="min-height:16px">Plays on the configured speaker with the configured voice (works while stopped too).</div>
+          <form onsubmit="asAsk(event)" class="toolbar" style="margin:12px 0 4px">
+            <input id="asAskText" placeholder="a question, as if spoken" style="flex:1;min-width:160px" maxlength="2000" aria-label="Question for the assistant">
+            <button class="btn small" id="asAskBtn" type="submit" title="Send the question through the same chat and voice path as a spoken one; the answer is spoken and shown here">Ask</button>
+          </form>
+          <div id="asAnswer" class="muted small" style="min-height:16px">The answer goes through the same chat + voice path as a spoken question.</div>
+        </div>
+        <div class="panel stcard"><h3>Log <span class="muted" id="asLogMeta"></span>
+            <button type="button" class="btn small" id="asLogMoreBtn" style="margin-left:auto;text-transform:none;letter-spacing:0" onclick="asLogMore()" title="Show the last 400 lines instead of 60">more (400)</button></h3>
+          <pre id="asLog" class="aslog" tabindex="0" aria-label="assistant log">(loading…)</pre>
+        </div>
+      </div>
+      <div class="stcol asform">
+        <div class="panel stcard"><h3>Configuration <span class="muted">[ASSISTANT]</span></h3>
+          <form id="asForm" onsubmit="return false" autocomplete="off"><div class="empty"><span class="spin"></span> Loading…</div></form>
+          <div class="toolbar" id="asFoot">
+            <button class="btn acc" type="button" id="asSaveApply" onclick="asSave(true)" title="Write the changed keys to the INI and restart the assistant with them (Ctrl+S)">Save &amp; apply</button>
+            <button class="btn" type="button" id="asSaveOnly" onclick="asSave(false)" title="Write the changed keys to the INI only; the running assistant keeps its current settings">Save only</button>
+            <button class="btn" type="button" id="asRevertBtn" onclick="asRevert()" title="Discard the unsaved edits">Revert</button>
+            <span class="muted small" id="asDirty">no changes</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- STATUS -->
   <section id="tab-status" class="hide">
     <div class="toolbar" style="margin-bottom:14px">
@@ -248,7 +346,7 @@
     <div id="statusWrap"><div class="empty"><span class="spin"></span> Loading…</div></div>
   </section>
 
-  <!-- SERVICES: systemd state + start/stop/restart of both units, INI editor -->
+  <!-- SERVICES: systemd state + start/stop/restart of the easyai-server unit, INI editor -->
   <section id="tab-services" class="hide">
     <div class="toolbar" style="margin-bottom:14px">
       <b style="font-size:15px">Services &amp; configuration</b>
@@ -279,7 +377,7 @@ function fmtBytes(b){if(!b)return '–';const u=['B','KB','MB','GB','TB'];let i=
 function fmtNum(n){return n==null?'–':Number(n).toLocaleString();}
 async function api(path,opts){const r=await fetch(path,opts);let j=null;try{j=await r.json();}catch(e){}
   if(r.status===401){showLogin(true);throw new Error('login required');}
-  if(!r.ok)throw new Error((j&&j.error)||('HTTP '+r.status));return j;}
+  if(!r.ok){const e=j&&j.error;const msg=typeof e==='string'?e:(e&&e.message)||('HTTP '+r.status);const err=new Error(msg);if(j&&j.key)err.key=j.key;throw err;}return j;}
 
 function simQS(){let p=new URLSearchParams();if(SIM.ram)p.set('ram_gb',SIM.ram);if(SIM.vram!=null&&SIM.vram!=='')p.set('vram_gb',SIM.vram);
   if(SIM.cores)p.set('cpu_cores',SIM.cores);return p;}
@@ -695,7 +793,8 @@ async function loadStatus(){
     ${feat(true,'MCP')}${feat(sc.mcp_auth,'MCP auth',true)}${feat(sc.api_auth,'API auth')}${feat(sc.models_auth,'/models gate')}
     ${feat(sc.memory_rag,'RAG')}${feat(sc.allow_fs,'fs',true)}${feat(sc.allow_bash,'bash',true)}${feat(sc.google_search,'google')}
     ${feat(sc.metrics,'metrics')}${feat(sc.datetime_injection,'datetime')}${feat(sc.verbose,'verbose')}
-    ${feat(sc.stt_loaded,'voice STT')}${feat(sc.tls,'TLS')}</div>
+    ${feat(sc.stt_loaded,'voice STT')}${feat(sc.tls,'TLS')}
+    ${feat(!!(sc.assistant&&sc.assistant.enabled),'assistant '+((sc.assistant&&sc.assistant.state)||'off'),sc.assistant&&/^(no_mic|error)$/.test(sc.assistant.state||''))}</div>
     <div class="kv" style="margin-top:8px">${kvrows([
       ['WebUI',esch(sc.webui_mode||'–')],['Knowledge cutoff',esch(sc.knowledge_cutoff||'–')],
       ['Sandbox',esch(sc.sandbox||'—')],['Memory dir',esch(sc.memory_dir||'—')],
@@ -805,7 +904,7 @@ async function loadConfig(){
     $('#cfgPath').textContent=r.path;$('#cfgText').value=r.text||'';
     $('#cfgText').disabled=!r.writable;$('#cfgSave').disabled=!r.writable;
     $('#cfgNote').innerHTML=(r.exists?'':'<b>the file does not exist yet</b> · ')+
-      (r.writable?'Both services read this file at start-up: <b>Save</b>, then <b>Restart</b> the one whose section you changed.'
+      (r.writable?'The server reads this file at start-up: <b>Save</b>, then <b>Restart</b> easyai-server — except the <span class="mono">[ASSISTANT]</span> section, which the <b>Assistant</b> tab saves and applies live.'
                  :'<b>read-only for the server user</b> — on the box: <code>sudo chmod 660 '+esch(r.path)+'; sudo chmod 2770 '+esch(r.path.replace(/\/[^\/]*$/,''))+'</code> (the installer does this since 2026-10-17).')+
       (AUTH_OPEN?' <span style="color:var(--marg)">The dashboard has no password: anyone who reaches this page can read the keys in this file — set --webui-password.</span>':'');
     $('#cfgStatus').textContent=r.bytes+' bytes on disk';}
@@ -818,6 +917,249 @@ async function saveConfig(){
   catch(e){$('#cfgStatus').textContent='';toast(e.message,true);}
 }
 
+/* ---------- assistant (built into the server; /models/api/assistant/*) ----------
+   Status is polled every 2 s while the tab is open (AS_TIMER, cleared by switchTab like
+   SVC_TIMER). The form is rendered from GET /options: every option of the table gets a
+   control (explicit renderers for devices, voices, wake model, ranges, secrets; generic
+   by type for anything new), dirty keys are tracked against the loaded values and only
+   they are sent to POST /config. The two Kokoro voice selects are virtual options
+   "tts.kokoro_voice_pt|en" that the server writes to [TTS]. */
+let AS_TIMER=null, AS_OPTS=null, AS_BASE={}, AS_DIRTY={}, AS_FIELDS={}, AS_LOG_MORE=false, AS_BUSY=false;
+const AS_GROUP_ORDER=['Audio','Voice','Wake word','General','Timing','Brain','Advanced'];
+const AS_RANGE_KEYS={mic_gain_db:'dB',pause_ms:'ms',followup_ms:'ms',max_listen_ms:'ms'};
+const AS_STATE_CLS={idle:'good',listening:'acc',thinking:'acc',speaking:'acc',conversation:'acc',starting:'acc',no_mic:'too_tight',error:'too_tight',off:'ghost'};
+const AS_VOPTS=[
+  {key:'tts.kokoro_voice_pt',type:'Str',group:'Voice',virtual:true,help:'Kokoro voice for Portuguese answers — written to [TTS] kokoro_voice_pt and applied to the running engine. Grade = upstream quality (A best).'},
+  {key:'tts.kokoro_voice_en',type:'Str',group:'Voice',virtual:true,help:'Kokoro voice for English answers — written to [TTS] kokoro_voice_en and applied to the running engine. Grade = upstream quality (A best).'}];
+function asId(k){return 'as-f-'+String(k).replace(/[^a-z0-9_]/gi,'-');}
+function asPost(path,body){return api('/models/api/assistant/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});}
+function asVisible(){const s=$('#tab-assistant');return !!s&&!s.classList.contains('hide');}
+function asSchedule(){clearTimeout(AS_TIMER);if(asVisible())AS_TIMER=setTimeout(loadAssistantStatus,2000);}
+function asBool(v){return /^(on|true|1|yes)$/i.test(String(v==null?'':v).trim())?'on':'off';}
+function asNorm(o,v){v=v==null?'':String(v);if(!o)return v;if(o.type==='Bool')return asBool(v);if(o.type==='Int'&&v.trim()!==''&&!isNaN(v))return String(Number(v));return v;}
+function fmtClock(ts){if(!ts)return '';const d=new Date(ts*1000);return isNaN(d)?'':d.toLocaleTimeString();}
+function asWhen(ts){return ts?`<span class="muted small">${fmtClock(ts)} · ${fmtAgo(ts)}</span>`:'';}
+async function loadAssistant(){clearTimeout(AS_TIMER);const n=$('#asAuthNote');if(n)n.classList.toggle('hide',!AUTH_OPEN);await loadAssistantOptions();await loadAssistantStatus();}
+
+/* --- status + log --- */
+async function loadAssistantStatus(){
+  clearTimeout(AS_TIMER);
+  let d;
+  try{d=await api('/models/api/assistant/status');}
+  catch(e){$('#asNow').innerHTML='<div class="empty">'+esch(e.message)+'</div>';$('#asSince').textContent='';asSchedule();return;}
+  asRenderStatus(d);
+  if(AS_LOG_MORE){try{const r=await api('/models/api/assistant/log?lines=400');asRenderLog(r.lines||[]);}catch(e){}}
+  else asRenderLog(d.log||[]);
+  asSchedule();
+}
+function asRenderStatus(d){
+  const st=d.status||{},state=st.state||'off',cls=AS_STATE_CLS[state]||'ghost';
+  const dot=cls==='good'?'':cls==='acc'?'busy':cls==='too_tight'?'bad':'off';
+  const pill=$('#asState');pill.className='pill state '+cls;pill.innerHTML=`<span class="dot-live ${dot}"></span>${esch(state.replace(/_/g,' '))}`;
+  $('#asSince').textContent=st.running&&st.since?('since '+fmtClock(st.since)+' · up '+fmtDur(Date.now()/1000-st.since))
+    :(d.enabled?'enabled in the INI · not running':'disabled in the INI');
+  const en=$('#asEnabled');if(!en.dataset.pending)en.checked=!!d.enabled;
+  $('#asStart').disabled=AS_BUSY||!!st.running;$('#asStop').disabled=AS_BUSY||!st.running;$('#asRestart').disabled=AS_BUSY||!st.running;
+  // level meter: -70..0 dB → 0..100 %, the noise floor as a marker
+  const pct=v=>Math.max(0,Math.min(100,Math.round((Number(v)+70)/70*100)));
+  const lv=(st.level_db==null||isNaN(st.level_db))?-100:Number(st.level_db), fl=(st.floor_db==null||isNaN(st.floor_db))?-100:Number(st.floor_db);
+  const meter=`<div class="meter ${st.speech?'speech':''}" role="meter" aria-label="microphone level" aria-valuemin="-70" aria-valuemax="0" aria-valuenow="${Math.round(Math.max(-70,lv))}">
+      <i style="width:${pct(lv)}%"></i><b style="left:${pct(fl)}%" title="noise floor ${f2(fl,0)} dB"></b></div>
+    <div class="muted small" style="text-align:left">${lv<=-99?'–':f2(lv,0)+' dB'} · floor ${fl<=-99?'–':f2(fl,0)+' dB'}${st.speech?' · <span style="color:var(--acc)">speech</span>':''}</div>`;
+  const rows=[
+    ['Mic',esch(st.mic||'–')],['Speaker',esch(st.speaker||'–')],['Backend',esch(st.backend||'–')],
+    ['Voice',esch(st.voice||'–')],['Wake model',`<span class="mono small">${esch(st.wake_model||'–')}</span>`],['Tools',esch(st.tools||'–')],
+    ['Level',meter],
+    ['Last heard',st.last_heard?esch(st.last_heard)+' '+asWhen(st.last_heard_at):'–'],
+    ['Last question',st.last_question?esch(st.last_question)+(st.last_question_lang?' <span class="pill ghost">'+esch(st.last_question_lang)+'</span>':'')+' '+asWhen(st.last_question_at):'–'],
+    ['Last answer',st.last_answer?esch(st.last_answer)+' '+asWhen(st.last_answer_at):'–'],
+    ['Counters',`${fmtNum(st.n_wakes||0)} wakes · ${fmtNum(st.n_questions||0)} questions · ${fmtNum(st.n_answers||0)} answers · ${fmtNum(st.n_errors||0)} errors`],
+  ];
+  if(st.last_error)rows.push(['Last error',`<span style="color:var(--bad)">${esch(st.last_error)}</span>`]);
+  $('#asNow').innerHTML=`<div class="kv">${kvrows(rows)}</div>`;
+}
+function asRenderLog(lines){
+  const pre=$('#asLog');const atBottom=pre.scrollHeight-pre.scrollTop-pre.clientHeight<24;
+  pre.textContent=(lines||[]).join('\n')||'(no log yet)';
+  if(atBottom)pre.scrollTop=pre.scrollHeight;
+  $('#asLogMeta').textContent=(lines||[]).length+' lines · newest at the bottom';
+}
+async function asLogMore(){
+  AS_LOG_MORE=!AS_LOG_MORE;$('#asLogMoreBtn').textContent=AS_LOG_MORE?'last 60':'more (400)';
+  try{const r=await api('/models/api/assistant/log?lines='+(AS_LOG_MORE?400:60));asRenderLog(r.lines||[]);$('#asLog').scrollTop=$('#asLog').scrollHeight;}
+  catch(e){toast(e.message,true);}
+}
+
+/* --- runtime actions --- */
+async function asAction(action){
+  if(action==='stop'&&!confirm('Stop the assistant? It stays enabled in the INI and starts again with the server.'))return;
+  AS_BUSY=true;['#asStart','#asStop','#asRestart'].forEach(s=>$(s).disabled=true);
+  try{const r=await asPost('action',{action});toast('assistant '+action+': '+((r.status&&r.status.state)||'ok'));}
+  catch(e){toast(e.message,true);}
+  AS_BUSY=false;loadAssistantStatus();
+}
+async function asToggleEnabled(cb){
+  const on=cb.checked;cb.disabled=true;cb.dataset.pending='1';
+  try{const r=await asPost('config',{values:{enabled:on?'on':'off'},apply:true});
+    toast(on?'assistant enabled'+(r.applied?' and started':''):'assistant disabled'+(r.applied?' and stopped':''));
+    (r.warnings||[]).forEach(w=>toast(w,true));}
+  catch(e){toast(e.message,true);cb.checked=!on;}
+  cb.disabled=false;delete cb.dataset.pending;
+  loadAssistantOptions();loadAssistantStatus();
+}
+
+/* --- options → form --- */
+async function loadAssistantOptions(){
+  let d;
+  try{d=await api('/models/api/assistant/options');}
+  catch(e){$('#asForm').innerHTML='<div class="empty">'+esch(e.message)+'</div>';return;}
+  // the server speaks in lower case ("bool"/"int"/"str", default, choices as a list); the form in the header's names
+  for(const o of (d.options||[])){if(!o)continue;o.type=({bool:'Bool',int:'Int',str:'Str'})[String(o.type||'').toLowerCase()]||o.type;
+    if(o.def==null&&o.default!=null)o.def=String(o.default);if(Array.isArray(o.choices))o.choices=o.choices.join('|');}
+  AS_OPTS=d;asRenderForm();
+}
+function asOptLabel(o){return o.key.replace(/^tts\./,'').replace(/_/g,' ');}
+function asDevOptions(devs,want,cur){
+  const list=(devs||[]).filter(x=>x&&(x[want]||x.is_default)).sort((a,b)=>(b.is_default?1:0)-(a.is_default?1:0));
+  let html=list.map(x=>`<option value="${esch(x.id)}" ${x.id===cur?'selected':''}>${esch(x.id)}${x.name&&x.name!==x.id?' — '+esch(x.name):''}${x.card?' ('+esch(x.card)+')':''}${x.is_default?' · default':''}</option>`).join('');
+  if(cur&&!list.some(x=>x.id===cur))html=`<option value="${esch(cur)}" selected>${esch(cur)} — not listed now</option>`+html;
+  if(!html)html='<option value="default" selected>default</option>';
+  return html;
+}
+function asVoiceOptions(voices,cur,pref){
+  const list=(voices&&voices.list)||[];const langs=[];const by={};
+  for(const v of list){const l=v.lang||'other';if(!by[l]){by[l]=[];langs.push(l);}by[l].push(v);}
+  langs.sort((a,b)=>{const pa=a.startsWith(pref)?0:1,pb=b.startsWith(pref)?0:1;return pa-pb||a.localeCompare(b);});
+  const gender=g=>g==='f'?'female':g==='m'?'male':(g||'?');
+  let html=langs.map(l=>`<optgroup label="${esch(l)}">`+by[l].map(v=>
+    `<option value="${esch(v.id)}" ${v.id===cur?'selected':''} ${v.available===false?'disabled':''}>${esch(v.id)} · ${esch(gender(v.gender))} · ${esch(v.grade||'–')}${v.available===false?' · unavailable':''}</option>`).join('')+'</optgroup>').join('');
+  if(cur&&!list.some(v=>v.id===cur))html=`<option value="${esch(cur)}" selected>${esch(cur)} (not in the catalogue)</option>`+html;
+  if(!html)html='<option value="" selected>(no voices listed)</option>';
+  return html;
+}
+function asStep(o){const span=(o.max||0)-(o.min||0);return span>=5000?50:span>=500?10:1;}
+function asField(o){
+  const id=asId(o.key),cur=AS_BASE[o.key],d=AS_OPTS||{},lbl=esch(asOptLabel(o)),key=esch(o.key);
+  const choices=(o.choices||'').split('|').map(s=>s.trim()).filter(Boolean);
+  const sel=opts=>`<select id="${id}" data-key="${key}">${opts}</select>`;
+  const choiceOpts=list=>{let h=list.map(c=>`<option value="${esch(c)}" ${c===cur?'selected':''}>${esch(c)}</option>`).join('');
+    if(cur&&!list.includes(cur))h=`<option value="${esch(cur)}" selected>${esch(cur)}</option>`+h;return h;};
+  let ctl='';
+  if(o.key==='mic')ctl=sel(asDevOptions(d.devices,'capture',cur));
+  else if(o.key==='speaker')ctl=sel(asDevOptions(d.devices,'playback',cur));
+  else if(o.key==='wake_model'){
+    const list=[{name:'server',path:'server'}].concat((d.wake_models||[]).filter(w=>w&&w.path!=='server'&&w.name!=='server'));
+    let h=list.map(w=>{const v=w.path||w.name;return `<option value="${esch(v)}" ${v===cur?'selected':''}>${esch(w.name||v)}${w.size_bytes?' · '+fmtBytes(w.size_bytes):''}${v==='server'?' — every burst through the server STT':''}</option>`;}).join('');
+    if(cur&&!list.some(w=>(w.path||w.name)===cur))h=`<option value="${esch(cur)}" selected>${esch(cur)} — not found</option>`+h;
+    ctl=sel(h);}
+  else if(o.virtual){const v=d.voices||{};ctl=sel(asVoiceOptions(v,cur,o.key.endsWith('_pt')?'pt':'en'));
+    if(v.engine&&!v.kokoro)ctl+=`<div class="muted small" style="margin-top:4px">engine in use: ${esch(v.engine)}${v.fallback?' ('+esch(v.fallback)+')':''} — these voices apply once the Kokoro engine is loaded</div>`;}
+  else if(o.key==='api_key')ctl=`<input id="${id}" data-key="${key}" type="password" autocomplete="new-password" value="${esch(cur)}" placeholder="${cur?'':'not set — the server’s own key is used'}">`;
+  else if(o.key==='system')ctl=`<textarea id="${id}" data-key="${key}" rows="4" spellcheck="false" placeholder="built-in prompt">${esch(cur)}</textarea>`;
+  else if(o.type==='Bool')ctl=`<label class="chk" for="${id}"><input id="${id}" data-key="${key}" type="checkbox" ${cur==='on'?'checked':''}> <span class="small muted">${cur}</span></label>`;
+  else if(o.type==='Int'&&AS_RANGE_KEYS[o.key]!=null&&o.max>o.min)
+    ctl=`<div class="pair"><input id="${id}-r" type="range" min="${o.min}" max="${o.max}" step="${asStep(o)}" value="${esch(cur)}" aria-label="${lbl} slider" oninput="asPair('${id}',this.value)">
+      <input id="${id}" data-key="${key}" type="number" min="${o.min}" max="${o.max}" step="1" value="${esch(cur)}" oninput="asPair('${id}',this.value,true)"><span class="unit">${AS_RANGE_KEYS[o.key]}</span></div>`;
+  else if(o.type==='Int')ctl=`<input id="${id}" data-key="${key}" type="number" ${o.max>o.min?`min="${o.min}" max="${o.max}"`:''} step="1" value="${esch(cur)}">`;
+  else if(choices.length)ctl=sel(choiceOpts(choices));
+  else{let ph='';if(o.key==='endpoint')ph='this server'+(d.self_endpoint?' · '+d.self_endpoint:'');else if(/_endpoint$/.test(o.key))ph='in-process (this server)';
+    ctl=`<input id="${id}" data-key="${key}" type="text" value="${esch(cur)}" placeholder="${esch(ph)}" spellcheck="false">`;}
+  const meta=[];if(o.flag)meta.push(o.flag);if(o.def!=null&&o.def!=='')meta.push('default '+o.def);if(o.type==='Int'&&o.max>o.min)meta.push(o.min+'…'+o.max);
+  return `<div class="fld" id="${id}-row"><label for="${id}">${lbl}<code>${key}</code></label><div class="ctl">${ctl}</div>
+    <div class="help">${esch(o.help||'')}${meta.length?' <span class="mono" style="opacity:.75">· '+esch(meta.join(' · '))+'</span>':''}</div></div>`;
+}
+function asPair(id,v,fromNumber){
+  const num=document.getElementById(id),rng=document.getElementById(id+'-r');if(!num)return;
+  if(fromNumber){if(rng&&v!=='')rng.value=v;}else num.value=v;
+  asChanged(num);
+}
+function asRenderForm(){
+  const d=AS_OPTS||{},cfg=d.config||{},voices=d.voices||{};
+  const opts=(d.options||[]).filter(o=>o&&o.key&&o.key!=='enabled');
+  let all=opts.slice();const ti=all.findIndex(o=>o.key==='tts');
+  if(ti>=0)all.splice(ti+1,0,...AS_VOPTS);else all=all.concat(AS_VOPTS);
+  AS_BASE={};AS_FIELDS={};
+  for(const o of all){AS_FIELDS[o.key]=o;
+    AS_BASE[o.key]=o.virtual?String((o.key.endsWith('_pt')?voices.current_pt:voices.current_en)||''):asNorm(o,cfg[o.key]!=null?cfg[o.key]:(o.def||''));}
+  for(const k of Object.keys(AS_DIRTY))if(!(k in AS_BASE)||AS_DIRTY[k]===AS_BASE[k])delete AS_DIRTY[k];
+  const groups=[];const byG={};
+  for(const o of all){const g=o.group||'Other';if(!byG[g]){byG[g]=[];groups.push(g);}byG[g].push(o);}
+  groups.sort((a,b)=>{const ia=AS_GROUP_ORDER.indexOf(a),ib=AS_GROUP_ORDER.indexOf(b);return (ia<0?99:ia)-(ib<0?99:ib)||a.localeCompare(b);});
+  const ini=d.ini||{};
+  const head=`<div class="muted small" style="margin-bottom:8px">Section <span class="mono">[ASSISTANT]</span> of <span class="mono">${esch(ini.path||'easyai.ini')}</span>${ini.writable===false?' — <b style="color:var(--marg)">read-only for the server user</b>':''}${d.self_endpoint?' · this server: <span class="mono">'+esch(d.self_endpoint)+'</span>':''}</div>`;
+  const body=groups.map(g=>`<div class="fgroup"><h3>${esch(g)}${g==='Audio'?'<button type="button" class="btn small" onclick="asRefreshDevices()" title="List the audio devices again">Refresh devices</button>':''}</h3>${byG[g].map(asField).join('')}</div>`).join('')
+    ||'<div class="empty">The server returned no options.</div>';
+  $('#asForm').innerHTML=head+body;
+  // re-apply unsaved edits that survived a reload (Refresh while editing)
+  for(const k of Object.keys(AS_DIRTY)){const el=document.getElementById(asId(k));if(!el)continue;
+    if(el.type==='checkbox')el.checked=AS_DIRTY[k]==='on';else el.value=AS_DIRTY[k];
+    const rng=document.getElementById(asId(k)+'-r');if(rng)rng.value=AS_DIRTY[k];
+    asChanged(el);}
+  if(!$('#asSayText').value&&cfg.name)$('#asSayText').value=(cfg.greeting==='pt'?'Olá, eu sou ':'Hello, I am ')+cfg.name;
+  asDirtyUI();
+}
+function asValueOf(el){const o=AS_FIELDS[el.dataset.key];if(el.type==='checkbox')return el.checked?'on':'off';return asNorm(o,el.value);}
+function asChanged(el){
+  if(!el||!el.dataset||!el.dataset.key||!(el.dataset.key in AS_BASE))return;
+  const k=el.dataset.key,v=asValueOf(el);
+  if(el.type==='checkbox'){const t=el.parentNode&&el.parentNode.querySelector('span');if(t)t.textContent=v;}
+  // the api_key field holds a mask for a set secret: emptying it cannot clear the key (the server ignores
+  // empty / masked values) — clear it in Services → easyai.ini instead; only a typed value is a change
+  if(k==='api_key'&&v===''&&AS_BASE[k]!==''){delete AS_DIRTY[k];toast('to remove the api_key, edit easyai.ini in the Services tab',true);}
+  else if(v!==AS_BASE[k])AS_DIRTY[k]=v;else delete AS_DIRTY[k];
+  const row=document.getElementById(asId(k)+'-row');if(row)row.classList.toggle('changed',k in AS_DIRTY);
+  asDirtyUI();
+}
+function asDirtyUI(){
+  const n=Object.keys(AS_DIRTY).length,ro=!!(AS_OPTS&&AS_OPTS.ini&&AS_OPTS.ini.writable===false);
+  $('#asDirty').innerHTML=ro?'<span style="color:var(--marg)">the INI is read-only for the server user — see the Services tab</span>'
+    :(n?`<b style="color:var(--acc)">${n} unsaved change${n>1?'s':''}</b>`:'no changes');
+  $('#asSaveApply').disabled=!n||ro;$('#asSaveOnly').disabled=!n||ro;$('#asRevertBtn').disabled=!n;
+}
+async function asSave(apply){
+  const keys=Object.keys(AS_DIRTY);if(!keys.length){toast('nothing to save');return;}
+  const values={};for(const k of keys)values[k]=AS_DIRTY[k];
+  const btns=$$('#asFoot button');btns.forEach(b=>b.disabled=true);$('#asDirty').innerHTML='<span class="spin"></span> saving…';
+  try{const r=await asPost('config',{values,apply:!!apply});
+    toast((r.saved?'saved '+keys.length+' key'+(keys.length>1?'s':''):'not saved')
+      +(r.applied?' · applied to the running assistant':(apply?'':' · not applied — Restart or Save & apply to use them'))
+      +(r.backup?' · previous copy kept':''));
+    (r.warnings||[]).forEach(w=>toast(w,true));
+    AS_DIRTY={};await loadAssistantOptions();asDirtyUI();loadAssistantStatus();}
+  catch(e){toast(e.message,true);if(e.key){const row=document.getElementById(asId(e.key)+'-row');if(row)row.classList.add('changed');}asDirtyUI();}
+}
+function asRevert(){AS_DIRTY={};asRenderForm();toast('edits discarded');}
+async function asRefreshDevices(){
+  try{const r=await api('/models/api/assistant/devices');
+    if(AS_OPTS){AS_OPTS.devices=r.devices||[];
+      for(const k of ['mic','speaker']){const el=document.getElementById(asId(k));if(!el)continue;
+        el.innerHTML=asDevOptions(AS_OPTS.devices,k==='mic'?'capture':'playback',el.value);asChanged(el);}}
+    toast((r.devices||[]).length+' audio device'+((r.devices||[]).length===1?'':'s'));}
+  catch(e){toast(e.message,true);}
+}
+
+/* --- test: say / ask --- */
+async function asSay(ev){
+  if(ev)ev.preventDefault();
+  const text=$('#asSayText').value.trim();if(!text){toast('type something to say',true);return;}
+  const b=$('#asSayBtn');b.disabled=true;$('#asSayOut').innerHTML='<span class="spin"></span> speaking…';
+  try{const r=await asPost('say',{text,lang:$('#asSayLang').value});$('#asSayOut').textContent='spoken in '+fmtNum(r.ms)+' ms';}
+  catch(e){$('#asSayOut').innerHTML='<span style="color:var(--bad)">'+esch(e.message)+'</span>';}
+  b.disabled=false;
+}
+async function asAsk(ev){
+  if(ev)ev.preventDefault();
+  const text=$('#asAskText').value.trim();if(!text){toast('type a question',true);return;}
+  const b=$('#asAskBtn');b.disabled=true;$('#asAnswer').innerHTML='<span class="spin"></span> thinking…';
+  try{const r=await asPost('ask',{text});
+    $('#asAnswer').innerHTML=`<div class="answer">${esch(r.answer||'(empty answer)')}</div><div class="muted small" style="margin-top:4px">${r.lang?esch(r.lang)+' · ':''}${fmtNum(r.ms)} ms</div>`;}
+  catch(e){$('#asAnswer').innerHTML='<span style="color:var(--bad)">'+esch(e.message)+'</span>';}
+  b.disabled=false;loadAssistantStatus();
+}
+$('#asForm').addEventListener('input',e=>asChanged(e.target));
+$('#asForm').addEventListener('change',e=>asChanged(e.target));
+$('#tab-assistant').addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();if(!$('#asSaveApply').disabled)asSave(true);}});
+
 /* ---------- tabs / boot ---------- */
 function switchTab(t){$$('nav.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===t));
   $$('main > section').forEach(s=>s.classList.toggle('hide',s.id!=='tab-'+t));
@@ -825,6 +1167,7 @@ function switchTab(t){$$('nav.tabs button').forEach(b=>b.classList.toggle('activ
   if(t==='local')loadStt();
   if(t==='downloads')pollDl();
   if(t==='status')loadStatus(); else clearTimeout(STATUS_TIMER);
+  if(t==='assistant')loadAssistant(); else clearTimeout(AS_TIMER);
   if(t==='services'){loadServices();loadConfig();} else clearTimeout(SVC_TIMER);}
 $$('nav.tabs button').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
 $('#statusAuto').addEventListener('change',()=>{if($('#statusAuto').checked)loadStatus();else clearTimeout(STATUS_TIMER);});

@@ -27,10 +27,9 @@ the lib surface.
 |----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
 | `easyai-local`       | Local-only REPL: loads a GGUF in-process via `easyai::Engine` (driven through `easyai::Session`). Drop-in `llama-cli` replacement — one-shot scripting (`-p`), tools, presets, optional `<think>` strip, sandboxed `*_file` tools, opt-in `bash` tool. |
 | `easyai-cli`         | Agentic OpenAI-protocol client — no local model.  Full-screen chat **TUI** (opencode-style look & feel: markdown, live tool rows with diffs, `/`-command + `@`-file completion, themes — default for interactive terminals; `--plain` for the legacy line REPL), `--shell` (hybrid AI shell), or `-p` one-shot.  Full sampling control (`--temperature`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--frequency-penalty`, `--presence-penalty`, `--seed`, `--max-tokens`, `--stop`), plan tool, server-management subcommands (`--list-models`, `--list-tools`, `--health`, `--props`, `--metrics`, `--set-preset`).  HTTPS via OpenSSL; `--insecure-tls` / `--ca-cert` for dev/internal CAs.  Full doc: [`easyai-cli.md`](easyai-cli.md). |
-| `easyai-server`      | Drop-in `llama-server` replacement: OpenAI-compat HTTP **with full SSE streaming**, embedded SvelteKit webui, Bearer auth, Prometheus `/metrics`, KV-cache controls, flash-attn, mlock.  Built-in **[MODELS dashboard](MODELS.md)** (`/models`) — native hardware-aware model recommendations, local-model parameters + in-process hot-swap, a GGUF download manager and a whisper voice-model panel, password-gated.  Speaks MCP, OpenAI, Ollama and OpenAI audio (`/v1/audio/transcriptions`, mic chip in the chat) from one process; optional TLS.  Full doc: [`easyai-server.md`](easyai-server.md). |
+| `easyai-server`      | Drop-in `llama-server` replacement: OpenAI-compat HTTP **with full SSE streaming**, embedded SvelteKit webui, Bearer auth, Prometheus `/metrics`, KV-cache controls, flash-attn, mlock.  Built-in **[MODELS dashboard](MODELS.md)** (`/models`) — native hardware-aware model recommendations, local-model parameters + in-process hot-swap, a GGUF download manager and a whisper voice-model panel, password-gated.  Speaks MCP, OpenAI, Ollama and OpenAI audio (`/v1/audio/transcriptions`, `/v1/audio/speech` with Kokoro-82M in C++, mic chip in the chat) from one process; optional TLS.  Carries the always-listening **voice assistant** ("hello Max" / "olá Max" on the box's own mic and speaker, Linux ALSA / macOS CoreAudio, no third-party libs; 1.5 s pause, three sounds, answer spoken with a male pt-BR / en voice, thinking off, tools run inside; `[ASSISTANT] enabled = on`, a dashboard tab with every device, voice and key) — a separate `easyai-assistant` binary until 2026-11-14.  Full docs: [`easyai-server.md`](easyai-server.md), [`easyai-assistant.md`](easyai-assistant.md). |
 | `easyai-mcp-server`  | **Standalone Model Context Protocol provider — no model loaded.** Same tool catalogue as `easyai-server` (built-ins + knowledge tools + external-tools), exposed over `POST /mcp` with a configurable cpp-httplib worker pool (`--threads`) and an in-flight `tools/call` cap (`--max-concurrent-calls`) for thousands-of-clients deployments.  Full doc: [`easyai-mcp-server.md`](easyai-mcp-server.md). |
 | `easyai-library-demo`| Five-line `easyai::Session` template — pair with [`LIB_GUIDE.md`](LIB_GUIDE.md).  The smallest "build an agent, register a tool, chat" program in the repo. |
-| `easyai-assistant`   | Always-listening **voice assistant** for a box with a mic and speaker (Linux ALSA / macOS CoreAudio, no third-party libs): "hello Max" / "olá Max", 1.5 s pause, three sounds (speak / got it / done), answer spoken with a male pt-BR / en voice, thinking off, tools run inside, every call OpenAI-shaped so the INI can point at any provider with a key.  Full doc: [`easyai-assistant.md`](easyai-assistant.md). |
 | `easyai-agent`       | A demo agent showing every built-in tool plus an inline custom tool.                                                                                |
 | `easyai-recipes`     | Tutorial agent paired with `manual.md` — implements `today_is` and `weather` (HTTP-calling) from scratch.                                          |
 | `easyai-chat`        | A bare-bones REPL with no tools — useful as a sanity check.                                                                                          |
@@ -95,6 +94,29 @@ A running log of user-facing changes. Latest first — keep this list
 current as features land so anyone returning to the repo (or
 landing on it for the first time) sees what shipped recently.
 
+### 2026-11-14 — the voice assistant moves into easyai-server
+
+- **`easyai::Assistant`** replaces the separate `easyai-assistant`
+  program: one process, one unit, one INI. Transcription and speech use
+  the server's own whisper and Kokoro in-process; the chat still goes
+  through the OpenAI-shaped `/v1/chat/completions` (loopback by default,
+  llama-server / OpenAI by `endpoint`), tools run in the assistant.
+  `[ASSISTANT] enabled = on` starts it with the server; every key is a
+  flag `--assistant-<key>`.
+- **`/models` → Assistant** tab: state, Start / Stop / Restart, Enabled
+  switch, mic / speaker / wake model / Kokoro voice dropdowns filled from
+  the box, every `[ASSISTANT]` key with Save & apply (written into the
+  INI with comments kept, applied live), Say / Ask test boxes, live log.
+  API under `/models/api/assistant/*`; public `GET /v1/audio/voices`.
+- **CLI**: `easyai-server --list-audio-devices`, `--list-voices`,
+  `--assistant-options`, `--assistant-say "text"`.
+- **Installer**: builds and runs the tests, gives the server unit the
+  `audio` group, pins the SHA-256 of every default download, checks the Kokoro voice
+  is the engine in use, and **purges the old binary and the stale units**
+  (`/usr/bin/easyai-assistant`, `easyai-assistant.service`,
+  `easyai-tts-kokoro.service`) on every run and `--upgrade`.
+  Docs: `easyai-assistant.md`, `LINUX_SERVER.md` §2, §3, §12.
+
 ### 2026-10-16 — easyai-assistant + `/v1/audio/speech`
 
 - **`easyai-assistant`**: a separate service that listens on the machine's
@@ -104,6 +126,7 @@ landing on it for the first time) sees what shipped recently.
   thinking off, says when it uses a tool) and speaks each sentence as it
   arrives. ALSA on Linux, CoreAudio on macOS. `[ASSISTANT]` in the INI;
   the installer writes `easyai-assistant.service`. Doc: `easyai-assistant.md`.
+  (Folded into easyai-server on 2026-11-14, see above.)
 - **`POST /v1/audio/speech`** on easyai-server (OpenAI shape). Natural
   voice: **Kokoro-82M in C++** (`easyai::Kokoro`: onnxruntime and
   espeak-ng opened with `dlopen`, male `pm_alex` pt-BR / `am_michael`

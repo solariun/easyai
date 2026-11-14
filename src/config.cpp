@@ -9,11 +9,14 @@
 // CRLF line endings, optional surrounding quotes on values.
 
 #include "easyai/config.hpp"
+#include "easyai/assistant.hpp"
 
 #include <cctype>
 #include <fstream>
 #include <sstream>
+#include <set>
 #include <string>
+#include <vector>
 
 namespace easyai::config {
 
@@ -205,6 +208,163 @@ std::string find_model_section(const Ini & ini, const std::string & model_name) 
         }
     }
     return best_section;
+}
+
+// ---------------------------------------------------------------------------
+// set_ini_values — rewrite the values of one section, keep everything else
+// (declared in easyai/assistant.hpp; the dashboard's "Save" uses it).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct IniLine {
+    std::string text;      // without the line ending
+    bool        crlf = false;
+};
+
+std::vector<IniLine> split_lines(const std::string & text, bool & trailing_newline) {
+    std::vector<IniLine> out;
+    std::size_t start = 0;
+    trailing_newline = text.empty() || text.back() == '\n';
+    while (start < text.size()) {
+        auto nl = text.find('\n', start);
+        IniLine l;
+        if (nl == std::string::npos) { l.text = text.substr(start); start = text.size(); }
+        else { l.text = text.substr(start, nl - start); start = nl + 1; }
+        if (!l.text.empty() && l.text.back() == '\r') { l.text.pop_back(); l.crlf = true; }
+        out.push_back(l);
+    }
+    return out;
+}
+
+bool is_header(const std::string & line, std::string & name) {
+    const std::string t = trim(line);
+    if (t.size() < 3 || t.front() != '[' || t.back() != ']') return false;
+    name = trim(t.substr(1, t.size() - 2));
+    return true;
+}
+
+// `key = value` → the key, the position where the value starts (after '=' and
+// the spaces that follow it). Leading comment markers are NOT skipped here.
+bool parse_entry(const std::string & line, std::string & key, std::size_t & value_pos) {
+    const auto eq = line.find('=');
+    if (eq == std::string::npos) return false;
+    key = trim(line.substr(0, eq));
+    if (key.empty() || key.front() == '[') return false;
+    value_pos = eq + 1;
+    while (value_pos < line.size() && (line[value_pos] == ' ' || line[value_pos] == '\t')) ++value_pos;
+    return true;
+}
+
+// A commented-out entry: "# key = value" / ";key = value" → the part after the marker and its spaces.
+bool parse_commented_entry(const std::string & line, std::string & key, std::size_t & body_pos, std::size_t & value_pos) {
+    std::size_t i = 0;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    if (i >= line.size() || (line[i] != '#' && line[i] != ';')) return false;
+    ++i;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    body_pos = i;
+    std::size_t vp = 0;
+    if (!parse_entry(line.substr(i), key, vp)) return false;
+    // Something that merely looks like "# note = here" with spaces inside the key is prose, not a key.
+    if (key.find(' ') != std::string::npos || key.find('\t') != std::string::npos) return false;
+    value_pos = i + vp;
+    return true;
+}
+
+std::string ini_value_text(const std::string & v) {
+    if (!v.empty() && (std::isspace((unsigned char) v.front()) || std::isspace((unsigned char) v.back())))
+        return "\"" + v + "\"";
+    return v;
+}
+
+}  // namespace
+
+bool set_ini_values(std::string & text, const std::string & section,
+                    const std::map<std::string, std::string> & values, std::string & err) {
+    err.clear();
+    if (trim(section).empty()) { err = "empty section name"; return false; }
+    for (const auto & kv : values) {
+        if (kv.first.empty() || kv.first.find('=') != std::string::npos || kv.first.find('\n') != std::string::npos ||
+            kv.first.find('\r') != std::string::npos || trim(kv.first) != kv.first) {
+            err = "invalid key '" + kv.first + "'"; return false;
+        }
+        if (kv.second.find('\n') != std::string::npos || kv.second.find('\r') != std::string::npos) {
+            err = "value of '" + kv.first + "' contains a newline"; return false;
+        }
+    }
+    if (values.empty()) return true;
+
+    bool trailing_nl = true;
+    std::vector<IniLine> lines = split_lines(text, trailing_nl);
+
+    // Locate the section: [begin, end) line indexes (end = next header or EOF).
+    // A header on the last line is a found, empty section.
+    bool found = false;
+    std::size_t begin = lines.size(), end = lines.size();
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        std::string name;
+        if (!is_header(lines[i].text, name)) continue;
+        if (!found) { if (name == trim(section)) { found = true; begin = i + 1; } }
+        else { end = i; break; }
+    }
+
+    std::map<std::string, std::string> pending = values;
+    if (!found) {
+        // No such section: append it at the end, after one blank line.
+        if (!lines.empty() && !trim(lines.back().text).empty()) lines.push_back({"", false});
+        lines.push_back({"[" + trim(section) + "]", false});
+        for (const auto & kv : pending) lines.push_back({kv.first + " = " + ini_value_text(kv.second), false});
+        trailing_nl = true;
+    } else {
+        // 1. live entries: replace in place, keeping what precedes the value.
+        //    Every occurrence is rewritten: the parser lets the last one win,
+        //    so a duplicate left behind would silently undo the change.
+        std::set<std::string> done;
+        for (std::size_t i = begin; i < end; ++i) {
+            std::string key; std::size_t vp = 0;
+            const std::string t = trim(lines[i].text);
+            if (t.empty() || t.front() == '#' || t.front() == ';') continue;
+            if (!parse_entry(lines[i].text, key, vp)) continue;
+            auto it = pending.find(key);
+            if (it == pending.end()) continue;
+            std::string head = lines[i].text.substr(0, vp);
+            lines[i].text = head + ini_value_text(it->second);
+            done.insert(key);
+        }
+        for (const auto & k : done) pending.erase(k);
+        // 2. commented-out entries: un-comment the first one of each remaining key.
+        for (std::size_t i = begin; i < end && !pending.empty(); ++i) {
+            std::string key; std::size_t bp = 0, vp = 0;
+            if (!parse_commented_entry(lines[i].text, key, bp, vp)) continue;
+            auto it = pending.find(key);
+            if (it == pending.end()) continue;
+            std::string head = lines[i].text.substr(bp, vp - bp);
+            lines[i].text = head + ini_value_text(it->second);
+            pending.erase(it);
+        }
+        // 3. missing keys: after the last entry of the section — before the
+        //    blank lines and the comment banner that introduce the next one.
+        if (!pending.empty()) {
+            std::size_t at = end;
+            while (at > begin) {
+                const std::string t = trim(lines[at - 1].text);
+                if (!(t.empty() || t.front() == '#' || t.front() == ';')) break;
+                --at;
+            }
+            std::vector<IniLine> add;
+            for (const auto & kv : pending) add.push_back({kv.first + " = " + ini_value_text(kv.second), false});
+            lines.insert(lines.begin() + (std::ptrdiff_t) at, add.begin(), add.end());
+        }
+    }
+
+    std::string out;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        out += lines[i].text;
+        if (i + 1 < lines.size() || trailing_nl) out += lines[i].crlf ? "\r\n" : "\n";
+    }
+    text = out;
+    return true;
 }
 
 }  // namespace easyai::config

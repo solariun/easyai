@@ -2,7 +2,8 @@
 // system's own audio API: ALSA on Linux (libasound), CoreAudio AudioQueue on
 // macOS. PCM16 mono. Capture delivers fixed periods through a blocking
 // read() paced by the device clock (no timer, no polling); playback is a
-// blocking play of one clip, used sentence by sentence by easyai-assistant.
+// blocking play of one clip, used sentence by sentence by easyai::Assistant
+// (the voice assistant inside easyai-server).
 #pragma once
 
 #include <cstdint>
@@ -15,6 +16,29 @@ namespace audio {
 
 // "alsa", "coreaudio" or "none" (built without an audio backend).
 std::string backend_name();
+
+// One microphone or speaker the operating system knows. Linux/ALSA: id is
+// the ALSA name to put in [ASSISTANT] mic / speaker ("default",
+// "plughw:1,0", "sysdefault:CARD=Generic_1" …), card the card name from
+// /proc/asound/cards, name the human description. macOS/CoreAudio: id is
+// "default" plus one entry per device ("coreaudio:<AudioDeviceID>"; only
+// "default" is accepted by Capture/Playback today).
+struct Device {
+    std::string id;
+    std::string name;
+    std::string card;
+    bool        capture    = false;
+    bool        playback   = false;
+    bool        is_default = false;
+};
+
+// Every device, "default" first. ALSA: snd_device_name_hint() for the
+// names, /proc/asound/pcm for the capture/playback flags of the hw cards
+// (one plughw:<card>,<dev> entry per pcm, so a box whose "default" is an
+// HDMI-only card still shows the microphone). Built without a backend →
+// empty list and err set. Nothing is opened: a listing never disturbs a
+// running capture.
+std::vector<Device> list_devices(std::string & err);
 
 class Capture {
 public:

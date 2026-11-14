@@ -1,12 +1,16 @@
 // easyai-assistant model-free core (spec.md "easyai-assistant"): wake
 // matcher, sentence chunker, VAD + segmenter on a synthetic signal,
 // language guess, beep, WAV round trip.
+#include "easyai/assistant.hpp"
 #include "easyai/assistant_core.hpp"
+#include "easyai/config.hpp"
 #include "easyai/stt.hpp"
 #include "easyai/tts.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -210,6 +214,191 @@ int main() {
         CHECK(drop_prompt_echo("Olá Max, como você está?", "").rfind("Olá Max", 0) == 0);
         CHECK(wake_match(drop_prompt_echo("The assistant is called max. Hello Max, what time is it?", prompt), "max", default_aliases("max"), default_call_words()).matched);
         CHECK(!wake_match(drop_prompt_echo("The assistant is called max. The assistant is called max.", prompt), "max", default_aliases("max"), default_call_words()).matched);
+    }
+
+
+    // --- easyai::Assistant option table -----------------------------------------------
+    {
+        using A = easyai::Assistant;
+        const auto & opts = A::options();
+        std::set<std::string> keys, flags;
+        bool all_help = true, all_group = true, roundtrip = true, defaults_match = true, prefix = true;
+        A::Config def;
+        for (const auto & o : opts) {
+            keys.insert(o.key); flags.insert(o.flag);
+            if (o.help.empty()) all_help = false;
+            if (o.group.empty()) all_group = false;
+            if (A::key_of_flag(o.flag) != o.key) roundtrip = false;
+            if (A::get(def, o.key) != o.def) { defaults_match = false; std::printf("   default mismatch %s: '%s' vs '%s'\n", o.key.c_str(), A::get(def, o.key).c_str(), o.def.c_str()); }
+            if (o.flag.rfind("--assistant-", 0) != 0 || o.flag.find('_') != std::string::npos) prefix = false;
+        }
+        CHECK(opts.size() == 31);
+        CHECK(keys.size() == opts.size());
+        CHECK(flags.size() == opts.size());
+        CHECK(all_help && all_group && roundtrip && defaults_match && prefix);
+        CHECK(A::key_of_flag("--assistant-mic-gain-db") == "mic_gain_db" && A::key_of_flag("--mic") == "");
+        const std::set<std::string> groups = {"General", "Wake word", "Audio", "Voice", "Timing", "Brain", "Advanced"};
+        bool groups_ok = true;
+        for (const auto & o : opts) if (!groups.count(o.group)) groups_ok = false;
+        CHECK(groups_ok);
+        // the closed sets and the ranges
+        auto opt = [&](const char * k) { for (const auto & o : opts) if (o.key == k) return o; return A::Option(); };
+        CHECK(opt("greeting").choices == "en|pt|off" && opt("language").choices == "auto|pt|en" && opt("tts").choices == "auto|server|kokoro|piper|espeak|say");
+        CHECK(opt("pause_ms").min == 300 && opt("pause_ms").max == 10000 && opt("max_listen_ms").min == 2000 && opt("max_listen_ms").max == 120000);
+        CHECK(opt("followup_ms").min == 0 && opt("followup_ms").max == 30000 && opt("mic_gain_db").min == -30 && opt("mic_gain_db").max == 30);
+        CHECK(opt("history_turns").min == 0 && opt("history_turns").max == 50 && opt("history_idle_s").min == 10 && opt("history_idle_s").max == 86400);
+        CHECK(opt("enabled").type == A::Option::Bool && opt("pause_ms").type == A::Option::Int && opt("name").type == A::Option::Str);
+        CHECK(opt("wake_model").def == "server" && opt("endpoint").def.empty() && opt("tts").def == "auto");
+
+        // set(): validation
+        A::Config c; std::string err;
+        CHECK(A::set(c, "pause_ms", "2000", err) && c.pause_ms == 2000 && err.empty());
+        CHECK(!A::set(c, "pause_ms", "abc", err) && !err.empty());
+        CHECK(!A::set(c, "pause_ms", "12x", err));
+        CHECK(!A::set(c, "pause_ms", "100", err) && err.find("range") != std::string::npos && c.pause_ms == 2000);
+        CHECK(!A::set(c, "pause_ms", "10001", err));
+        CHECK(A::set(c, "followup_ms", "0", err) && c.followup_ms == 0);
+        CHECK(A::set(c, "mic_gain_db", "-30", err) && c.mic_gain_db == -30 && !A::set(c, "mic_gain_db", "31", err));
+        CHECK(!A::set(c, "greeting", "fr", err) && err.find("en pt off") != std::string::npos);
+        CHECK(A::set(c, "greeting", "PT", err) && c.greeting == "pt");
+        CHECK(!A::set(c, "tts", "festival", err) && A::set(c, "tts", "kokoro", err) && c.tts == "kokoro");
+        CHECK(!A::set(c, "no_such_key", "1", err) && err.find("unknown") != std::string::npos);
+        for (const char * t : {"on", "1", "true", "yes", "ON", "Yes"}) { CHECK(A::set(c, "enabled", t, err) && c.enabled); }
+        for (const char * f : {"off", "0", "false", "no", "OFF", "No"}) { CHECK(A::set(c, "enabled", f, err) && !c.enabled); }
+        CHECK(!A::set(c, "verbose", "maybe", err) && !err.empty());
+        CHECK(A::set(c, "name", "easy", err) && c.name == "easy" && A::get(c, "name") == "easy");
+        CHECK(A::get(c, "enabled") == "off" && A::get(c, "followup_ms") == "0" && A::get(c, "nope").empty());
+
+        // to_map covers every option
+        const auto m = A::to_map(c);
+        CHECK(m.size() == opts.size());
+        bool covered = true;
+        for (const auto & o : opts) if (!m.count(o.key) || m.at(o.key) != A::get(c, o.key)) covered = false;
+        CHECK(covered && m.at("name") == "easy" && m.at("tts") == "kokoro");
+
+        // from_ini: the INI over the defaults; a bad value keeps the default
+        easyai::config::Ini ini;
+        ini.sections["ASSISTANT"]["name"] = "jarvis";
+        ini.sections["ASSISTANT"]["pause_ms"] = "900";
+        ini.sections["ASSISTANT"]["enabled"] = "yes";
+        ini.sections["ASSISTANT"]["mic_gain_db"] = "99";       // out of range → default 0
+        ini.sections["ASSISTANT"]["greeting"] = "pt";
+        ini.sections["SERVER"]["name"] = "ignored";
+        const A::Config fi = A::from_ini(ini);
+        CHECK(fi.name == "jarvis" && fi.pause_ms == 900 && fi.enabled && fi.mic_gain_db == 0 && fi.greeting == "pt");
+        CHECK(fi.max_listen_ms == def.max_listen_ms && fi.tts == "auto" && fi.wake_model == "server");
+        CHECK(A::from_ini(easyai::config::Ini()).name == "max");
+    }
+
+    // --- config::set_ini_values ------------------------------------------------------------
+    {
+        using easyai::config::set_ini_values;
+        std::string err;
+        const std::string base =
+            "# easyai\n"
+            "[SERVER]\n"
+            "port = 8080\n"
+            "\n"
+            "[ASSISTANT]\n"
+            "# the voice assistant\n"
+            "name      = max\n"
+            "# endpoint = (this server)\n"
+            "; mic = default\n"
+            "pause_ms=1500\n"
+            "\n"
+            "\n"
+            "[TTS]\n"
+            "engine = auto\n";
+        std::string t = base;
+        CHECK(set_ini_values(t, "ASSISTANT", {{"name", "easy"}, {"pause_ms", "900"}}, err) && err.empty());
+        CHECK(t.find("name      = easy\n") != std::string::npos);                     // replaced in place, alignment kept
+        CHECK(t.find("pause_ms=900\n") != std::string::npos);                          // no spaces around '=' stays that way
+        CHECK(t.find("# the voice assistant\n") != std::string::npos);                 // comments untouched
+        CHECK(t.find("port = 8080\n") != std::string::npos && t.find("engine = auto\n") != std::string::npos);
+        t = base;
+        CHECK(set_ini_values(t, "ASSISTANT", {{"endpoint", "http://x:1"}, {"mic", "plughw:1,0"}}, err));
+        CHECK(t.find("endpoint = http://x:1\n") != std::string::npos && t.find("# endpoint") == std::string::npos);   // un-commented '#'
+        CHECK(t.find("mic = plughw:1,0\n") != std::string::npos && t.find("; mic") == std::string::npos);            // un-commented ';'
+        t = base;
+        CHECK(set_ini_values(t, "ASSISTANT", {{"speaker", "plughw:1,0"}}, err));
+        CHECK(t.find("pause_ms=1500\nspeaker = plughw:1,0\n\n\n[TTS]\n") != std::string::npos);   // appended before the blank lines
+        {   // every other section byte-identical
+            const auto head = t.substr(0, t.find("[ASSISTANT]"));
+            const auto tail = t.substr(t.find("[TTS]"));
+            CHECK(head == base.substr(0, base.find("[ASSISTANT]")) && tail == base.substr(base.find("[TTS]")));
+        }
+        t = base;
+        CHECK(set_ini_values(t, "STT", {{"model", "/m/ggml-base.bin"}}, err));
+        CHECK(t.rfind("engine = auto\n\n[STT]\nmodel = /m/ggml-base.bin\n") != std::string::npos && t.rfind("[STT]") > t.rfind("[TTS]"));   // created at the end
+        CHECK(t.substr(0, base.size()) == base);
+        t = base;
+        CHECK(!set_ini_values(t, "ASSISTANT", {{"name", "two\nlines"}}, err) && !err.empty() && t == base);   // newline rejected, text untouched
+        t = "";
+        CHECK(set_ini_values(t, "ASSISTANT", {{"enabled", "on"}}, err) && t == "[ASSISTANT]\nenabled = on\n");
+        t = "[ASSISTANT]\nname = max";   // no trailing newline, section at EOF
+        CHECK(set_ini_values(t, "ASSISTANT", {{"name", "easy"}, {"tts", "auto"}}, err) && t == "[ASSISTANT]\nname = easy\ntts = auto");
+        t = "[ASSISTANT]\r\nname = max\r\n";
+        CHECK(set_ini_values(t, "ASSISTANT", {{"name", "easy"}}, err) && t == "[ASSISTANT]\r\nname = easy\r\n");   // CRLF kept
+        t = "[A]\nk = 1\n[ASSISTANT]\nk = 2\n";
+        CHECK(set_ini_values(t, "ASSISTANT", {{"k", "3"}}, err) && t == "[A]\nk = 1\n[ASSISTANT]\nk = 3\n");       // same key in another section untouched
+    }
+
+    // --- audio::list_devices: never crashes, "default" first --------------------------------
+    {
+        std::string err;
+        const auto devs = easyai::audio::list_devices(err);
+        if (easyai::audio::backend_name() == "none") {
+            CHECK(devs.empty() && !err.empty());
+        } else {
+            CHECK(!devs.empty() && devs[0].id == "default" && devs[0].is_default && err.empty());
+            std::set<std::string> ids; bool unique = true, one_default = true;
+            for (std::size_t i = 0; i < devs.size(); ++i) { if (!ids.insert(devs[i].id).second) unique = false; if (i > 0 && devs[i].is_default) one_default = false; }
+            CHECK(unique && one_default);
+            for (const auto & d : devs) std::printf("   device %-28s cap=%d play=%d card=%s name=%s\n", d.id.c_str(), d.capture, d.playback, d.card.c_str(), d.name.c_str());
+        }
+    }
+
+    // --- Kokoro voice catalogue -------------------------------------------------------------
+    {
+        const auto & cat = easyai::kokoro_voice_catalog();
+        std::set<std::string> ids;
+        bool shape = true;
+        for (const auto & v : cat) {
+            ids.insert(v.id);
+            if (v.id.size() < 4 || v.id[2] != '_' || (v.gender != "m" && v.gender != "f") || v.lang.empty()) shape = false;
+            if ((v.id[1] == 'm') != (v.gender == "m")) shape = false;
+        }
+        CHECK(cat.size() == 54 && ids.size() == 54 && shape);
+        CHECK(ids.count("am_michael") && ids.count("pm_alex") && ids.count("pf_dora") && ids.count("af_heart"));
+        const std::string m = easyai::kokoro_best_voice("en-us", "m");
+        CHECK(m.rfind("am_", 0) == 0);
+        CHECK(easyai::kokoro_best_voice("pt-br", "m").rfind("pm_", 0) == 0 && easyai::kokoro_best_voice("pt", "f") == "pf_dora");
+        CHECK(easyai::kokoro_best_voice("xx", "m").empty());
+    }
+
+    // --- Assistant object: status while stopped, say() without a voice is an error, not a crash -----
+    {
+        easyai::Assistant as;
+        CHECK(!as.running() && as.status().state == "off" && as.status_json().find("\"state\":\"off\"") != std::string::npos);
+        CHECK(as.recent_log().empty());
+        std::string err;
+        CHECK(!as.say("", "en", err) && !err.empty());            // nothing to say
+        easyai::Assistant::Config c; c.tts = "piper"; c.piper = "/nonexistent/piper"; c.speaker = "null";
+        as.configure(c, easyai::Assistant::Hooks{});
+        err.clear();
+        CHECK(!as.say("hi", "en", err) && !err.empty());          // no usable voice: an error, not a crash
+        CHECK(!as.running() && as.status().state == "off");
+    }
+
+    // --- set_ini_values: header on the last line, duplicate keys, insertion before a banner ---
+    {
+        std::string err, t = "[SERVER]\nport=1\n[ASSISTANT]\n";
+        CHECK(easyai::config::set_ini_values(t, "ASSISTANT", {{"enabled", "on"}}, err) && t == "[SERVER]\nport=1\n[ASSISTANT]\nenabled = on\n");
+        t = "[ASSISTANT]\nname = a\nname = b\n";
+        CHECK(easyai::config::set_ini_values(t, "ASSISTANT", {{"name", "easy"}}, err) && t == "[ASSISTANT]\nname = easy\nname = easy\n");
+        t = "[ASSISTANT]\nverbose = 0\n\n# ====\n# [ENGINE] — tunables\n# ====\n[ENGINE]\nngl = 99\n";
+        CHECK(easyai::config::set_ini_values(t, "ASSISTANT", {{"tls_insecure", "on"}}, err) &&
+              t == "[ASSISTANT]\nverbose = 0\ntls_insecure = on\n\n# ====\n# [ENGINE] — tunables\n# ====\n[ENGINE]\nngl = 99\n");
     }
 
     std::printf("%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);

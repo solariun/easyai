@@ -162,6 +162,15 @@ std::string Tts::resolve_local(const std::string & want, std::string & err) cons
     return e;
 }
 
+bool Tts::set_kokoro_voices(const std::string & voice_pt, const std::string & voice_en, std::string & err) {
+    if (engine_ != "kokoro" || !kokoro_.loaded()) { err = "the engine in use is " + engine_ + ", not kokoro"; return false; }
+    if (!voice_pt.empty() && !kokoro_.has_voice(voice_pt)) { err = "unknown Kokoro voice '" + voice_pt + "'"; return false; }
+    if (!voice_en.empty() && !kokoro_.has_voice(voice_en)) { err = "unknown Kokoro voice '" + voice_en + "'"; return false; }
+    if (!voice_pt.empty()) { kokoro_voice_pt_ = voice_pt; cfg_.kokoro_voice_pt = voice_pt; }
+    if (!voice_en.empty()) { kokoro_voice_en_ = voice_en; cfg_.kokoro_voice_en = voice_en; }
+    return true;
+}
+
 std::string Tts::configure(const Config & cfg, std::string & err) {
     cfg_ = cfg; err.clear();
     std::string e = cfg.engine.empty() ? "auto" : cfg.engine;

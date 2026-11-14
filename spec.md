@@ -1651,10 +1651,13 @@ every flag on every file. Live server on the toy model: boot with
 `running gemma.gguf`, `default qwen.gguf`, `ai.gguf` default only. jsc
 syntax check of the page script clean.
 
-## easyai-assistant — voice assistant service + `/v1/audio/speech` (AUTHORITATIVE — 2026-10-16)
+## easyai-assistant — voice assistant service + `/v1/audio/speech` (AUTHORITATIVE — 2026-10-16; built into easyai-server 2026-11-14)
 
-**Plain words.** A separate program, `easyai-assistant`, that listens on the
-machine's own microphone all the time, wakes up when it hears a call
+**Plain words.** A voice assistant **built into `easyai-server`**
+(`easyai::Assistant`, `include/easyai/assistant.hpp`, since 2026-11-14;
+from 2026-10-16 to then it was a separate program, `easyai-assistant`,
+with its own systemd unit — rules 13–16 say what moved and why). It
+listens on the machine's own microphone all the time, wakes up when it hears a call
 word and its name ("hello Max", "olá Max" — the default name is `max`,
 the call words are configurable), plays a short rising sound when it
 takes the question, records the question until
@@ -1662,26 +1665,35 @@ the speaker pauses for 1.5 s, sends the audio to a speech-to-text
 endpoint, sends the text to a chat endpoint with its own short-answer
 system prompt, and speaks the answer back with a male voice, sentence by
 sentence while the rest is still being generated. It runs on Linux (ALSA)
-and macOS (CoreAudio) with no third-party libraries. Every network call is
-OpenAI-shaped, so the INI can point it at easyai-server, llama-server, or
-OpenAI itself with an API key. Thinking is switched off per request;
+and macOS (CoreAudio) with no third-party libraries. Transcription and
+speech use the server's own `Stt` and `Tts` in-process by default; the
+chat call is OpenAI-shaped (`POST /v1/chat/completions` on this server
+over loopback), so the INI can still point it at easyai-server on another
+box, llama-server, or OpenAI itself with an API key. Thinking is switched off per request;
 tools (MCP / external) run inside the assistant like in easyai-cli, and the
 system prompt makes the model say in one sentence that it is about to use
-a tool. easyai-server gains the matching OpenAI endpoint
-`POST /v1/audio/speech` (piper on Linux, `say` on macOS) so the browser
-and any client can get the same voice.
+a tool. easyai-server gained the matching OpenAI endpoint
+`POST /v1/audio/speech` on 2026-10-16 (piper on Linux, `say` on macOS;
+Kokoro-82M in C++ since the same day, rule 10a) so the browser and any
+client can get the same voice. The dashboard (`/models` → **Assistant**)
+shows its state, the audio devices and the voices, edits every
+`[ASSISTANT]` key and starts / stops it live (rule 14).
 
 ```mermaid
 flowchart LR
-  M["mic 16 kHz mono\nALSA / CoreAudio"] --> V["VAD\nRMS vs adaptive floor"]
-  V -->|burst ended| W["wake word\nlocal whisper tiny/base\nhey|oi|ei|ok <name>"]
-  W -->|match, beep| L["listen until\npause_ms = 1500 of silence"]
-  L -->|PCM16 WAV| S["POST /v1/audio/transcriptions\n(endpoint, key from INI)"]
-  S -->|text, language| C["POST /v1/chat/completions\nstream, assistant system prompt,\nchat_template_kwargs.enable_thinking=false"]
-  C -->|tool_calls| X["tools run in the assistant\n(datetime, web, EASYAI-*.tools)"]
-  X --> C
-  C -->|sentence| T["POST /v1/audio/speech\nor local say / piper / espeak-ng"]
-  T --> P["speaker\nmic muted meanwhile"]
+  subgraph SRV["easyai-server (one process)"]
+    direction LR
+    M["mic 16 kHz mono\nALSA / CoreAudio"] --> V["VAD\nRMS vs adaptive floor"]
+    V -->|burst ended| W["wake word\nwake_model = server (every burst through STT)\nor a local whisper base\nhello|olá <name>"]
+    W -->|match, beep| L["listen until\npause_ms = 1500 of silence"]
+    L -->|PCM16| S["Hooks.stt = the server's Stt\n(or stt_endpoint over HTTP)"]
+    S -->|text, language| C["POST /v1/chat/completions on loopback\nstream, assistant system prompt,\nchat_template_kwargs.enable_thinking=false\n(endpoint = llama-server / OpenAI instead)"]
+    C -->|tool_calls| X["tools run in the assistant\n(datetime, web, EASYAI-*.tools)"]
+    X --> C
+    C -->|sentence| T["Hooks.tts = the server's Tts (Kokoro)\nor tts_endpoint / local piper, espeak-ng, say"]
+    T --> P["speaker\nmic muted meanwhile"]
+  end
+  D["/models → Assistant\n/models/api/assistant/*"] -.->|status, config, start/stop, say, ask| SRV
 ```
 
 ### Rules — assistant
@@ -1702,13 +1714,19 @@ flowchart LR
    voice's (ai.local, ALC269VC: 44100 Hz minimum for 24000 Hz Kokoro
    audio; the ALC245 at 48000 Hz never showed it, 2026-10-21).
 1a. **Voice source.** `[ASSISTANT] tts = auto` (default) or `server`
-   probes the endpoint's `/v1/audio/speech` at start. The server usually
-   starts together with the assistant and answers only once its model is
-   loaded, so a failed probe does not fix the choice: every
-   `kTtsProbeS = 30` s the next sentence is tried on the server first and
-   the first answer switches the voice to it, logged as `voice: server …`;
-   the local engine (Kokoro, piper, espeak) covers the gap. `tts =
-   server` without a local engine prints the answers until then.
+   with an empty `tts_endpoint` speaks through `Hooks.tts`, the server's
+   own `Tts` (`[TTS]`, Kokoro by default), in-process, no HTTP, no probe
+   (since 2026-11-14, rule 13). When `tts_endpoint` is set (another
+   box's voice) the pre-2026-11-14 behaviour applies: the endpoint's
+   `/v1/audio/speech` is probed at start; such a server usually answers
+   only once its model is loaded, so a failed probe does not fix the
+   choice: every `kTtsProbeS = 30` s the next sentence is tried on the
+   server first and the first answer switches the voice to it, logged as
+   `voice: server …`; the local engine (Kokoro, piper, espeak) covers the
+   gap. `tts = server` without a local engine prints the answers until
+   then. `tts = kokoro|piper|espeak|say` forces the local `easyai::Tts`
+   built from the `kokoro_*` / `piper` / `voice_*` keys (a Mac next to
+   the box, or a server whose `[TTS]` has no engine).
 2. **VAD.** Per period RMS in dB. Noise floor = minimum tracker that
    starts at the level of the first period (the room as it is; a fixed
    start made 20 s of constant fan noise count as speech on the box),
@@ -1719,9 +1737,12 @@ flowchart LR
    first syllable is not cut. Listening after wake ends after `pause_ms`
    (default 1500) of non-speech or `max_listen_ms` (default 20 000).
 3. **Wake word.** Each burst (bounded to `kWakeMaxMs = 4000`) goes to a
-   local whisper model `[ASSISTANT] wake_model` (default
-   `models/stt/ggml-base.bin`, 142 MB; tiny was measured too weak for a
-   pt-BR call through a room). The transcript is lower-cased, punctuation stripped, and
+   local whisper model `[ASSISTANT] wake_model` (a ggml path; the
+   installer sets `/var/lib/easyai/models/ggml-base.bin`, 142 MB; tiny was
+   measured too weak for a pt-BR call through a room) or, with the
+   default `server` (since 2026-11-14; before that the default was
+   `models/stt/ggml-base.bin`), to the server's own STT (`Hooks.stt`,
+   the `[STT]` model, in-process). The transcript is lower-cased, punctuation stripped, and
    matched by `wake_match(text, name, aliases, call_words)`: one of the
    **call words** followed by the name. `[ASSISTANT] call_words` (csv,
    default `hello, olá, alô, hallo, hola`) is strict: the name only
@@ -1776,7 +1797,8 @@ flowchart LR
    are the question, so the small model only ever decides the name;
    otherwise the assistant beeps (`kBeepHz = 880`, `kBeepMs = 120`,
    generated, no file) and listens. Without a wake model the burst goes
-   to the STT endpoint instead (`wake_model = server`).
+   to the STT path of rule 4 instead (`wake_model = server`: the
+   server's own `Stt`, or `stt_endpoint`).
 3a. **Processing sound.** The moment the question is taken (the pause
    ended, or the name and the question came in one breath) the
    assistant plays `make_think_sound`: a rising C6–E6–G6 arpeggio
@@ -1791,12 +1813,16 @@ flowchart LR
    (`apply_gain_db`: ×10^(dB/20), clipped to int16). It does not undo a
    saturated hardware input — for that lower the ALSA capture volume —
    but it lets a quiet or a hot room be levelled from the INI.
-4. **Transcription.** The recorded utterance is sent as PCM16 WAV to
-   `stt_endpoint` (default: `endpoint`) `POST /v1/audio/transcriptions`
-   multipart, `response_format=verbose_json`, `prompt` (the sentence
-   naming the assistant, rule 3), `language` from
-   `[ASSISTANT] language` (`auto` default). The returned `language`
-   drives the voice. An empty transcript, or one that is not a question
+4. **Transcription.** The recorded utterance goes to `Hooks.stt` when
+   the owner set it and `stt_endpoint` is empty: the server's own
+   `Stt::transcribe(pcm, language, prompt)` under `stt_mu`, in-process,
+   no WAV, no HTTP (since 2026-11-14; `false` + err when no `[STT]`
+   model is loaded, which then falls through to HTTP). Otherwise it is
+   sent as PCM16 WAV to `stt_endpoint` (default: `endpoint`) `POST
+   /v1/audio/transcriptions` multipart, `response_format=verbose_json`.
+   Both paths carry `prompt` (the sentence naming the assistant, rule 3)
+   and `language` from `[ASSISTANT] language` (`auto` default). The
+   returned `language` drives the voice. An empty transcript, or one that is not a question
    (`looks_like_question`: fewer than `kMinQuestionWords = 2` real words
    after dropping whisper's noise markers `*crash*`, `[BLANK_AUDIO]`,
    `(music)`; on the box a beep echo became "phase" and was answered) →
@@ -1838,12 +1864,17 @@ flowchart LR
    `kMinSentenceChars = 24`; a period after a one-letter word or a word
    that already contains a period ("e.g.", "i.e.") never cuts, and
    "3.14" stays whole because no space follows its period. Each
-   sentence is sent to `tts_endpoint` `POST /v1/audio/speech`
-   `{model, input, voice, response_format: "wav"}` and played; the next
-   sentence is fetched while the current one plays (one-deep queue).
-   `[ASSISTANT] tts = auto|server|say|piper|espeak`: `auto` uses the
-   endpoint when its `/v1/audio/speech` answers, else `say` on macOS,
-   else `piper` if `[ASSISTANT] piper` is set, else `espeak-ng`. Voice
+   sentence goes to `Hooks.tts` (the server's `Tts::synthesize(text,
+   voice, pcm, rate)` under `tts_mu`, voice `pt` / `en`) when the owner
+   set it, `tts` is `auto` or `server` and `tts_endpoint` is empty; else
+   it is sent to `tts_endpoint` `POST /v1/audio/speech` `{model, input,
+   voice, response_format: "wav"}`; else to the local `easyai::Tts`. The
+   clip is played and the next sentence is fetched while the current one
+   plays (one-deep queue). `[ASSISTANT] tts =
+   auto|server|kokoro|piper|espeak|say`: `auto` uses the server's voice
+   when it answers, else local Kokoro when `kokoro_model` / `kokoro_voices`
+   are set, else `say` on macOS, else `piper` if `[ASSISTANT] piper` is
+   set, else `espeak-ng`. Voice
    per language: `voice_pt`, `voice_en` (server: `pt`, `en` voice ids;
    `say`: `Eddy (Portuguese (Brazil))`, `Daniel`; piper: paths of the
    `.onnx` voices). Capture is muted from the first sentence until
@@ -1874,18 +1905,37 @@ flowchart LR
 7. **Availability.** Endpoint down or non-2xx: spoken "servidor
    indisponível" / "server unavailable" once per outage (language =
    `[ASSISTANT] language` when not `auto`, else the last heard one, else
-   en), then silent retries with `kRetryS = 10` backoff. Health is
-   printed to stderr; `--once` processes one utterance and exits (test
-   mode); `--text "<question>"` skips the microphone and speaks the
-   answer (test mode for the chat and voice path).
-8. **Config.** `[ASSISTANT]` section of the same INI file as the server
-   (`/etc/easyai/easyai.ini`, `--config`), every key with a CLI flag:
-   `name`, `call_words`, `name_aliases`, `greeting`, `endpoint`,
-   `api_key`, `model`, `stt_endpoint`, `tts_endpoint`, `language`,
-   `pause_ms`, `followup_ms`, `max_listen_ms`, `wake_model`, `mic`,
+   en), spoken once per outage; every later question is tried again at
+   once, there is no backoff timer. A missing
+   microphone is not an error either: state `no_mic`, the device is
+   retried every `kMicRetryS = 15` s (an unplugged USB mic). Every log
+   line goes to stderr as `[assistant] …` and into a ring of
+   `Assistant::kLogKeep = 400` lines that the dashboard shows. Test
+   modes: `easyai-server --assistant-say "text"` speaks a text on the
+   configured speaker and exits (rule 15), `POST
+   /models/api/assistant/ask {text}` answers a written question through
+   the chat and voice path (rule 14). Until 2026-11-14 these were
+   `easyai-assistant --once` and `--text "<question>"`.
+8. **Config.** `[ASSISTANT]` section of the server's INI file
+   (`/etc/easyai/easyai.ini`, `--config`), read by
+   `Assistant::from_ini`. Every key is one field of `Assistant::Config`,
+   one row of `Assistant::options()` (key, flag, type, default, choices,
+   min/max, dashboard group, help — the single source of truth for the
+   CLI, the API and the panel) and one easyai-server flag
+   `--assistant-<key-with-dashes>` (`Assistant::key_of_flag`), CLI over
+   INI like the other sections: `enabled` (start with the server, default
+   off; the installer writes `on`), `name`, `call_words`, `name_aliases`,
+   `greeting`, `endpoint` (empty = this server over loopback), `api_key`
+   (empty = the server's own key), `model`, `stt_endpoint`,
+   `tts_endpoint` (empty = in-process), `language`, `pause_ms`,
+   `followup_ms`, `max_listen_ms`, `wake_model` (default `server`), `mic`,
    `mic_gain_db`, `speaker`, `tts`, `voice_pt`, `voice_en`, `piper`,
    `kokoro_model`, `kokoro_voices`, `tools`, `external_tools`, `system`,
    `history_turns`, `history_idle_s`, `verbose`, `tls_insecure`.
+   `Assistant::set(cfg, key, value, err)` validates type, range and
+   choices and is the one path every writer (flag, INI, dashboard)
+   goes through. Until 2026-11-14 the flags were `easyai-assistant
+   --<key-with-dashes>` and there was no `enabled` (the unit was).
 
 ### Rules — server
 
@@ -1954,14 +2004,17 @@ flowchart LR
     pattern as `reasoning_effort`. Absent → server default.
 12a. **Services tab** (dashboard `/models` → Services; routes gated like
    the rest of `/models/api`). `GET /models/api/services` → `manager`
-   (`systemd` | `none`), one entry per unit (`easyai-server`,
-   `easyai-assistant`) from `systemctl show -p LoadState,ActiveState,
+   (`systemd` | `none`), one entry per unit of `admin::kUnits` — since
+   2026-11-14 only `easyai-server` (the assistant lives in it, rule 13;
+   from 2026-10-17 to then `easyai-assistant` was the second entry) —
+   from `systemctl show -p LoadState,ActiveState,
    SubState,UnitFileState,ActiveEnterTimestamp,MainPID`, and the config
    file's `path` / `exists` / `writable`. `POST /models/api/services/
    action {name, action}` runs `systemctl start|stop|restart <unit>` as
-   the service user; the installer's polkit rule
+   the service user (400 with the list of known units for any other
+   name); the installer's polkit rule
    `/etc/polkit-1/rules.d/50-easyai-services.rules` answers yes for
-   `org.freedesktop.systemd1.manage-units` on exactly those two units
+   `org.freedesktop.systemd1.manage-units` on exactly that unit
    for that user, so there is no sudo and no root in the server. A
    stop/restart of `easyai-server` itself answers first and runs the
    command `kSelfRestartDelayMs = 400` later from a detached thread.
@@ -1978,10 +2031,176 @@ flowchart LR
    `unknown`, the buttons are disabled with 501, and the editor still
    works. The page warns in the editor when the dashboard has no
    password, because the file holds the API keys.
-12. **Surface.** `/health` adds `tts_available`, `tts_engine`;
-    `/models/api/status.services` adds the same; the endpoint directory
+12. **Surface.** `/health` adds `tts_available`, `tts_engine`, and since
+    2026-11-14 `assistant_enabled`, `assistant_running` (the live state —
+    who is talking in the room — stays behind the dashboard password);
+    `/models/api/status.services` adds the same TTS fields and
+    `assistant: {enabled, state, mic, voice}`; the Status tab's service
+    chips gain `assistant <state>`; the endpoint directory
     adds the `Audio` row for `/v1/audio/speech`; the chat UI gets a
     speaker toggle on the answer later (not in this change).
+
+### Rules — the assistant inside easyai-server (2026-11-14)
+
+13. **In-process assistant.** `easyai::Assistant`
+    (`include/easyai/assistant.hpp`, `src/assistant.cpp`, in libeasyai) is
+    the whole old program minus `main()`: `Config` (rule 8), `Hooks`,
+    `start(cfg, hooks, err)` / `stop()` / `running()` / `status()` /
+    `status_json()` / `recent_log()` / `say()` / `ask()`. easyai-server
+    owns one instance (`ServerCtx::assistant`) and lends it, through
+    `Hooks`, what it already has: `stt` = `ctx.stt.transcribe` under
+    `stt_mu`, `tts` = `ctx.tts.synthesize` under `tts_mu`, `log` = stderr
+    `[assistant] …`, and the loopback `self_endpoint`
+    (`http(s)://127.0.0.1:<port>`, or `args.host` when it is a concrete
+    address), `self_api_key` (the server's own key) and
+    `self_tls_insecure`, used whenever `Config::endpoint` is empty. Both
+    the server's key and its certificate allowance go to the server itself
+    and to no other host: an `endpoint`, `stt_endpoint` or `tts_endpoint`
+    that is not the loopback URL is called with `[ASSISTANT] api_key` when
+    set and anonymously otherwise (the old program's `EASYAI_API_KEY`
+    environment fallback is gone: the unit carries the server's key there),
+    and redirects are not followed, so a Bearer token never travels to a
+    second host (2026-11-14 security review). The
+    chat itself stays an HTTP call through `easyai::Client` to `endpoint`
+    (rule 5), so tools keep running in the assistant and the endpoint can
+    be any OpenAI-shaped server. The loop is the one of rules 1–7
+    (VAD → wake → beep → listen → think sound → transcribe → chat → speak
+    → follow-up window → off sound; greeting; prompt echo drop; mic
+    auto-pick from `/proc/asound/pcm` when `default` has no capture, the
+    speaker following the mic card; mic retry every 15 s; server-down
+    phrase once). Life cycle: with `[ASSISTANT] enabled = on` a thread
+    waits until `svr.is_running()` and calls `start()` (logged); after
+    `svr.listen()` returns the server calls `stop()`, which cancels a
+    running answer (`Client::request_cancel`) and joins the thread; a
+    `start()` while running restarts with the new config. `say()` and
+    `ask()` work while running (the microphone is muted meanwhile) and
+    while stopped (speaker opened for the clip, client built on demand),
+    one playback at a time with the loop's own speaker. `Status` (`state`
+    one of `off, starting, no_mic, idle, listening, thinking, speaking,
+    conversation, error`, `since`, `mic`, `speaker`, `backend`,
+    `wake_model`, `voice`, `tools`, `level_db`, `floor_db`, `speech`,
+    `last_heard`, `last_question`, `last_answer` with times, `n_wakes`,
+    `n_questions`, `n_answers`, `n_errors`, `last_error`) is updated at
+    every state change. `start()` fails only for an unusable
+    configuration (built without an audio backend); no microphone is
+    `no_mic`, not an error. The old `services/assistant.cpp`, the
+    `easyai-assistant` target and `easyai-assistant.service` are removed.
+14. **Assistant panel and API.** Dashboard `/models` → **Assistant** tab
+    (between Downloads and Status; same login as the rest of `/models`):
+    a state pill with a live dot and `since`, **Start / Stop / Restart**,
+    an **Enabled** switch (writes `enabled` and applies at once); cards
+    *Now* (mic, speaker, voice, wake model, tools, level meter from
+    `level_db` vs `floor_db`, last heard / question / answer with times,
+    counters), *Test* (text + language → **Say**; question → **Ask**, the
+    answer shown) and *Log* (60 lines, **more** loads 400, refreshed with
+    the status every 2 s while the tab is open); and the form, one
+    control per row of `Assistant::options()` grouped by `group`
+    (**Audio**: mic and speaker selects from the device list, `default`
+    first, capture-only devices in mic and playback-only in speaker,
+    label `id — name (card)`, **Refresh devices**, `mic_gain_db`;
+    **Voice**: `tts`, the Kokoro voice for pt and for en from the
+    catalogue grouped by language with `id · gender · grade`, only the
+    voices the loaded model has enabled, `greeting`; **Wake word**:
+    `name`, `call_words`, `name_aliases`, `wake_model` select (every
+    `ggml-*.bin` in the `[STT]` model / download dir plus `server`),
+    `language`; **Timing**: `pause_ms`, `followup_ms`, `max_listen_ms`
+    within min/max; **Brain**: `endpoint` (placeholder "this server"),
+    `model`, `api_key` (password field), `tools`, `external_tools`,
+    `system`, `history_turns`, `history_idle_s`; **Advanced**: `verbose`,
+    `tls_insecure`), each with its `help` line, unknown future keys
+    rendered by type; footer **Save & apply**, **Save only**, **Revert**,
+    a dirty mark. Routes, gated like `/models/api/services`:
+    `GET /models/api/assistant/status` → `{status, enabled, log: [last 60
+    lines]}` (light; polled every 2 s); `GET /models/api/assistant/options`
+    → `{config: {key: value…}, options: [{key, flag, type, default,
+    choices: [], min, max, group, help}], devices: [{id, name, card,
+    capture, playback, is_default}], voices: {engine, fallback, kokoro,
+    list: [{id, lang, gender, grade, available}], current_pt, current_en},
+    wake_models: [{name, path, size_bytes}], ini: {path, writable},
+    self_endpoint}`; `GET /models/api/assistant/devices` → `{devices}`;
+    `GET /models/api/assistant/log?lines=N` → `{lines}` (N ≤ 400); `POST
+    /models/api/assistant/action {action: start|stop|restart}` → runtime
+    only, the INI untouched, `{ok, status}`, 400 on a bad action, 500
+    with the error from `start()`; `POST /models/api/assistant/config
+    {values: {key: value…}, apply}` (body ≤ 64 KiB) → every key validated
+    with `Assistant::set` on a copy (400 with the first error and its
+    key), then `config::set_ini_values(text, "ASSISTANT", values)` on the
+    INI text read from disk — an existing `key = …` line replaced in
+    place, a commented-out `# key = …` un-commented, a missing key appended
+    to the section, a missing section appended at the end, every comment
+    and other line kept — written with `admin::write_config` (`.prev`
+    kept), `ctx.assistant_cfg` updated, and when `apply`: enabled →
+    `start(new cfg)` (a restart), disabled → `stop()`; reply `{ok, saved,
+    backup, applied, status, warnings: []}`. The two keys
+    `tts.kokoro_voice_pt` / `tts.kokoro_voice_en` are accepted in the same
+    body and written to `[TTS]` (`ctx.tts` re-configured under `tts_mu`),
+    so the voice pickers of the panel change the server's voice too.
+    `api_key` is returned as `""` when unset, else as the mask `••••`, and
+    written only when the value sent is non-empty and not the mask. `POST
+    /models/api/assistant/say {text, lang}` → `{ok, ms}` (text ≤ 500
+    chars; at most `kMaxInflight = 2` say / ask calls run at a time, a
+    third answers 429 so the HTTP workers are never all parked on the
+    voice); `POST /models/api/assistant/ask {text}` → `{ok, answer, lang,
+    ms}` (text ≤ 2000 chars). Public, Bearer like `/v1`: `GET
+    /v1/audio/voices` → `{engine, fallback, voices: [{id, lang, gender,
+    grade, available}]}` — the OpenAI audio shape has no voice listing, so
+    this one is kept simple; when the engine in effect is not kokoro the
+    list holds only that engine's pt and en voice, gender and grade empty. The catalogue is `kokoro_voice_catalog()`
+    (static table of the 54 Kokoro v1.0 voices from hexgrad's VOICES.md:
+    id, language tag, gender, upstream grade) and `kokoro_best_voice(lang,
+    gender)`; `available` says whether the loaded voices file has it.
+15. **CLI.** Four easyai-server flags print and exit before any model
+    loads: `--list-audio-devices` (table: id, capture, playback, card,
+    name, `default` marked — `audio::list_devices()` from
+    `include/easyai/audio_io.hpp`: ALSA `snd_device_name_hint()` names plus
+    one `plughw:<card>,<dev>` entry per `/proc/asound/pcm` line with its
+    capture/playback flags, `default` first with `capture` = any card has
+    capture, nothing opened so a listing never disturbs a running
+    capture; macOS `default` plus the CoreAudio device names);
+    `--list-voices` (configures `[TTS]` only, the start-up code path, and
+    prints `engine`, `fallback` and the voices: id, language, gender,
+    grade, `*` on the current pt / en voice; a non-kokoro engine prints its
+    `voice_pt` / `voice_en`); `--assistant-options` (every `[ASSISTANT]`
+    option: key, flag, value in effect after INI and flags, default, help);
+    `--assistant-say "text"` (configures `[TTS]` and the assistant from the
+    INI, speaks the text on the configured speaker through
+    `Assistant::say`, exit 0/1; `--assistant-say-lang pt|en`, default
+    auto) — the installer's voice check and the operator's quick test.
+    Plus `--assistant-<key-with-dashes>` for every option (rule 8), e.g.
+    `--assistant-enabled on|off`, `--assistant-mic plughw:1,0`.
+16. **Installer.** `scripts/install_easyai_server.sh` installs every
+    dependency of the voice path by default (`libasound2-dev alsa-utils
+    espeak-ng libespeak-ng1`, onnxruntime), builds with
+    `-DEASYAI_BUILD_TESTS=ON` and runs `ctest --test-dir build
+    --output-on-failure` after the build (a failure is a `warn` naming
+    the tests, not a stop). The INI template's `[ASSISTANT]` starts with
+    `enabled = on` (`off` with `--no-assistant` or `--no-whisper`; `name`
+    from `--assistant-name`), `endpoint` and `api_key` commented out (this
+    server), `wake_model = /var/lib/easyai/models/ggml-base.bin`. The
+    server unit gets `SupplementaryGroups=render video systemd-journal
+    audio` (`usermod -aG audio easyai`) and `After=network-online.target
+    sound.target`. **Stale artefacts**, whenever the service is written
+    (also `--upgrade`): `easyai-assistant.service` and the older
+    `easyai-tts-kokoro.service` are `systemctl disable --now`,
+    `reset-failed`, their unit files and `.d/` removed, `daemon-reload`;
+    `$prefix/bin/easyai-assistant` and `/opt/easyai/kokoro` removed; each
+    removal logged, silent when nothing is there. The polkit rule names
+    only `easyai-server.service`. The default downloads are SHA-256 pinned (the
+    Kokoro files to the values in `models/tts/README.md`, whisper
+    `ggml-base.bin`, the onnxruntime tgz for x64 and aarch64, piper and
+    its voices); a Kokoro, whisper or onnxruntime mismatch removes the
+    file and stops the install, a piper archive or voice mismatch removes
+    the file and continues with a warning (piper is the fallback only).
+    Other `--stt-model` / `--ort-version` choices have no pin and install
+    with an "unverified" warning. At the end, with the service and Kokoro installed,
+    `easyai-server --config /etc/easyai/easyai.ini --list-voices` must
+    print `engine = kokoro`, else a `warn` with the reason and the fix.
+    `tests/test_installer.sh` checks the script text for all of this (no
+    `AUNIT` heredoc, no `easyai-assistant.service` written, `enabled` in
+    the template, `audio` in the server unit's `SupplementaryGroups=`, the
+    stale cleanup naming `easyai-assistant.service` and
+    `bin/easyai-assistant`, `-DEASYAI_BUILD_TESTS=ON`, the `--list-voices`
+    check).
 
 ### Decisions
 
@@ -2049,7 +2268,10 @@ flowchart LR
   syntax check, not a form (a form would have to know every key of two
   programs and would hide what the operator typed). Rejected: a
   setuid helper (more code to audit than a rule), a root-run sidecar,
-  sudoers (needs the unit's hardening relaxed).
+  sudoers (needs the unit's hardening relaxed). Since 2026-11-14 there
+  is one unit: the rule, the Services tab and the editor's note cover
+  `easyai-server.service` alone; the `[ASSISTANT]` section has its own
+  form (rule 14) because its keys are known to the same process.
 - **Whisper prompt instead of more aliases.** OpenAI's `prompt` /
   whisper.cpp `initial_prompt` is the documented way to teach whisper a
   proper noun; one sentence naming the assistant fixed the spelling of
@@ -2063,6 +2285,60 @@ flowchart LR
   third sound: one tone means "speak now" wherever it occurs, the
   falling two-tone means "done". Rejected: a softer or shorter variant
   (two meanings for one cue is what the user had trouble with).
+- **The assistant moves into easyai-server** (Gustavo, 2026-11-14: one
+  program, the assistant configured and driven from the dashboard, the
+  old binary and its stale units cleaned up). The separate process bought
+  nothing the server did not already have and cost a second unit, a
+  second polkit entry, a second copy of the API key, a WAV round trip per
+  utterance and per sentence over loopback, and a voice probe that
+  waited for the server's model. In one process there is one thing to
+  secure and to upgrade, the `Stt` and `Tts` already loaded for
+  `/v1/audio/*` serve the microphone too (no second whisper, no second
+  Kokoro in memory), the audio devices and the voices are visible to the
+  dashboard without a helper, and `enabled` is an INI key the panel
+  flips instead of a unit to enable. The class keeps the old loop line
+  for line (rules 1–7 unchanged) so the measured behaviour of October
+  stays measured. Rejected: keeping the binary as a thin client of the
+  same class (two code paths to test), a D-Bus / socket control channel
+  from the dashboard to a separate process (more surface than the
+  problem).
+- **Chat still over HTTP, speech and transcription in-process** (2026-11-14).
+  The chat stays an OpenAI-shaped `POST /v1/chat/completions` through
+  `easyai::Client` so `endpoint` can be llama-server or OpenAI as before
+  and tools (`datetime`, `web`, `EASYAI-*.tools`) keep running in the
+  assistant like in `easyai-cli`; on loopback the cost is one local
+  socket per question, the same path the browser takes, exercised the
+  same way. Speech and transcription have no provider to swap and pay
+  for a WAV encode and decode per sentence, so they call the server's
+  own `Stt` / `Tts` under the same mutexes the routes use; `stt_endpoint`
+  / `tts_endpoint` keep the HTTP path for another box. Rejected: an
+  in-process chat through `Engine` directly (bypasses the server's tool
+  gating, preamble and auth, and loses the provider choice).
+- **The old binary and units are purged by the installer** (Gustavo,
+  2026-11-14: "clean the old binary and systemd stale services"). A
+  stale `easyai-assistant.service` would start a program that no longer
+  exists and sit `failed` in `systemctl`, and an old
+  `/usr/bin/easyai-assistant` would run the October code against a
+  server that no longer passes it a key. One block removes both (and
+  the earlier Python helper's `easyai-tts-kokoro.service`), logged, on
+  every install and `--upgrade`; one less thing to install, one less to
+  upgrade. Rejected: leaving them for `--uninstall` (there is none yet)
+  or for the operator (the symptom, a failed unit, points nowhere).
+- **Kokoro v1.0 fp32 stays the voice** (2026-11-14, research in the
+  design folder of the day). Among open models that run on the box's CPU
+  in real time with a male pt-BR and an en voice, Kokoro-82M v1.0 is still
+  the best (Apache-2.0, 54 voices, the pt-BR `pm_alex` / `pm_santa` /
+  `pf_dora` and the graded en set); the fp16 / int8 exports save disk but
+  the fp32 graph is the one measured here (rule 10a Proof) and the
+  phonemes are byte-identical to the reference, so it is the one pinned.
+  The upstream grades (hexgrad VOICES.md: `af_heart` A, `af_bella` A-,
+  `am_michael` C+, `bm_george` C, pt-BR and es ungraded) are shown in
+  the panel and in `models/tts/README.md` so an operator picking a voice
+  sees what upstream measured, not a guess. piper (`pt_BR-faber`,
+  `en_US-ryan`) and espeak-ng stay as the fallback when onnxruntime or
+  espeak-ng are missing. Rejected: switching the default to a graded en
+  voice (the box speaks pt-BR first; `pm_alex` is the natural male pt-BR
+  voice and the en pick follows the same male timbre).
 
 ### Proof (2026-10-16, macOS; Linux box pending Gustavo's install)
 
@@ -2108,6 +2384,44 @@ flowchart LR
   refused. The earlier Python helper measured 7.0 s of pt audio in
   2038 ms for 120 chars; the C++ path is the same model at a similar
   rate (first-call warm-up included in both).
+
+### Proof (2026-11-14, ai-pro, Ubuntu 25.10 x86_64 — the merge into easyai-server)
+
+- Build green with `-DEASYAI_BUILD_TESTS=ON`; ctest 7 of 7, `assistant`
+  now also covers the option table (unique keys and flags, defaults,
+  `key_of_flag`, `set()` ranges / choices / bool spellings, `from_ini`
+  precedence and empty values), `set_ini_values` (replace in place, keep
+  the `=` alignment, un-comment, append before the next banner, create
+  the section, header on the last line, duplicate keys, newline refused),
+  `list_devices` ("default" first), the 54-voice catalogue and
+  `kokoro_best_voice`, and `say()` on a stopped assistant without a voice
+  (an error, not a crash); `installer` runs the 24 text checks of
+  `tests/test_installer.sh`.
+- `easyai-server --list-audio-devices` on the box: `default`, four
+  `plughw:0,*` HDMI outputs (playback only), `plughw:1,0` ALC245 Analog
+  (capture + playback) — the card the INI names. `--list-voices` with the
+  installed files: `engine = kokoro`, `fallback = piper`, 54 voices all
+  available, `*` on `pm_alex` / `am_michael`; the same with onnxruntime
+  1.32.0 (the library the installer now pins; `LD_DEBUG=libs` showed it
+  loaded) and `--assistant-say` synthesised "Olá, tudo bem? The quick
+  brown fox." in 501 ms (2.3 s of audio). Playback itself could not be
+  heard from the test shell (no `audio` group, the old unit held the
+  card); the mic loop on the box is pending Gustavo's `--upgrade`.
+- Dashboard API by hand on a second server (port 18080, no model, chat to
+  the box's own server on port 80): 400 with the key for a bad integer,
+  an unknown key and a foreign voice id; a save rewrites only the keys
+  given (`[ASSISTANT] pause_ms`, `name_aliases`, `[TTS] kokoro_voice_en`),
+  keeps `<ini>.prev`, and `apply` restarts the assistant; `tools =`
+  (empty) survives a restart as "no tools"; stop / start / bad action
+  (400); `ask` "Que horas são agora?" → "São onze e cinquenta e dois da
+  manhã." in 2 966 ms; three `ask`s interrupted by `say`, `restart` and
+  `Save & apply` ended as "cancelled" and the process stayed up (the
+  in-flight guard of rule 13); `say` on a stopped assistant no longer
+  opens the microphone (`configure()`). A 501-character text is refused
+  as "longer than 500 characters".
+- Installer: `bash -n`, `--help` prints the whole header, the INI
+  migration block run with a stubbed `sudo` inserts `enabled = on` once
+  after `[ASSISTANT]` (idempotent) and creates the section when absent.
 
 ### Limits
 

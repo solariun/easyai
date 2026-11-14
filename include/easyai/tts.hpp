@@ -1,7 +1,8 @@
 // easyai — text-to-speech through a child process (piper, macOS say,
 // espeak-ng). No linked TTS runtime: the engine is spawned per sentence
 // and its PCM is read back. Used by easyai-server (POST /v1/audio/speech)
-// and by easyai-assistant as its local fallback voice.
+// and by easyai::Assistant (the voice assistant inside easyai-server) as its
+// local fallback voice.
 #pragma once
 
 #include <cstdint>
@@ -39,6 +40,15 @@ public:
     const std::string & engine() const { return engine_; }
     const std::string & fallback_engine() const { return fallback_; }
     bool available() const { return engine_ != "none" && !engine_.empty(); }
+    // The voice ids the loaded Kokoro voices file holds (empty when the
+    // engine is not kokoro). The dashboard marks the catalogue with it.
+    std::vector<std::string> kokoro_voice_names() const { return kokoro_.loaded() ? kokoro_.voice_names() : std::vector<std::string>{}; }
+    // Change the pt / en Kokoro voices of a loaded engine without reloading
+    // the model (the dashboard's voice pickers). Empty keeps the current one;
+    // an id the voices file lacks, or a non-kokoro engine, is an error.
+    bool set_kokoro_voices(const std::string & voice_pt, const std::string & voice_en, std::string & err);
+    const std::string & kokoro_voice_pt() const { return kokoro_voice_pt_; }
+    const std::string & kokoro_voice_en() const { return kokoro_voice_en_; }
 
     // voice: "pt", "en", or an engine voice name/path. Output is PCM16 mono
     // at `rate_hz` (engine dependent: piper from the model, say 22050,

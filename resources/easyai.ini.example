@@ -406,6 +406,151 @@
 ;seed                = 0
 
 ; ============================================================
+; [STT] — voice transcription (whisper.cpp)
+; ============================================================
+;
+; Serves POST /v1/audio/transcriptions (OpenAI audio shape), the mic
+; chip in the chat, and the built-in assistant's ears. `model` is a
+; whisper ggml-*.bin — the installer points a symlink at it that the
+; /models dashboard (Local models → Voice transcription) re-points when
+; you Download + Run + slink one. A missing file is NOT fatal: the
+; server starts, /health reports stt_loaded=false, the route answers
+; 503. Recommended for pt-BR + en on a small box: large-v3-turbo-q5_0
+; (547 MB). Every key is also a flag --stt-<key>.
+[STT]
+;model            = /var/lib/easyai/models/stt.bin
+;language         = auto
+;threads          = 0
+
+; ============================================================
+; [TTS] — text-to-speech (POST /v1/audio/speech, the assistant's voice)
+; ============================================================
+;
+; OpenAI audio shape: {input, voice: pt|en|<engine voice>, response_format:
+; wav} -> audio/wav PCM16 mono. The built-in assistant speaks through the
+; same engine in-process. Every key is also a flag --tts-<key with
+; dashes>; `easyai-server --list-voices` prints the engine in use, its
+; fallback and the 54 Kokoro voices (id, language, gender, grade).
+;
+;   engine          auto | kokoro | http | piper | say | espeak | none
+;                   auto = kokoro when model + voices + onnxruntime + espeak-ng
+;                   are found, else http when url answers, else piper, else none.
+;                   kokoro and http keep the best child-process engine as fallback.
+;   kokoro_model    Kokoro-82M .onnx (natural voice, run in-process in C++)
+;   kokoro_voices   its voices-v1.0.bin (54 voices; sha256 in models/tts/README.md)
+;   kokoro_voice_pt Kokoro voice for Portuguese: pm_alex (default), pm_santa, pf_dora
+;   kokoro_voice_en Kokoro voice for English: am_michael (default), am_fenrir, am_puck (all C+ upstream), af_heart (A, female)
+;   onnxruntime     libonnxruntime shared library (opened at run time)
+;   espeak_lib      libespeak-ng shared library (default: found in the apt/brew places)
+;   espeak_data     espeak-ng-data directory (default: found next to the library)
+;   url             engine http: base URL of another box's /v1/audio/speech
+;   piper           piper binary (fallback engine)
+;   voice_pt        piper .onnx / say voice / espeak voice for Portuguese (fallback)
+;   voice_en        same for English (fallback)
+[TTS]
+;engine           = auto
+;kokoro_model     = /var/lib/easyai/tts/kokoro-v1.0.onnx
+;kokoro_voices    = /var/lib/easyai/tts/voices-v1.0.bin
+;kokoro_voice_pt  = pm_alex
+;kokoro_voice_en  = am_michael
+;onnxruntime      = /opt/easyai/onnxruntime/lib/libonnxruntime.so
+;espeak_lib       =
+;espeak_data      =
+;url              = http://other-box:8080
+;piper            = /opt/easyai/piper/piper
+;voice_pt         = /var/lib/easyai/tts/pt_BR-faber-medium.onnx
+;voice_en         = /var/lib/easyai/tts/en_US-ryan-medium.onnx
+
+; ============================================================
+; [ASSISTANT] — the voice assistant built into easyai-server
+; ============================================================
+;
+; Always listening on this box's microphone (since 2026-11-14 inside the
+; server process; no second unit). "hello <name>" / "olá <name>" wakes
+; it, a pause of pause_ms ends the question (a short rising sound says
+; the question was taken), the answer is spoken sentence by sentence and
+; a beep says it listens again. The dashboard (/models → Assistant)
+; shows the devices and the voices, edits every key of this section in
+; place and applies it live. Every key is also a flag of easyai-server
+; (--assistant-<key with dashes>); flags win over this file.
+;   easyai-server --list-audio-devices     what to put in mic / speaker
+;   easyai-server --list-voices            the [TTS] engine and the Kokoro voices
+;   easyai-server --assistant-options      every key with the value in effect
+;   easyai-server --assistant-say "text"   hear the voice on the speaker, no mic needed
+;
+;   enabled         on | off — start the assistant with the server (the installer writes on)
+;   name            wake name, said right after a call word: "hello <name>", "olá <name>"
+;   call_words      csv of the words that must come right before the name (default hello, olá,
+;                   alô, hallo, hola — whisper's spellings of them are built in). Empty = loose
+;                   mode: hey/oi/… or the bare name wake it, which fires on ordinary talk
+;   name_aliases    csv of spellings whisper produces for the name (max, easy and easyai have
+;                   built-in ones); run with verbose = on and read the "heard:" lines
+;   mic_gain_db     software gain on the microphone, -30..30 dB (0 = as captured). Negative when
+;                   the room saturates the input (levels near 0 dB in the verbose log)
+;   greeting        en | pt | off — spoken once at start-up: the assistant is online and how to call it
+;   endpoint        OpenAI-compatible base URL for the chat. Empty = THIS server over loopback,
+;                   with its own key and TLS setting (llama-server or OpenAI work too)
+;   api_key         Bearer token for the endpoint(s); empty = this server's own key when the
+;                   endpoint is this server, no key for any other host
+;   model           model id sent in the request ("default" = whatever the server serves)
+;   stt_endpoint    another box's /v1/audio/transcriptions (empty = the server's own whisper, in-process)
+;   tts_endpoint    another box's /v1/audio/speech (empty = the server's own [TTS] engine, in-process)
+;   language        auto | pt | en — forced transcription language (auto detects)
+;   pause_ms        silence that ends a question (ms)
+;   followup_ms     after an answer the listening beep sounds and the assistant keeps listening
+;                   without the name; this much silence ends the conversation with a falling
+;                   two-tone sound (0 = off)
+;   max_listen_ms   longest question (ms)
+;   wake_model      "server" = every burst through the server's own STT (default), or a local
+;                   whisper ggml for the wake word only (the installer sets ggml-base.bin)
+;   mic             ALSA capture device: default, plughw:1,0 … ("default" with no capture
+;                   makes the assistant pick the first card that has one and log it)
+;   speaker         ALSA playback device; "default" follows the microphone card
+;   tts             auto | server | kokoro | piper | espeak | say — auto/server = the [TTS]
+;                   engine in-process (or tts_endpoint); the others = a local engine here
+;   kokoro_model / kokoro_voices   local Kokoro files when tts is not the server
+;   voice_pt / voice_en / piper    local fallback voices (piper .onnx, say, espeak)
+;   tools           csv of built-in tools: datetime, web (empty = none)
+;   external_tools  directory of EASYAI-*.tools manifests (MCP-style tools run here)
+;   system          system prompt: file path or inline text (default: built-in short-answer prompt)
+;   history_turns   turns kept before the conversation restarts
+;   history_idle_s  idle seconds after which the conversation restarts
+;   verbose         on = log VAD levels, every transcript the wake model heard, timings
+;   tls_insecure    on = skip certificate verification (self-signed https endpoint)
+[ASSISTANT]
+;enabled          = on
+;name             = max
+;call_words       = hello, olá, alô, hallo, hola
+;name_aliases     =
+;mic_gain_db      = 0
+;greeting         = en
+;endpoint         =
+;api_key          =
+;model            = default
+;stt_endpoint     =
+;tts_endpoint     =
+;language         = auto
+;pause_ms         = 1500
+;followup_ms      = 2000
+;max_listen_ms    = 20000
+;wake_model       = server
+;mic              = default
+;speaker          = default
+;tts              = auto
+;kokoro_model     =
+;kokoro_voices    =
+;voice_pt         =
+;voice_en         =
+;piper            = piper
+;tools            = datetime,web
+;external_tools   = /etc/easyai/external-tools
+;system           = /etc/easyai/assistant_system.txt
+;history_turns    = 6
+;history_idle_s   = 300
+;verbose          = off
+;tls_insecure     = off
+
+; ============================================================
 ; [MCP_USER] — Bearer-token auth for POST /mcp
 ; ============================================================
 ;

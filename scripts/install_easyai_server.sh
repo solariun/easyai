@@ -7,16 +7,20 @@
 #      backend SDK that matches your hardware (Vulkan / CUDA / ROCm-HIP).
 #   2. Clones llama.cpp + whisper.cpp + easyai (or uses existing sibling dirs).
 #   3. Builds easyai (libeasyai + easyai-local + easyai-cli + easyai-server
-#      + easyai-agent + easyai-recipes + easyai-chat) with the selected
-#      GPU backend.
+#      + easyai-agent + easyai-recipes + easyai-chat + the unit tests, run
+#      with ctest) with the selected GPU backend.
 #   4. Installs the binaries to $prefix/bin.
 #   5. Creates a system user, /var/lib/easyai/{models,workspace,data}, and
 #      /etc/easyai/{easyai.ini, system.txt_template, api_key} —
 #      out-of-the-box uses the binary's built-in "Deep" prompt; copy
 #      system.txt_template to system.txt to activate a custom persona.
 #   6. Drops a hardened systemd unit that runs easyai-server with mlock,
-#      flash-attn, q8_0 KV cache, Bearer auth, Prometheus /metrics, and
+#      flash-attn, q8_0 KV cache, Bearer auth, Prometheus /metrics, the
+#      audio group (the voice assistant is built into the server) and
 #      coredump capture (LimitCORE=infinity + systemd-coredump package).
+#      Stale units of earlier installs (easyai-assistant.service,
+#      easyai-tts-kokoro.service) and the old easyai-assistant binary are
+#      removed on every install / --upgrade.
 #   7. (Linux only, optional) AMD-iGPU GTT kernel cmdline tweak; mDNS via
 #      avahi; memlock+nofile limits; system swap off.
 #
@@ -84,11 +88,13 @@
 #                                                    #   tested pin (default: sha in llama_ref
 #                                                    #   below; also --whisper-ref)
 #   ./install_easyai_server.sh --no-whisper          # skip voice transcription (whisper.cpp)
-#   ./install_easyai_server.sh --no-assistant        # skip easyai-assistant.service (voice assistant on
-#                                                    #   the box's mic/speaker; --assistant-name max)
+#   ./install_easyai_server.sh --no-assistant        # write [ASSISTANT] enabled = off (the voice assistant
+#                                                    #   built into easyai-server: "hello max" on the box's
+#                                                    #   mic/speaker; --with-assistant; --assistant-name max)
 #   ./install_easyai_server.sh --no-piper            # skip piper TTS (the fallback voice)
 #   ./install_easyai_server.sh --no-kokoro           # skip Kokoro-82M, the natural voice (in-process C++,
-#                                                    #   onnxruntime lib + espeak-ng; --kokoro-voice-pt pm_santa)
+#                                                    #   onnxruntime lib + espeak-ng; --kokoro-voice-pt pm_santa;
+#                                                    #   --ort-version 1.31.1 picks another onnxruntime release)
 #   ./install_easyai_server.sh --stt-model small     # whisper model to download (default
 #                                                    #   large-v3-turbo-q5_0, 547 MB; "none" = skip)
 #   ./install_easyai_server.sh --tls                 # self-signed https (browser microphone on
@@ -347,10 +353,11 @@ stt_model="large-v3-turbo-q5_0"               # whisper model downloaded at inst
                                               # (pick one later from /models). --stt-model.
 stt_hf_repo="ggerganov/whisper.cpp"
 stt_lfs_pointer_max_bytes=4096                # a Git LFS pointer file is ~130 bytes; real weights are MBs
-do_assistant=1                                # easyai-assistant.service: voice assistant on the box's own mic
-                                              # and speaker ("hello max"). Needs whisper. --no-assistant skips.
-assistant_name="max"                          # --assistant-name <name>: wake word "hey <name>" / "oi <name>"
-assistant_service="easyai-assistant.service"
+do_assistant=1                                # [ASSISTANT] enabled = on: the voice assistant built into
+                                              # easyai-server listens on the box's own mic and speaker
+                                              # ("hello max"). Needs whisper. --no-assistant writes enabled = off
+                                              # (the dashboard /models → Assistant turns it on later).
+assistant_name="max"                          # --assistant-name <name>: wake word "hello <name>" / "olá <name>"
 wake_model="base"                             # small whisper for the wake word (ggml-base.bin, 142 MB; tiny
                                               # mishears a pt-BR "olá max" too often)
 do_piper=1                                    # piper TTS for POST /v1/audio/speech (male voices: pt_BR faber,
@@ -364,7 +371,9 @@ piper_voice_en="en/en_US/ryan/medium/en_US-ryan-medium"
 do_kokoro=1                                   # Kokoro-82M: the natural voice behind /v1/audio/speech, run
                                               # in-process by easyai-server (C++; onnxruntime + espeak-ng
                                               # opened at run time). piper stays as fallback. --no-kokoro skips.
-ort_version="1.31.0"                          # github.com/microsoft/onnxruntime release (shared library only)
+ort_version="1.32.0"                          # github.com/microsoft/onnxruntime release (shared library only);
+                                              # --ort-version <x.y.z>. Releases with a sha256 pin: see ort_sha256
+                                              # below; any other downloads with an "unverified" warning.
 ort_dir="/opt/easyai/onnxruntime"
 kokoro_files_base="https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 kokoro_voice_pt="pm_alex"                     # pt-BR male (pm_santa is the other one)
@@ -559,6 +568,7 @@ while [[ $# -gt 0 ]]; do
         --no-kokoro)        do_kokoro=0; shift ;;
         --kokoro-voice-pt)  kokoro_voice_pt="$2"; shift 2 ;;
         --kokoro-voice-en)  kokoro_voice_en="$2"; shift 2 ;;
+        --ort-version)      ort_version="$2"; shift 2 ;;
         --stt-model)        stt_model="$2"; shift 2 ;;
         --tls)              do_tls=1; shift ;;
         --no-tls)           do_tls=0; shift ;;
@@ -670,7 +680,7 @@ while [[ $# -gt 0 ]]; do
             exit 0 ;;
         # -----------------------------------------------------------------
 
-        -h|--help)          sed -n '2,110p' "$0"; exit 0 ;;
+        -h|--help)          awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0"; exit 0 ;;   # the whole header comment, however long it grows
         *)
             echo "unknown arg: $1" >&2
             echo "run with --help for usage" >&2
@@ -711,6 +721,69 @@ require_no_injection() {
     fi
 }
 
+# ---------- sha256 pins -----------------------------------------------------
+# Every file the installer fetches (and the Git LFS copies it takes from the
+# repo) is checked against these before it is used: model weights from
+# HuggingFace / GitHub, the onnxruntime and piper archives, the piper voices.
+# Values measured on 2026-11-14 (models/tts/README.md carries the Kokoro ones;
+# GitHub asset digests match where published). A mismatch removes the file
+# and stops the install for a model or runtime library (die); the optional
+# piper fallback only loses that file (warn). An empty pin = "unverified".
+declare -A sha256_pins=(
+    [kokoro-v1.0.onnx]=7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5
+    [voices-v1.0.bin]=bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d
+    [ggml-base.bin]=60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe
+    [ggml-large-v3-turbo-q5_0.bin]=394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2
+    [piper_linux_x86_64.tar.gz]=a50cb45f355b7af1f6d758c1b360717877ba0a398cc8cbe6d2a7a3a26e225992
+    [piper_linux_aarch64.tar.gz]=fea0fd2d87c54dbc7078d0f878289f404bd4d6eea6e7444a77835d1537ab88eb
+    [pt_BR-faber-medium.onnx]=858555e3a064209c57088fe6bd70c4c3dc54d03eaa00c45d5ecaf43a33f95aa7
+    [pt_BR-faber-medium.onnx.json]=7e694de195ae3fc36dd732c445eb04fb49b649854893cb5506b978f0d50a1d6f
+    [en_US-ryan-medium.onnx]=abf4c274862564ed647ba0d2c47f8ee7c9b717d27bdad9219100eb310db4047a
+    [en_US-ryan-medium.onnx.json]=44034c056cb15681b2ad494307c7f3f2e4499d1253c700c711fa0a4607ffe78d
+)
+# onnxruntime release archives, by file name. The default ort_version is
+# pinned here; --ort-version may pick another release, which then downloads
+# with a warning when it has no line below.
+ort_sha256() {
+    case "$1" in
+        onnxruntime-linux-x64-1.32.0.tgz)     echo bb169b7e374731730d2ae406fb39de7be4b315f413a9132efe896261c31bb503 ;;
+        onnxruntime-linux-aarch64-1.32.0.tgz) echo 81a46251dd90da4122f4b9ceb4433f836fbc79ee1eddffca7c09033af81a1939 ;;
+        onnxruntime-linux-x64-1.31.1.tgz)     echo c849e36a1ef3e22d4ff217b9d1ce4a3cf5b9467b975610913ae959ad5b16bdc9 ;;
+        onnxruntime-linux-aarch64-1.31.1.tgz) echo 5317505e2da99be65f8e2775ba3c2afd6d2961fd78aba1bd8f56159f48820c78 ;;
+        onnxruntime-linux-x64-1.31.0.tgz)     echo cc5c72baf5ae5c8238a6841f0897227be2d02826b9cf98eaf02fdefaeeb03a57 ;;
+        onnxruntime-linux-aarch64-1.31.0.tgz) echo c5b8b3cca31f3d643a3b313b8f42e2d0f16a4fcefd02cda343d97bd5306afaab ;;
+        *)                                    echo "" ;;
+    esac
+}
+# verify_sha256 <file> <want> [<label>] [die|warn]
+#   Prints "sha256 ok" when the file matches. On a mismatch the file is
+#   removed (sudo: most of them are root- or service-owned) and the install
+#   stops with both hashes — or, in warn mode, continues and returns 1. An
+#   empty <want> means no pin is known for this file: it is kept, with a
+#   warning that it is unverified.
+verify_sha256() {
+    local file="$1" want="$2" what="${3:-$(basename "$1")}" on_fail="${4:-die}" got
+    if [[ -z "$want" ]]; then
+        warn "  $what: no sha256 pin for this file — unverified"
+        return 0
+    fi
+    got="$(sudo sha256sum "$file" 2>/dev/null | awk '{print $1}' || true)"
+    if [[ "$got" == "$want" ]]; then
+        log "  sha256 ok: $what"
+        return 0
+    fi
+    sudo rm -f "$file"
+    if [[ "$on_fail" == "warn" ]]; then
+        warn "  sha256 MISMATCH for $what — file removed"
+        warn "    expected $want"
+        warn "    got      ${got:-<unreadable>}"
+        return 1
+    fi
+    die "sha256 MISMATCH for $what — file removed (download tampered or truncated; rerun to retry)
+    expected $want
+    got      ${got:-<unreadable>}"
+}
+
 # ---------- pre-flight ------------------------------------------------------
 [[ $EUID -eq 0 ]] && die "do not run as root — script calls sudo as needed"
 
@@ -744,6 +817,8 @@ require_no_injection "--cache-type-k" "$cache_type_k"
 require_no_injection "--cache-type-v" "$cache_type_v"
 require_no_injection "--rope-scaling" "$rope_scaling"
 require_no_injection "--split-mode"   "$split_mode"
+require_no_injection "--assistant-name" "$assistant_name"
+[[ "$ort_version" =~ ^[0-9]+(\.[0-9]+)+$ ]] || die "--ort-version: expected x.y.z, got: $(printf '%q' "$ort_version")"
 
 # Preset + reasoning-effort are baked verbatim into [ENGINE]; pin them to the
 # known sets (rejects typos AND any INI-injection attempt via these knobs).
@@ -849,6 +924,8 @@ printf '    webui_password   = %s   (gates /models dashboard%s)\n' \
     "$([[ "$webui_password" == "0000" ]] && echo " — DEFAULT 0000, change for non-LAN" || echo "")"
 printf '    api_key          = %s\n' "$([[ -n "$api_key" ]] && echo "<set>" || echo "<none — server is open>")"
 printf '    whisper (voice)  = %s\n' "$([[ $do_whisper -eq 1 ]] && echo "ON — $whisper_dir, [STT] model = $service_model_dir/$service_stt_link (download: $stt_model)" || echo "off (--with-whisper to enable)")"
+printf '    kokoro (speech)  = %s\n' "$([[ $do_kokoro -eq 1 ]] && echo "ON — Kokoro-82M in $tts_dir, onnxruntime $ort_version in $ort_dir, voices pt=$kokoro_voice_pt en=$kokoro_voice_en" || echo "off (--no-kokoro; piper/espeak fallback)")"
+printf '    assistant        = %s\n' "$([[ $do_assistant -eq 1 && $do_whisper -eq 1 ]] && echo "ON — built into easyai-server, [ASSISTANT] enabled = on, wake word \"hello $assistant_name\"" || echo "off ([ASSISTANT] enabled = off; --with-assistant or /models → Assistant)")"
 printf '    tls              = %s\n' "$([[ $do_tls -eq 1 ]] && echo "self-signed, CN=$mdns_hostname.local → https://$mdns_hostname.local:$service_port" || echo "off (--tls for the browser microphone on the LAN)")"
 printf '    model_src        = %s\n' "${model_src:-<none — pass --model PATH>}"
 printf '    flags            = install:%s build:%s groups:%s limits:%s kernel:%s\n' \
@@ -879,7 +956,12 @@ if [[ $do_install -eq 1 ]]; then
     sudo apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build git ccache pkg-config curl ca-certificates \
         libcurl4-openssl-dev libomp-dev libcap2-bin jq \
-        systemd-coredump patchelf git-lfs libasound2-dev alsa-utils espeak-ng
+        systemd-coredump patchelf git-lfs \
+        libasound2-dev alsa-utils espeak-ng libespeak-ng1
+    # libasound2-dev / alsa-utils: the assistant's microphone and speaker (ALSA);
+    # espeak-ng + libespeak-ng1: phonemes for the Kokoro voice (dlopen'ed at run
+    # time) and the last-resort voice. Installed by default — the voice path
+    # needs no later apt step.
 
     case "$backend_resolved" in
         vulkan)
@@ -1113,7 +1195,7 @@ fi
 # ---------- build easyai ----------------------------------------------------
 if [[ $do_build -eq 1 ]]; then
     log "configuring easyai build (backend=$backend_resolved)"
-    cmake_flags=( -DCMAKE_BUILD_TYPE=Release -DEASYAI_BUILD_SERVICES=ON
+    cmake_flags=( -DCMAKE_BUILD_TYPE=Release -DEASYAI_BUILD_SERVICES=ON -DEASYAI_BUILD_TESTS=ON
                   -DEASYAI_WITH_WHISPER=$([[ $do_whisper -eq 1 ]] && echo ON || echo OFF) )
     if [[ $do_llama_tools -eq 1 ]]; then
         cmake_flags+=( -DEASYAI_BUILD_LLAMA_TOOLS=ON )
@@ -1146,6 +1228,30 @@ if [[ $do_build -eq 1 ]]; then
     cmake -S . -B build "${cmake_flags[@]}"
     log "building (jobs=$jobs)"
     cmake --build build -j "$jobs"
+
+    # ---- unit tests (built with -DEASYAI_BUILD_TESTS=ON above) -----------
+    # A failing test does not stop the install: the binaries are built and
+    # the operator sees WHICH test failed and decides. ctest's own summary
+    # ("The following tests FAILED:" … "Errors while running CTest") is
+    # parsed for the names.
+    log "running the unit tests (ctest)"
+    ctest_log="$(mktemp -t easyai_ctest.XXXXXX)"
+    if ctest --test-dir build --output-on-failure 2>&1 | tee "$ctest_log"; then
+        ctest_total="$(grep -oE 'out of [0-9]+' "$ctest_log" | head -1 | awk '{print $3}' || true)"
+        log "unit tests: all ${ctest_total:+$ctest_total }passed"
+    else
+        ctest_failed="$(sed -n '/^The following tests FAILED:/,/^Errors while running CTest/p' "$ctest_log" \
+                        | grep -E '^[[:space:]]*[0-9]+ - ' | sed -E 's/^[[:space:]]*[0-9]+ - //' \
+                        | paste -sd ',' - | sed 's/,/, /g' || true)"
+        if [[ -n "$ctest_failed" ]]; then
+            warn "unit tests FAILED: $ctest_failed"
+        else
+            warn "ctest did not run cleanly (no tests found, or ctest itself failed):"
+            tail -n 5 "$ctest_log" | sed 's/^/    /' >&2
+        fi
+        warn "  rerun by hand: ctest --test-dir $easyai_dir/build --output-on-failure"
+    fi
+    rm -f "$ctest_log"
     popd >/dev/null
 fi
 
@@ -1186,7 +1292,6 @@ if [[ $do_build -eq 1 ]]; then
     sudo install -Dm755 "$easyai_dir/build/easyai-server"  "$install_prefix/bin/easyai-server"
     sudo install -Dm755 "$easyai_dir/build/easyai-cli"     "$install_prefix/bin/easyai-cli"
     sudo install -Dm755 "$easyai_dir/build/easyai-local"   "$install_prefix/bin/easyai-local"   || true
-    sudo install -Dm755 "$easyai_dir/build/easyai-assistant" "$install_prefix/bin/easyai-assistant" || true
     sudo install -Dm755 "$easyai_dir/build/easyai-agent"   "$install_prefix/bin/easyai-agent"   || true
     sudo install -Dm755 "$easyai_dir/build/easyai-chat"    "$install_prefix/bin/easyai-chat"    || true
     # Tutorial agent (today_is + weather).  Only built when libcurl is
@@ -1601,6 +1706,33 @@ RAG_README
     # leave-alone is the safe default).  Pass --force to override and
     # regenerate from current installer defaults; the previous file is
     # backed up to easyai.ini.bak before the rewrite.
+    # [ASSISTANT] enabled: on when the assistant was asked for AND whisper is
+    # built (it needs the server's own transcription); off otherwise — the
+    # dashboard (/models → Assistant) can flip it later without this script.
+    assistant_enabled="$([[ $do_assistant -eq 1 && $do_whisper -eq 1 ]] && echo on || echo off)"
+    # An INI written before 2026-11-14 has an [ASSISTANT] section without
+    # `enabled` (the assistant was its own unit then, purged below). Without
+    # this key the built-in assistant stays off, so --upgrade would silently
+    # silence a box that was talking: add the key once, on when the old unit
+    # existed (or was asked for now), and never touch anything else in the file.
+    old_assistant_unit=0
+    if [[ -e /etc/systemd/system/easyai-assistant.service ]] \
+            || systemctl list-unit-files --no-legend easyai-assistant.service 2>/dev/null | grep -qF easyai-assistant.service; then
+        old_assistant_unit=1
+    fi
+    if [[ -f "$ini_file" && $do_force -eq 0 ]]; then
+        migrate_enabled="$assistant_enabled"
+        [[ $old_assistant_unit -eq 1 && $do_whisper -eq 1 ]] && migrate_enabled=on
+        if sudo grep -qE '^[[:space:]]*\[ASSISTANT\]' "$ini_file"; then
+            if ! sudo awk '/^[[:space:]]*\[ASSISTANT\]/{s=1;next} /^[[:space:]]*\[/{s=0} s && /^[[:space:]]*enabled[[:space:]]*=/{f=1} END{exit !f}' "$ini_file"; then
+                log "migrating $ini_file: [ASSISTANT] enabled = $migrate_enabled (the assistant is built into easyai-server now)"
+                sudo sed -i "0,/^[[:space:]]*\[ASSISTANT\]/s//&\nenabled         = $migrate_enabled/" "$ini_file"
+            fi
+        else
+            log "migrating $ini_file: adding [ASSISTANT] enabled = $migrate_enabled"
+            printf '\n[ASSISTANT]\nenabled         = %s\nwake_model      = %s/ggml-%s.bin\n' "$migrate_enabled" "$service_model_dir" "$wake_model" | sudo tee -a "$ini_file" >/dev/null
+        fi
+    fi
     if [[ ! -f "$ini_file" || $do_force -eq 1 ]]; then
         if [[ -f "$ini_file" && $do_force -eq 1 ]]; then
             log "backing up existing $ini_file → ${ini_file}.bak (--force)"
@@ -1764,7 +1896,7 @@ language        = auto
 #   kokoro_model    Kokoro-82M .onnx (natural voice, run in-process in C++)
 #   kokoro_voices   its voices-v1.0.bin (54 voices)
 #   kokoro_voice_pt Kokoro voice for Portuguese: pm_alex (default), pm_santa, pf_dora
-#   kokoro_voice_en Kokoro voice for English: am_michael (default), bm_george, am_adam
+#   kokoro_voice_en Kokoro voice for English: am_michael (default), am_fenrir, am_puck (all C+ upstream), af_heart (A, female)
 #   onnxruntime     libonnxruntime shared library (opened at run time)
 #   espeak_lib      libespeak-ng shared library (default: found in the apt/brew places)
 #   espeak_data     espeak-ng-data directory (default: found next to the library)
@@ -1787,17 +1919,30 @@ voice_pt        = $tts_dir/$(basename "$piper_voice_pt").onnx
 voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 
 # ============================================================
-# [ASSISTANT] — easyai-assistant.service (voice assistant)
+# [ASSISTANT] — the voice assistant built into easyai-server
 # ============================================================
-# Always listening on this box's microphone. "hello <name>" / "olá <name>" wakes
-# it, a pause of pause_ms ends the question (a short rising sound says the
-# question was taken), the answer is spoken sentence by sentence and a beep
-# says it listens again. The dashboard (/models → Services) edits this file
-# and restarts the service. Every key is also a flag (--<key with dashes>); flags win over
-# this file. \`easyai-assistant --list-options\` prints every option with the
-# value in effect; \`easyai-assistant --text "question"\` tests the chat and
-# voice path without a microphone.
+# easyai-server listens on this box's microphone while it serves. "hello
+# <name>" / "olá <name>" wakes it, a pause of pause_ms ends the question (a
+# short rising sound says the question was taken), the answer is spoken
+# sentence by sentence and a beep says it listens again. Chat, transcription
+# and the voice all go through this same server: no second process, no
+# second unit, nothing else to start.
 #
+# The dashboard (/models → Assistant) lists the microphones, the speakers,
+# the voices and every key below, and applies a change live: Save & apply
+# rewrites this section and restarts the assistant inside the running server
+# (no systemctl). From a shell, with the same INI:
+#   easyai-server --list-audio-devices        every ALSA capture / playback device
+#   easyai-server --list-voices               engine in use, fallback, the voices
+#   easyai-server --assistant-options         every key with the value in effect
+#   easyai-server --assistant-say "text"      speaks on the configured speaker
+# Every key is also a flag of easyai-server, --assistant-<key with dashes>
+# (--assistant-enabled off, --assistant-mic plughw:1,0, ...); flags win over
+# this file. Keys:
+#
+#   enabled         on | off — start the assistant with the server. The installer writes
+#                   on when whisper was built (off with --no-assistant); the dashboard's
+#                   Enabled switch changes it live
 #   name            wake name, said right after a call word: "hello <name>", "olá <name>"
 #   call_words      csv of the words that must come right before the name (default hello, olá,
 #                   alô, hallo, hola — whisper's spellings of them are built in). Empty = loose
@@ -1807,22 +1952,26 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 #   mic_gain_db     software gain on the microphone, -30..30 dB (0 = as captured). Negative when
 #                   the room saturates the input (levels near 0 dB in the verbose log)
 #   greeting        en | pt | off — spoken once at start-up: the assistant is online and how to call it
-#   endpoint        OpenAI-compatible base URL for chat (this server, llama-server, OpenAI)
-#   api_key         Bearer token; the unit passes the server's key as EASYAI_API_KEY
+#   endpoint        OpenAI-compatible base URL for chat. Empty (the default) = this server,
+#                   over loopback; llama-server or OpenAI also work
+#   api_key         Bearer token for the endpoint(s). Empty (the default) = this server's own key
+#                   when the endpoint is this server; any other host is called without a key
 #   model           model id sent in the request ("default" = whatever the server serves)
-#   stt_endpoint    base URL for /v1/audio/transcriptions (default: endpoint)
-#   tts_endpoint    base URL for /v1/audio/speech (default: endpoint)
+#   stt_endpoint    base URL for /v1/audio/transcriptions (default: in-process whisper)
+#   tts_endpoint    base URL for /v1/audio/speech (default: in-process [TTS] engine)
 #   language        auto | pt | en  — forced transcription language (auto detects)
 #   pause_ms        silence that ends a question (ms)
 #   followup_ms     after an answer the listening beep sounds and the assistant keeps listening
 #                   without the name; this much silence ends the conversation with a falling
 #                   two-tone sound (0 = off)
 #   max_listen_ms   longest question (ms)
-#   wake_model      local whisper ggml for the wake word, or "server" (every burst to stt_endpoint)
+#   wake_model      local whisper ggml for the wake word, or "server" (every burst through
+#                   the [STT] model)
 #   mic             ALSA capture device: default, plughw:1,0 … ("default" with no capture
 #                   makes the assistant pick the first card that has one and log it)
 #   speaker         ALSA playback device; "default" follows the microphone card
 #   tts             auto | server | kokoro | say | piper | espeak — where the voice comes from
+#                   (auto = the server's [TTS] engine, Kokoro when installed)
 #   kokoro_model / kokoro_voices   local Kokoro files when tts is not the server
 #   voice_pt / voice_en / piper    local fallback voices (piper .onnx, say, espeak)
 #   tools           csv of built-in tools: datetime, web (empty = none)
@@ -1832,14 +1981,18 @@ voice_en        = $tts_dir/$(basename "$piper_voice_en").onnx
 #   history_idle_s  idle seconds after which the conversation restarts
 #   verbose         1 = log VAD levels, every transcript the wake model heard, timings
 #   tls_insecure    1 = skip certificate verification (self-signed endpoint)
+#
+#   The voice itself (kokoro_voice_pt / kokoro_voice_en) lives in [TTS] above; the
+#   Assistant tab writes those two there (as tts.kokoro_voice_pt / tts.kokoro_voice_en).
 [ASSISTANT]
+enabled         = $assistant_enabled
 name            = $assistant_name
 call_words      = hello, olá, alô, hallo, hola
 # name_aliases    =
 mic_gain_db     = 0
 greeting        = en
-endpoint        = http://127.0.0.1:$service_port
-# api_key         =
+# endpoint        = http://127.0.0.1:$service_port   (default: this server)
+# api_key         = (default: the server's key)
 model           = default
 # stt_endpoint    =
 # tts_endpoint    =
@@ -1852,7 +2005,7 @@ mic             = default
 speaker         = default
 tts             = auto
 tools           = datetime,web
-# external_tools  = $config_dir/tools
+# external_tools  = $external_tools_dir
 # system          = $config_dir/assistant_system.txt
 history_turns   = 6
 history_idle_s  = 300
@@ -2334,7 +2487,7 @@ INI_FILE
     fi
 fi
 
-# ---------- groups (render/video for GPU access) ---------------------------
+# ---------- groups (render/video for GPU access, audio for the assistant) ---
 if [[ $do_groups -eq 1 && $do_service -eq 1 ]]; then
     case "$backend_resolved" in
         vulkan|hip|cuda)
@@ -2346,6 +2499,13 @@ if [[ $do_groups -eq 1 && $do_service -eq 1 ]]; then
             done
             ;;
     esac
+    # The voice assistant runs inside easyai-server and opens /dev/snd (the
+    # box's microphone and speaker): the service user joins audio whatever
+    # the GPU backend. The unit also carries SupplementaryGroups=audio.
+    if getent group audio >/dev/null; then
+        log "adding $service_user to group 'audio' (microphone + speaker for the assistant)"
+        sudo usermod -aG audio "$service_user" || true
+    fi
 fi
 
 # ---------- memlock / nofile limits ----------------------------------------
@@ -2447,6 +2607,7 @@ if [[ $do_service -eq 1 && $do_whisper -eq 1 && "$stt_model" != "none" ]]; then
         # Real weights from the repo (Git LFS resolved) — no network needed.
         log "copying voice model from the repo: $stt_repo_copy → $stt_dest"
         sudo install -m640 -o "$service_user" -g "$service_group" "$stt_repo_copy" "$stt_dest"
+        verify_sha256 "$stt_dest" "${sha256_pins[$stt_file]:-}" "$stt_file"
     else
         [[ -f "$stt_repo_copy" ]] && log "repo copy of $stt_file is an LFS pointer (git-lfs missing) — downloading"
         log "downloading whisper model $stt_file (from $stt_hf_repo) → $stt_dest"
@@ -2455,6 +2616,7 @@ if [[ $do_service -eq 1 && $do_whisper -eq 1 && "$stt_model" != "none" ]]; then
             sudo mv "$stt_dest.part" "$stt_dest"
             sudo chown "$service_user":"$service_group" "$stt_dest"
             sudo chmod 640 "$stt_dest"
+            verify_sha256 "$stt_dest" "${sha256_pins[$stt_file]:-}" "$stt_file"
         else
             sudo rm -f "$stt_dest.part"
             warn "whisper model download failed — voice stays off until one is fetched from /models → Local models → Voice transcription"
@@ -2471,7 +2633,11 @@ if [[ $do_service -eq 1 && $do_whisper -eq 1 && "$stt_model" != "none" ]]; then
 fi
 
 # ---------- wake-word model + piper voices (assistant / TTS) ----------------
-if [[ $do_service -eq 1 && $do_whisper -eq 1 && $do_assistant -eq 1 ]]; then
+# The small whisper model the built-in assistant runs on every speech burst
+# to hear "hello <name>" ([ASSISTANT] wake_model). Fetched whenever whisper
+# is built — also under --no-assistant, so the dashboard's Enabled switch
+# works without a download.
+if [[ $do_service -eq 1 && $do_whisper -eq 1 ]]; then
     wake_file="ggml-$wake_model.bin"; wake_dest="$service_model_dir/$wake_file"
     if [[ -f "$wake_dest" ]]; then
         log "wake-word model already present: $wake_dest"
@@ -2479,6 +2645,7 @@ if [[ $do_service -eq 1 && $do_whisper -eq 1 && $do_assistant -eq 1 ]]; then
         log "downloading wake-word model $wake_file → $wake_dest"
         if sudo curl -fL --retry 3 --progress-bar -o "$wake_dest.part" "https://huggingface.co/$stt_hf_repo/resolve/main/$wake_file"; then
             sudo mv "$wake_dest.part" "$wake_dest"; sudo chown "$service_user":"$service_group" "$wake_dest"; sudo chmod 640 "$wake_dest"
+            verify_sha256 "$wake_dest" "${sha256_pins[$wake_file]:-}" "$wake_file"
         else
             sudo rm -f "$wake_dest.part"; warn "wake-word model download failed — the assistant will use the server STT for every burst"
         fi
@@ -2500,24 +2667,28 @@ if [[ $do_service -eq 1 && $do_piper -eq 1 ]]; then
         else
             piper_tgz="piper_linux_$( [[ "$piper_arch" == "amd64" ]] && echo x86_64 || ( [[ "$piper_arch" == "arm64" ]] && echo aarch64 || echo armv7l ) ).tar.gz"
             log "downloading piper $piper_version ($piper_tgz)"
-            if curl -fL --retry 3 --progress-bar -o "/tmp/$piper_tgz" "https://github.com/rhasspy/piper/releases/download/$piper_version/$piper_tgz"; then
+            if curl -fL --retry 3 --progress-bar -o "/tmp/$piper_tgz" "https://github.com/rhasspy/piper/releases/download/$piper_version/$piper_tgz" \
+                    && verify_sha256 "/tmp/$piper_tgz" "${sha256_pins[$piper_tgz]:-}" "piper $piper_version $piper_tgz" warn; then
                 sudo install -d -m755 "$(dirname "$piper_dir")"
                 sudo rm -rf "$piper_dir"
                 sudo tar -xzf "/tmp/$piper_tgz" -C "$(dirname "$piper_dir")"   # extracts ./piper/
                 rm -f "/tmp/$piper_tgz"
                 [[ -x "$piper_dir/piper" ]] || warn "piper binary not found after extraction"
             else
-                warn "piper download failed — /v1/audio/speech stays off"
+                rm -f "/tmp/$piper_tgz"
+                warn "piper download failed or rejected — no piper fallback (Kokoro / espeak remain)"
             fi
         fi
     fi
     for v in "$piper_voice_pt" "$piper_voice_en"; do
         for ext in onnx onnx.json; do
-            dest="$tts_dir/$(basename "$v").$ext"
+            vfile="$(basename "$v").$ext"
+            dest="$tts_dir/$vfile"
             [[ -f "$dest" ]] && continue
-            log "downloading piper voice $(basename "$v").$ext"
+            log "downloading piper voice $vfile"
             if sudo curl -fL --retry 3 --progress-bar -o "$dest.part" "$piper_voices_base/$v.$ext"; then
                 sudo mv "$dest.part" "$dest"; sudo chown "$service_user":"$service_group" "$dest"; sudo chmod 644 "$dest"
+                verify_sha256 "$dest" "${sha256_pins[$vfile]:-}" "$vfile" warn || true
             else
                 sudo rm -f "$dest.part"; warn "voice download failed: $v.$ext"
             fi
@@ -2529,9 +2700,13 @@ fi
 # easyai-server runs Kokoro itself (src/kokoro.cpp) and opens libonnxruntime
 # and libespeak-ng at run time; nothing is linked, nothing is Python.
 if [[ $do_service -eq 1 && $do_kokoro -eq 1 ]]; then
-    if [[ -f "$ort_dir/lib/libonnxruntime.so" ]]; then
-        log "onnxruntime already installed: $ort_dir"
+    # The release archive carries VERSION_NUMBER; an installed copy of another
+    # release (an earlier pin) is replaced so --upgrade follows the pin.
+    ort_have="$(cat "$ort_dir/VERSION_NUMBER" 2>/dev/null || true)"
+    if [[ -f "$ort_dir/lib/libonnxruntime.so" && ( -z "$ort_have" || "$ort_have" == "$ort_version" ) ]]; then
+        log "onnxruntime already installed: $ort_dir${ort_have:+ ($ort_have)}"
     else
+        [[ -n "$ort_have" ]] && log "onnxruntime $ort_have installed, pin is $ort_version — replacing"
         case "$(uname -m)" in
             x86_64)        ort_tgz="onnxruntime-linux-x64-$ort_version.tgz" ;;
             aarch64|arm64) ort_tgz="onnxruntime-linux-aarch64-$ort_version.tgz" ;;
@@ -2542,11 +2717,14 @@ if [[ $do_service -eq 1 && $do_kokoro -eq 1 ]]; then
         else
             log "downloading onnxruntime $ort_version ($ort_tgz)"
             if curl -fL --retry 3 --progress-bar -o "/tmp/$ort_tgz" "https://github.com/microsoft/onnxruntime/releases/download/v$ort_version/$ort_tgz"; then
+                verify_sha256 "/tmp/$ort_tgz" "$(ort_sha256 "$ort_tgz")" "onnxruntime $ort_version ($ort_tgz)"
                 sudo rm -rf "$ort_dir"; sudo install -d -m755 "$ort_dir"
                 sudo tar -xzf "/tmp/$ort_tgz" -C "$ort_dir" --strip-components=1
                 rm -f "/tmp/$ort_tgz"
                 [[ -f "$ort_dir/lib/libonnxruntime.so" ]] || sudo ln -sf "$(ls "$ort_dir"/lib/libonnxruntime.so.* | head -1)" "$ort_dir/lib/libonnxruntime.so"
                 [[ -f "$ort_dir/lib/libonnxruntime.so" ]] || { warn "libonnxruntime.so not found after extraction — natural voice off"; do_kokoro=0; }
+            elif [[ -f "$ort_dir/lib/libonnxruntime.so" ]]; then
+                warn "onnxruntime $ort_version download failed — keeping the installed ${ort_have:-unknown version}"
             else
                 warn "onnxruntime download failed — natural voice off, piper stays"; do_kokoro=0
             fi
@@ -2562,22 +2740,17 @@ if [[ $do_service -eq 1 && $do_kokoro -eq 1 ]]; then
         if [[ -f "$easyai_dir/models/tts/$f" ]] && [[ $(stat -c %s "$easyai_dir/models/tts/$f") -gt $stt_lfs_pointer_max_bytes ]]; then
             log "copying Kokoro $f from the repo → $tts_dir/$f"
             sudo install -m644 -o "$service_user" -g "$service_group" "$easyai_dir/models/tts/$f" "$tts_dir/$f"
+            verify_sha256 "$tts_dir/$f" "${sha256_pins[$f]:-}" "Kokoro $f"
             continue
         fi
         log "downloading Kokoro $f → $tts_dir/$f"
         if sudo curl -fL --retry 3 --progress-bar -o "$tts_dir/$f.part" "$kokoro_files_base/$f"; then
             sudo mv "$tts_dir/$f.part" "$tts_dir/$f"; sudo chown "$service_user":"$service_group" "$tts_dir/$f"; sudo chmod 644 "$tts_dir/$f"
+            verify_sha256 "$tts_dir/$f" "${sha256_pins[$f]:-}" "Kokoro $f"
         else
             sudo rm -f "$tts_dir/$f.part"; warn "Kokoro download failed: $f — natural voice off, piper stays"; do_kokoro=0
         fi
     done
-fi
-# The Python helper of 2026-10-16 (easyai-tts-kokoro.service, /opt/easyai/kokoro) is gone; clean it up on upgrade.
-if [[ $do_service -eq 1 && -f /etc/systemd/system/easyai-tts-kokoro.service ]]; then
-    log "removing the old Python Kokoro helper unit"
-    sudo systemctl disable --now easyai-tts-kokoro.service 2>/dev/null || true
-    sudo rm -f /etc/systemd/system/easyai-tts-kokoro.service
-    sudo rm -rf /opt/easyai/kokoro
 fi
 
 # ---------- TLS (self-signed) ------------------------------------------------
@@ -2600,6 +2773,39 @@ if [[ $do_service -eq 1 && $do_tls -eq 1 ]]; then
     fi
     sudo chown "$service_user":"$service_group" "$tls_key" "$tls_crt"
     sudo chmod 600 "$tls_key"; sudo chmod 644 "$tls_crt"
+fi
+
+# ---------- stale artefacts (old assistant binary + units) ------------------
+# The voice assistant used to be a second program (easyai-assistant with
+# easyai-assistant.service, until 2026-11-14) and the Kokoro voice a Python
+# helper (easyai-tts-kokoro.service + /opt/easyai/kokoro, until 2026-10-16).
+# Both live inside easyai-server now. Every run that touches the service —
+# a first install and --upgrade alike — removes what an earlier installer
+# left behind, and says nothing when there is nothing to remove.
+if [[ $do_service -eq 1 ]]; then
+    stale_units_removed=0
+    for unit in easyai-assistant.service easyai-tts-kokoro.service; do
+        if [[ -e "/etc/systemd/system/$unit" || -d "/etc/systemd/system/$unit.d" ]] \
+                || systemctl list-unit-files --no-legend "$unit" 2>/dev/null | grep -qF "$unit"; then
+            log "removing the old unit $unit (its job is done by easyai-server now)"
+            sudo systemctl disable --now "$unit" 2>/dev/null || true
+            sudo systemctl reset-failed "$unit" 2>/dev/null || true
+            sudo rm -f  "/etc/systemd/system/$unit"
+            sudo rm -rf "/etc/systemd/system/$unit.d"
+            stale_units_removed=1
+        fi
+    done
+    if [[ $stale_units_removed -eq 1 ]]; then
+        sudo systemctl daemon-reload
+    fi
+    if [[ -e "$install_prefix/bin/easyai-assistant" ]]; then
+        log "removing the old binary $install_prefix/bin/easyai-assistant (built into easyai-server now)"
+        sudo rm -f "$install_prefix/bin/easyai-assistant"
+    fi
+    if [[ -e /opt/easyai/kokoro ]]; then
+        log "removing the old Python Kokoro helper /opt/easyai/kokoro"
+        sudo rm -rf /opt/easyai/kokoro
+    fi
 fi
 
 # ---------- systemd unit ----------------------------------------------------
@@ -2666,7 +2872,7 @@ if [[ $do_service -eq 1 ]]; then
 [Unit]
 Description=easyai OpenAI-compatible LLM server
 Documentation=https://github.com/solariun/easy
-After=network-online.target
+After=network-online.target sound.target
 Wants=network-online.target
 
 # Cap restart attempts: allow up to 2 starts within a 60-second window
@@ -2689,8 +2895,10 @@ WorkingDirectory=$service_home
 
 # Render / video groups give the service access to /dev/dri/* (GPU). The
 # usermod step above adds them to the user, but baking them into the unit
-# means they apply even if the user gets recreated.
-SupplementaryGroups=render video systemd-journal
+# means they apply even if the user gets recreated. audio: the voice
+# assistant is built into the server and opens /dev/snd (the box's
+# microphone and speaker).
+SupplementaryGroups=render video systemd-journal audio
 
 # Make the service much less likely to be picked by the OOM killer when
 # RAM gets tight (model + KV + activations dominate the box's footprint).
@@ -2751,48 +2959,6 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 WantedBy=multi-user.target
 UNIT
 
-    # ---- easyai-assistant.service ---------------------------------------------
-    # The voice assistant on this box's own microphone and speaker. Same
-    # user as the server plus the audio group; the server's API key (when
-    # one exists) reaches it through EASYAI_API_KEY like the server itself.
-    if [[ $do_assistant -eq 1 && $do_whisper -eq 1 ]]; then
-        sudo usermod -aG audio "$service_user" || true
-        log "writing /etc/systemd/system/$assistant_service"
-        sudo tee "/etc/systemd/system/$assistant_service" >/dev/null <<AUNIT
-[Unit]
-Description=easyai voice assistant ("hello $assistant_name" on this box's microphone)
-Documentation=https://github.com/solariun/easy
-After=easyai-server.service sound.target
-Wants=easyai-server.service
-StartLimitBurst=3
-StartLimitIntervalSec=120
-
-[Service]
-Type=simple
-User=$service_user
-Group=$service_group
-WorkingDirectory=$service_home
-SupplementaryGroups=audio
-Environment=HOME=$service_home
-Environment=LD_LIBRARY_PATH=$install_prefix/lib/easyai
-Environment=EASYAI_NO_AUTO_LOG=1
-$( [[ -f "$api_key_file" ]] && echo "Environment=\"EASYAI_API_KEY_FILE=$api_key_file\"" )
-ExecStart=/bin/sh -c '$( [[ -f "$api_key_file" ]] && echo "EASYAI_API_KEY=\$(cat $api_key_file) " )exec $install_prefix/bin/easyai-assistant --config $ini_file'
-Restart=on-failure
-RestartSec=10
-KillSignal=SIGINT
-NoNewPrivileges=yes
-ProtectSystem=strict
-ReadWritePaths=$service_home /tmp
-PrivateTmp=yes
-
-[Install]
-WantedBy=multi-user.target
-AUNIT
-    else
-        sudo rm -f "/etc/systemd/system/$assistant_service"
-    fi
-
     # ---- legacy drop-in cleanup --------------------------------------------
     # Earlier versions of this script wrote SOME flags into separate drop-in
     # files under .service.d/ (e.g. verbose.conf carried `--verbose` via its
@@ -2837,21 +3003,22 @@ AUNIT
         done < <(sudo grep -lE '^[[:space:]]*ExecStart=' "$dropin_dir"/*.conf 2>/dev/null || true)
     fi
 
-    # ---- polkit: let the service user start/stop/restart the two units ----
-    # The dashboard's Services tab calls `systemctl <verb> easyai-*.service`
-    # as $service_user; systemd asks polkit, this rule answers yes for
-    # exactly these two units and nothing else. No sudo, no root in the
-    # server. journalctl for the Log button needs the systemd-journal group.
+    # ---- polkit: let the service user start/stop/restart its own unit -----
+    # The dashboard's Services tab calls `systemctl <verb> easyai-server.service`
+    # as $service_user; systemd asks polkit, this rule answers yes for exactly
+    # this one unit and nothing else (the assistant runs inside the server, so
+    # there is no second unit). No sudo, no root in the server. journalctl for
+    # the Log button needs the systemd-journal group.
     log "writing /etc/polkit-1/rules.d/50-easyai-services.rules"
     sudo mkdir -p /etc/polkit-1/rules.d
     sudo tee /etc/polkit-1/rules.d/50-easyai-services.rules >/dev/null <<PKRULES
 // Installed by install_easyai_server.sh: the easyai dashboard (user
-// $service_user) may manage its own two units through systemctl.
+// $service_user) may manage its own unit through systemctl.
 polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.systemd1.manage-units" &&
         subject.user == "$service_user") {
         var unit = action.lookup("unit");
-        if (unit == "$service_name" || unit == "$assistant_service") {
+        if (unit == "$service_name") {
             return polkit.Result.YES;
         }
     }
@@ -2864,10 +3031,18 @@ PKRULES
 
     sudo systemctl daemon-reload
 
-    if [[ $do_enable_now -eq 1 ]]; then
+    if systemctl is-active --quiet "$service_name" 2>/dev/null; then
+        # Already running (an --upgrade or a re-run): `enable --now` would be a
+        # no-op and the old process would keep serving the old binary — and,
+        # since this run stopped the old assistant unit, the box would be
+        # mute until someone restarts it by hand.
+        log "restarting $service_name (new binaries, unit and INI; the assistant comes up inside it)"
+        sudo systemctl restart "$service_name"
+        sleep 1
+        sudo systemctl --no-pager --full status "$service_name" || true
+    elif [[ $do_enable_now -eq 1 ]]; then
         log "enabling + starting $service_name"
         sudo systemctl enable --now "$service_name"
-        [[ -f "/etc/systemd/system/$assistant_service" ]] && sudo systemctl enable --now "$assistant_service"
         sleep 1
         sudo systemctl --no-pager --full status "$service_name" || true
     else
@@ -3197,6 +3372,34 @@ if [[ $do_lemonade -eq 1 ]]; then
     esac
 fi
 
+# ---------- voice check: is Kokoro the engine in use? -----------------------
+# The installed binary reads the installed INI exactly as the service will
+# and lists the voices, so a missing onnxruntime / espeak-ng / model file
+# shows up here and not in the journal after the first "hello". Runs as the
+# current user; the INI is root:$service_group 0660, so when it is not
+# readable here the listing runs as the service user instead.
+if [[ $do_service -eq 1 && $do_kokoro -eq 1 && $do_build -eq 1 ]]; then
+    log "voice check: easyai-server --list-voices"
+    voices_cmd=( env LD_LIBRARY_PATH="$install_prefix/lib/easyai"
+                 "$install_prefix/bin/easyai-server" --config "$ini_file" --list-voices )
+    if [[ -r "$ini_file" ]]; then
+        voices_out="$("${voices_cmd[@]}" 2>&1 | head -40 || true)"
+    else
+        voices_out="$(sudo -u "$service_user" "${voices_cmd[@]}" 2>&1 | head -40 || true)"
+    fi
+    if grep -qE '^[[:space:]]*engine *[:=] *kokoro' <<<"$voices_out"; then
+        voices_n="$(grep -cE '(^|[^A-Za-z_])[a-z]{2}_[a-z]+' <<<"$voices_out" || true)"
+        log "natural voice: Kokoro-82M ready (${voices_n:-?} voices; pt $kokoro_voice_pt, en $kokoro_voice_en)"
+    else
+        warn "natural voice NOT in use — easyai-server --list-voices said:"
+        head -n 6 <<<"$voices_out" | sed 's/^/    /' >&2
+        warn "  check: $ort_dir/lib/libonnxruntime.so present (onnxruntime $ort_version),"
+        warn "         espeak-ng installed (apt: espeak-ng libespeak-ng1),"
+        warn "         $tts_dir/kokoro-v1.0.onnx + voices-v1.0.bin present, [TTS] engine = auto in $ini_file"
+        warn "  the server falls back to piper / espeak until this is fixed; rerun with --upgrade afterwards"
+    fi
+fi
+
 # ---------- summary ---------------------------------------------------------
 echo
 log "DONE."
@@ -3217,7 +3420,8 @@ printf '  voice     : %s://%s:%s/v1/audio/transcriptions   (%s)\n' "$scheme" \
 printf '  speech    : %s://%s:%s/v1/audio/speech   (%s)\n' "$scheme" \
     "$([[ "$service_host" == "0.0.0.0" ]] && hostname || echo "$service_host")" "$service_port" \
     "$([[ $do_kokoro -eq 1 ]] && echo "Kokoro-82M natural voice in-process ($kokoro_voice_pt / $kokoro_voice_en), piper as fallback" || ([[ $do_piper -eq 1 ]] && echo "piper, voices pt_BR faber + en_US ryan" || echo "off: --no-piper"))"
-printf '  assistant : %s\n' "$([[ $do_assistant -eq 1 && $do_whisper -eq 1 ]] && echo "$assistant_service — say \"hey $assistant_name\" / \"oi $assistant_name\" near the box; journalctl -u easyai-assistant -f" || echo "off: --with-assistant")"
+printf '  assistant : %s\n' "$([[ $do_assistant -eq 1 && $do_whisper -eq 1 ]] && echo "built into easyai-server — say \"hello $assistant_name\" / \"olá $assistant_name\" near the box; dashboard /models → Assistant; easyai-server --list-audio-devices" || echo "off ([ASSISTANT] enabled = off — --with-assistant, or the dashboard /models → Assistant)")"
+printf '              every [ASSISTANT] key is a flag: easyai-server --assistant-options; test the voice: easyai-server --config %s --assistant-say "hello"\n' "$ini_file"
 printf '  health    : %s://localhost:%s/health\n' "$scheme" "$service_port"
 [[ $enable_metrics -eq 1 ]] && \
     printf '  metrics   : %s://localhost:%s/metrics\n' "$scheme" "$service_port"

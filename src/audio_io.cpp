@@ -1,9 +1,17 @@
 #include "easyai/audio_io.hpp"
 
+#include "easyai/assistant_core.hpp"
+
+#include <algorithm>
+#include <cctype>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <fstream>
+#include <map>
 #include <mutex>
+#include <sstream>
 
 #if defined(__APPLE__)
 #include <AudioToolbox/AudioToolbox.h>
@@ -31,6 +39,153 @@ std::string backend_name() {
     return "alsa";
 #else
     return "none";
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Device listing (nothing is opened)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+#if defined(EASYAI_AUDIO_ALSA)
+std::string read_text_file(const std::string & path) {
+    std::ifstream f(path);
+    if (!f) return "";
+    std::stringstream ss; ss << f.rdbuf();
+    return ss.str();
+}
+
+// /proc/asound/cards: " 1 [Generic_1      ]: HDA-Intel - HD-Audio Generic" → {1: "Generic_1"}.
+std::map<int, std::string> parse_asound_cards(const std::string & text) {
+    std::map<int, std::string> out;
+    std::stringstream ss(text);
+    std::string line;
+    while (std::getline(ss, line)) {
+        std::size_t i = 0;
+        while (i < line.size() && line[i] == ' ') ++i;
+        if (i >= line.size() || !std::isdigit((unsigned char) line[i])) continue;
+        const int idx = std::atoi(line.c_str() + i);
+        const auto lb = line.find('['), rb = line.find(']');
+        if (lb == std::string::npos || rb == std::string::npos || rb <= lb) continue;
+        std::string id = line.substr(lb + 1, rb - lb - 1);
+        id.erase(id.find_last_not_of(' ') + 1);
+        id.erase(0, id.find_first_not_of(' '));
+        out[idx] = id;
+    }
+    return out;
+}
+
+// One hint from snd_device_name_hint: the first line of DESC is the card,
+// the rest describes the pcm ("HD-Audio Generic, ALC245 Analog\nDefault Audio Device").
+struct Hint { std::string name, desc, ioid; };
+
+std::vector<Device> merge_alsa_devices(const std::vector<Hint> & hints, const std::string & pcm_text,
+                                       const std::string & cards_text) {
+    std::vector<Device> out;
+    auto find = [&](const std::string & id) -> Device * {
+        for (auto & d : out) if (d.id == id) return &d;
+        return nullptr;
+    };
+    const auto pcms  = assistant::parse_asound_pcm(pcm_text);
+    const auto cards = parse_asound_cards(cards_text);
+    bool any_capture = false, any_playback = false;
+    for (const auto & p : pcms) { any_capture = any_capture || p.capture; any_playback = any_playback || p.playback; }
+
+    Device def;
+    def.id = "default"; def.name = "ALSA default device"; def.is_default = true;
+    def.capture = any_capture; def.playback = any_playback;
+    out.push_back(def);
+
+    for (const auto & h : hints) {
+        if (h.name.empty() || h.name == "null") continue;
+        Device d;
+        d.id = h.name;
+        std::string desc = h.desc;
+        std::string first = desc, rest;
+        const auto nl = desc.find('\n');
+        if (nl != std::string::npos) { first = desc.substr(0, nl); rest = desc.substr(nl + 1); std::replace(rest.begin(), rest.end(), '\n', ' '); }
+        // "CARD=xxx" in the name names the card; the first DESC line is "card, pcm".
+        const auto cp = h.name.find("CARD=");
+        if (cp != std::string::npos) {
+            std::string c = h.name.substr(cp + 5);
+            const auto comma = c.find(',');
+            if (comma != std::string::npos) c = c.substr(0, comma);
+            d.card = c;
+        }
+        d.name = rest.empty() ? first : (first.empty() ? rest : first + " — " + rest);
+        if (d.name.empty()) d.name = h.name;
+        d.capture  = h.ioid.empty() || h.ioid == "Input";
+        d.playback = h.ioid.empty() || h.ioid == "Output";
+        if (d.id == "default") { out[0].name = d.name; continue; }   // flags of "default" come from the cards (below), not from the hint
+        if (Device * e = find(d.id)) { e->capture = e->capture || d.capture; e->playback = e->playback || d.playback; continue; }
+        out.push_back(d);
+    }
+    for (const auto & p : pcms) {
+        Device d;
+        d.id = p.alsa_name();
+        d.name = p.name;
+        const auto it = cards.find(p.card);
+        d.card = it != cards.end() ? it->second : std::to_string(p.card);
+        d.capture = p.capture; d.playback = p.playback;
+        if (Device * e = find(d.id)) { e->capture = e->capture || d.capture; e->playback = e->playback || d.playback; if (e->card.empty()) e->card = d.card; continue; }
+        out.push_back(d);
+    }
+    return out;
+}
+#endif
+
+}  // namespace
+
+std::vector<Device> list_devices(std::string & err) {
+    err.clear();
+    std::vector<Device> out;
+#if defined(EASYAI_AUDIO_COREAUDIO)
+    Device def; def.id = "default"; def.name = "System default"; def.is_default = true; def.capture = true; def.playback = true;
+    out.push_back(def);
+    AudioObjectPropertyAddress addr{kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMaster};
+    UInt32 size = 0;
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &addr, 0, nullptr, &size) != noErr) return out;
+    std::vector<AudioDeviceID> ids(size / sizeof(AudioDeviceID));
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, nullptr, &size, ids.data()) != noErr) return out;
+    for (AudioDeviceID id : ids) {
+        Device d; d.id = "coreaudio:" + std::to_string(id);
+        CFStringRef name = nullptr; UInt32 sz = sizeof name;
+        AudioObjectPropertyAddress na{kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMaster};
+        if (AudioObjectGetPropertyData(id, &na, 0, nullptr, &sz, &name) == noErr && name) {
+            char buf[256] = {0};
+            CFStringGetCString(name, buf, sizeof buf, kCFStringEncodingUTF8);
+            d.name = buf;
+            CFRelease(name);
+        }
+        for (int scope = 0; scope < 2; ++scope) {
+            AudioObjectPropertyAddress sa{kAudioDevicePropertyStreams, scope == 0 ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput, kAudioObjectPropertyElementMaster};
+            UInt32 ssz = 0;
+            if (AudioObjectGetPropertyDataSize(id, &sa, 0, nullptr, &ssz) == noErr && ssz > 0) (scope == 0 ? d.capture : d.playback) = true;
+        }
+        out.push_back(d);
+    }
+    return out;
+#elif defined(EASYAI_AUDIO_ALSA)
+    std::vector<Hint> hints;
+    void ** hh = nullptr;
+    if (snd_device_name_hint(-1, "pcm", &hh) >= 0 && hh) {
+        for (void ** h = hh; *h; ++h) {
+            Hint x;
+            char * n = snd_device_name_get_hint(*h, "NAME");
+            char * d = snd_device_name_get_hint(*h, "DESC");
+            char * i = snd_device_name_get_hint(*h, "IOID");
+            if (n) { x.name = n; std::free(n); }
+            if (d) { x.desc = d; std::free(d); }
+            if (i) { x.ioid = i; std::free(i); }
+            hints.push_back(x);
+        }
+        snd_device_name_free_hint(hh);
+    }
+    return merge_alsa_devices(hints, read_text_file("/proc/asound/pcm"), read_text_file("/proc/asound/cards"));
+#else
+    err = "built without an audio backend (ALSA headers missing at build time)";
+    return out;
 #endif
 }
 

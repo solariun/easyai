@@ -62,6 +62,8 @@ Drop the CLI flag and the INI value takes over.
 | `[ENGINE]` | Model loading + inference tunables | active |
 | `[MODEL_<pattern>]` | Per-model `[ENGINE]` overrides matched by model filename | active |
 | `[STT]` | Voice transcription: whisper model, language, threads | active |
+| `[TTS]` | Text-to-speech for `POST /v1/audio/speech` and the assistant's voice: engine, Kokoro files and voices, fallbacks | active |
+| `[ASSISTANT]` | The voice assistant built into the server (2026-11-14): `enabled`, wake name, devices, timings, brain | active |
 | `[MCP_USER]` | Bearer-token auth for `/mcp` (one user per line) | active |
 | `[TOOLS]` | Per-tool ACL (`mcp_allowed = …`) | reserved for a future release |
 
@@ -358,6 +360,46 @@ Two ways out:
 2. **Chrome flag**: `chrome://flags/#unsafely-treat-insecure-origin-as-secure`
    with `http://ai-pro.local:8080` — per browser, no server change.
 
+### `[TTS]` — text-to-speech
+
+The voice behind `POST /v1/audio/speech` and the built-in assistant.
+Every key is also a flag `--tts-<key with dashes>`.
+
+| Key | CLI | Default | Meaning |
+| --- | --- | --- | --- |
+| `engine` | `--tts-engine` | `auto` | `auto` / `kokoro` / `http` / `piper` / `say` / `espeak` / `none`. `auto` = kokoro when model + voices + onnxruntime + espeak-ng are found, else http when `url` answers, else piper, else `say` (macOS), else espeak-ng, else none. kokoro and http keep the best child-process engine as fallback. |
+| `kokoro_model` | `--tts-kokoro-model` | | Kokoro-82M `kokoro-v1.0.onnx` (the installer: `/var/lib/easyai/tts/`). |
+| `kokoro_voices` | `--tts-kokoro-voices` | | its `voices-v1.0.bin` (54 voices; `--list-voices` and `GET /v1/audio/voices` list them with language, gender and grade). |
+| `kokoro_voice_pt`, `kokoro_voice_en` | `--tts-kokoro-voice-pt`, `--tts-kokoro-voice-en` | `pm_alex`, `am_michael` | the voice behind `voice: pt` / `en`; the Assistant panel's **Voice** pickers write these two keys. |
+| `onnxruntime`, `espeak_lib`, `espeak_data` | `--tts-onnxruntime`, … | found | the shared libraries opened at run time (`/opt/easyai/onnxruntime/lib/libonnxruntime.so` from the installer; espeak-ng from apt / brew). |
+| `url` | `--tts-url` | | engine `http`: another box's `/v1/audio/speech`. |
+| `piper`, `voice_pt`, `voice_en` | `--tts-piper`, `--tts-voice-pt`, `--tts-voice-en` | | the fallback engine's binary and `.onnx` voices (`say` / espeak voice names for those engines). |
+
+Provenance, sizes and SHA-256 of the two Kokoro files: `models/tts/README.md`.
+
+### `[ASSISTANT]` — the voice assistant
+
+Since 2026-11-14 the always-listening assistant ("hello Max" on the
+box's own microphone) is a class inside easyai-server (`easyai::Assistant`),
+not a second program. `enabled = on` starts it with the server; every key
+is also a flag `--assistant-<key with dashes>` and a control of `/models`
+→ **Assistant**. `easyai-server --assistant-options` prints every key with
+the value in effect; the full table, the step-by-step and the panel are in
+[`easyai-assistant.md`](easyai-assistant.md) §3–4.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `off` (installer: `on`) | start the assistant with the server |
+| `name`, `call_words`, `name_aliases`, `greeting` | `max`, `hello, olá, alô, hallo, hola`, built-in, `en` | the wake phrase and the start-up greeting |
+| `endpoint`, `api_key`, `model` | empty = this server over loopback with its own key, `default` | the chat brain (OpenAI shape: llama-server / OpenAI work too) |
+| `stt_endpoint`, `tts_endpoint` | empty = in-process | another box for speech in / out |
+| `wake_model` | `server` | every burst through the `[STT]` model, or a whisper ggml path for the name only |
+| `mic`, `speaker`, `mic_gain_db` | `default`, `default`, `0` | ALSA device names (`--list-audio-devices`), software gain −30..30 dB |
+| `tts`, `kokoro_model`, `kokoro_voices`, `voice_pt`, `voice_en`, `piper` | `auto`, … | `auto` / `server` = the `[TTS]` engine in-process; `kokoro` / `piper` / `espeak` / `say` = a local engine inside the assistant |
+| `language`, `pause_ms`, `followup_ms`, `max_listen_ms` | `auto`, 1500, 2000, 20000 | transcription language and the timings |
+| `tools`, `external_tools`, `system`, `history_turns`, `history_idle_s` | `datetime,web`, …, built-in, 6, 300 | tools run in the assistant, system prompt, memory |
+| `verbose`, `tls_insecure` | off | |
+
 ### `[MCP_USER]`
 
 Bearer-token authentication for `POST /mcp`. Each line registers one
@@ -520,6 +562,11 @@ Binary-only flags (no INI equivalent):
 | `--config <path>` | Override the default INI path (`/etc/easyai/easyai.ini`). |
 | `--no-mcp-auth` | Force `/mcp` open even if `[MCP_USER]` populated. Emergency override. |
 | `--show-system-prompt` | Resolve and print the persona (built-in `Deep` default OR `--system` OR `--system-file`, in the same precedence the running server uses) and exit before any port is bound or any model loads. Useful for operators inspecting the persona without bouncing the service. |
+| `--list-audio-devices` | Print the microphones and speakers the OS knows (id, capture, playback, card, name; `default` marked) and exit before any model loads. Nothing is opened. The ids go into `[ASSISTANT] mic` / `speaker`. |
+| `--list-voices` | Configure `[TTS]` from the INI and flags (the start-up code path), print `engine`, `fallback` and the voices (id, language, gender, grade; `*` on the current pt / en voice; a non-kokoro engine prints its `voice_pt` / `voice_en`) and exit. The installer's voice check. |
+| `--assistant-options` | Print every `[ASSISTANT]` option: key, flag, value in effect after INI and flags, default, help; exit. |
+| `--assistant-say "text"` | Configure `[TTS]` and the assistant from the INI, speak the text on the configured speaker, exit 0 / 1. `--assistant-say-lang pt\|en` picks the voice (default auto). |
+| `--assistant-<key>` | One flag per `[ASSISTANT]` key with dashes for underscores (`--assistant-enabled on\|off`, `--assistant-mic plughw:1,0`, `--assistant-wake-model server`…); CLI wins over the INI like the other sections. |
 | `-h`, `--help` | Print usage and exit. |
 
 ---
@@ -538,13 +585,14 @@ URLs for the host you are on ("Endpoints" card, also in
 | GET | `/bundle.{js,css}` | webui | (open) | Bundle assets. |
 | GET | `/loading.html` | webui | (open) | Loading splash. |
 | GET | `/favicon` (+ `.ico`/`.svg`) | webui | (open) | Operator-supplied (`--webui-icon`) or the embedded AI Box logo SVG (compiled into the binary as `kBrandSvg`; canonical copy at `webui/AI-brain.svg`). |
-| GET | `/health` | easyai | (open) | `{model, model_loaded, load_error?, stt_loaded, stt_model, tls, backend, tools, preset, compat:{openai, ollama, mcp, stt}}` — liveness probe. `model_loaded:false` means the server is up without a model (`model` reads `(no model)`, `load_error` says why); `/props` carries the same `model_loaded`. |
+| GET | `/health` | easyai | (open) | `{model, model_loaded, load_error?, stt_loaded, stt_model, tts_available, tts_engine, tts_fallback?, assistant_enabled, assistant_running, tls, backend, tools, preset, compat:{openai, ollama, mcp, stt}}` — liveness probe. `model_loaded:false` means the server is up without a model (`model` reads `(no model)`, `load_error` says why); `/props` carries the same `model_loaded`. |
 | GET | `/metrics` | easyai | api_key | Prometheus exposition (only when `--metrics` is on). |
 | GET | `/v1/models` | OpenAI | api_key | OpenAI-shape list-models. |
 | GET | `/v1/tools` | easyai | api_key | Tool catalogue. Each entry: `{name, description, short_description}`. `description` is the full multi-line manual; `short_description` is the one-line trigger shipped in the per-turn `<tools>` block. `easyai-cli` reads `short_description` to render its prompt prefix; the webui popover reads `description`. Pre-Shape-C consumers see only the `description` field — backward compatible. |
 | POST | `/v1/chat/completions` | OpenAI | api_key | The workhorse — streaming SSE, tools, sampling controls. |
 | POST | `/v1/preset` | easyai | api_key | Swap the ambient preset. |
-| POST | `/v1/audio/speech` | OpenAI | api_key | Text → voice. `{input, voice: pt \| en \| engine voice, response_format: wav}` → `audio/wav` PCM16 mono. Engine from `[TTS]`: `kokoro` = **Kokoro-82M run in-process** (C++; onnxruntime and espeak-ng opened at run time; installer default; natural male voices `pm_alex` pt-BR / `am_michael` en, 24 kHz) with piper as automatic fallback; `http` = another box's `/v1/audio/speech`; or piper / macOS `say` / espeak-ng alone. 503 `tts_not_available` without one, 415 for a non-wav format, 400 for empty or >4000-byte input. Used by `easyai-assistant` and any OpenAI client. |
+| POST | `/v1/audio/speech` | OpenAI | api_key | Text → voice. `{input, voice: pt \| en \| engine voice, response_format: wav}` → `audio/wav` PCM16 mono. Engine from `[TTS]`: `kokoro` = **Kokoro-82M run in-process** (C++; onnxruntime and espeak-ng opened at run time; installer default; natural male voices `pm_alex` pt-BR / `am_michael` en, 24 kHz) with piper as automatic fallback; `http` = another box's `/v1/audio/speech`; or piper / macOS `say` / espeak-ng alone. 503 `tts_not_available` without one, 415 for a non-wav format, 400 for empty or >4000-byte input. The built-in assistant uses the same engine in-process; any OpenAI client uses this route. |
+| GET | `/v1/audio/voices` | easyai | api_key | `{engine, fallback, voices: [{id, lang, gender, grade, available}]}` — the 54 Kokoro voices (language tag `pt-br`, `en-us`, `en-gb`, `es`, `fr`, `hi`, `it`, `ja`, `zh`; upstream grade; `available` = the loaded voices file has it). When the engine in effect is not kokoro (piper, espeak, say, http) `voices` holds only that engine's pt and en voice (`[TTS] voice_pt` / `voice_en`), gender and grade empty. The OpenAI audio shape has no voice listing, so this one is kept simple. |
 | POST | `/v1/audio/transcriptions` | OpenAI | api_key | Voice → text on whisper. Multipart `file` (WAV) + optional `language`, `prompt` (names/spellings whisper should prefer), `response_format` = `json` (default `{"text"}`) / `text` / `verbose_json` (`language`, `duration`, `segments[]`); or a raw body with `Content-Type: audio/wav` and the same names as query parameters. WAV only (PCM16 / float32, any rate, any channels — the webui converts the recording itself). 503 `stt_not_loaded` without a model, 415 for non-WAV, 400 for a bad file. |
 | GET | `/api/tags` | Ollama | api_key | Ollama-shape list-models (LobeChat, OpenWebUI in Ollama mode, etc.). |
 | GET/POST | `/api/show` | Ollama | api_key | Ollama-shape model detail. |
@@ -893,14 +941,24 @@ downloading local models. No external binary.
   refuses if `--model` is a real file). **Run + slink** does both.
 - **Downloads** — native libcurl → HuggingFace, into `download_dir`, with
   progress / cancel / list / delete.
-- **Services** — the two systemd units (`easyai-server`, `easyai-assistant`)
-  with state, since, PID, **Start / Stop / Restart** and a journal tail,
-  plus an editor for `easyai.ini` (both services' sections in one file):
-  syntax-checked, previous content kept in `easyai.ini.prev`, atomic
-  replace. Save, then restart the service whose section changed. The
-  buttons need the installer's polkit rule and the unit's
-  `systemd-journal` group (see `LINUX_SERVER.md` §3); without systemd
-  (macOS) the editor works and the buttons are disabled.
+- **Assistant** (2026-11-14) — the voice assistant that runs inside the
+  server: state pill, **Start / Stop / Restart**, an **Enabled** switch,
+  the microphone and speaker in use with a level meter, last question and
+  answer, a live log, **Say** / **Ask** test boxes, and a form over every
+  `[ASSISTANT]` key (mic / speaker / wake model / Kokoro voice dropdowns
+  filled from the box) with **Save & apply**: validated, written into
+  the INI with its comments kept, applied live. Full table:
+  `easyai-assistant.md` §4.
+- **Services** — the systemd unit `easyai-server` (the only one since
+  2026-11-14; `easyai-assistant` was listed too before) with state,
+  since, PID, **Start / Stop / Restart** and a journal tail, plus an
+  editor for `easyai.ini`: syntax-checked, previous content kept in
+  `easyai.ini.prev`, atomic replace. The server reads this file at
+  start-up, so save, then restart — except `[ASSISTANT]`, which the
+  Assistant tab applies live. The buttons need the installer's polkit
+  rule and the unit's `systemd-journal` group (see `LINUX_SERVER.md`
+  §3); without systemd (macOS) the editor works and the buttons are
+  disabled.
 
 If the catalogue can't be found the page still loads and Local models + Downloads
 work fully; only the Recommend tab is limited.
@@ -927,10 +985,18 @@ requires the session cookie when `webui_password` is set):
 | POST | `/models/api/download` | `{repo, filename?}` → start a download (best quant if omitted; whole shard set for a sharded pick). |
 | GET | `/models/api/download/status` · POST `/models/api/download/cancel` | Progress / cancel of the single active download. |
 | GET | `/models/api/services` | `{manager: systemd|none, services:[{name, state, sub, enabled, since, pid}], config:{path, exists, writable}}`. |
-| POST | `/models/api/services/action` | `{name: easyai-server|easyai-assistant, action: start|stop|restart}` → `systemctl` as the service user (polkit rule); the server's own stop/restart answers first, then goes down. 501 without systemd. |
+| POST | `/models/api/services/action` | `{name: easyai-server, action: start|stop|restart}` → `systemctl` as the service user (polkit rule); 400 with the known units for another name; the server's own stop/restart answers first, then goes down. 501 without systemd. |
 | GET | `/models/api/services/log?name=&lines=` | `journalctl -u <unit> -n <lines>` → `{lines:[…]}` (≤ 500). |
 | GET | `/models/api/config` | `{path, exists, writable, text, bytes, mtime}` — the INI as text. |
 | POST | `/models/api/config` | `{text}` (≤ 1 MiB) → every line must be a comment, `[section]` or `key = value` (400 with the line number); previous content → `<ini>.prev`, atomic replace; `{ok, bytes, backup}`. Restart to apply. |
+| GET | `/models/api/assistant/status` | `{status: {state, running, since, mic, speaker, backend, wake_model, voice, tools, level_db, floor_db, speech, last_heard…, last_question…, last_answer…, n_wakes, n_questions, n_answers, n_errors, last_error}, enabled, log: [last 60 lines]}` — light, polled every 2 s. |
+| GET | `/models/api/assistant/options` | `{config, options: [{key, flag, type, default, choices, min, max, group, help}], devices: [{id, name, card, capture, playback, is_default}], voices: {engine, fallback, kokoro, list: [{id, lang, gender, grade, available}], current_pt, current_en}, wake_models: [{name, path, size_bytes}], ini: {path, writable}, self_endpoint}`; `api_key` is `""` or the mask `••••`. |
+| GET | `/models/api/assistant/devices` | `{devices: […]}` — refresh of the device list; nothing is opened. |
+| GET | `/models/api/assistant/log?lines=N` | `{lines: […]}` (N ≤ 400). |
+| POST | `/models/api/assistant/action` | `{action: start|stop|restart}` → `{ok, status}`; runtime only, INI untouched; 400 bad action, 500 with the error from `start()`. |
+| POST | `/models/api/assistant/config` | `{values: {key: value…}, apply}` (≤ 64 KiB) → every key validated (400 with the first error and its key), written into `[ASSISTANT]` in place (comments kept, `.prev` copy), `tts.kokoro_voice_pt` / `tts.kokoro_voice_en` go to `[TTS]`; with `apply` the assistant restarts (or stops when `enabled` is off). `{ok, saved, backup, applied, status, warnings}`. |
+| POST | `/models/api/assistant/say` | `{text, lang}` (≤ 500 chars) → `{ok, ms}`, 429 when two say / ask calls already run; speaks on the configured speaker, also while the assistant is stopped. |
+| POST | `/models/api/assistant/ask` | `{text}` (≤ 2000 chars) → `{ok, answer, lang, ms}`, 429 when two say / ask calls already run; the chat + voice path of a spoken question. |
 
 **Example.**
 

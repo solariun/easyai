@@ -218,15 +218,14 @@ access unless `--stt-model` names another model.
 | `/etc/easyai/tls.crt`, `tls.key` | easyai:easyai | 644 / 600 | optional self-signed TLS pair (`--tls`): the box answers `https://`, which the chat's mic chip needs from other machines |
 | `/opt/easyai/onnxruntime/lib/libonnxruntime.so`, `/var/lib/easyai/tts/kokoro-v1.0.onnx`, `voices-v1.0.bin` | root / easyai | 755 / 644 | Kokoro-82M natural voice, run inside easyai-server (`[TTS] kokoro_model`); the model files come from the checkout's `models/tts/` (Git LFS), onnxruntime and `espeak-ng` (apt) are opened at run time (`--no-kokoro` skips) |
 | `/opt/easyai/piper/`, `/var/lib/easyai/tts/*.onnx` | root / easyai | 755 / 644 | piper TTS binary and the two male voices, the fallback behind `POST /v1/audio/speech` (`--no-piper` skips) |
-| `/var/lib/easyai/models/ggml-tiny.bin` | easyai:easyai | 640 | wake-word whisper model for `easyai-assistant.service` |
-| `/etc/systemd/system/easyai-assistant.service` | root | 644 | the voice assistant unit (`--no-assistant` skips): same user plus `audio` group, `journalctl -u easyai-assistant -f`; wake name via `--assistant-name` |
+| `/var/lib/easyai/models/ggml-base.bin` | easyai:easyai | 640 | wake-word whisper model for the assistant built into easyai-server (`[ASSISTANT] wake_model`; `server` uses the `[STT]` model instead) |
 | `/etc/easyai/external-tools/` | root:easyai | 750 | operator-defined tools (`EASYAI-*.tools`) |
 | `/etc/easyai/favicon[.ext]` | root:easyai | 644 | optional webui favicon |
 | `/var/lib/easyai/` | easyai:easyai | 750 | mutable agent state |
 | `/var/lib/easyai/rag/` | easyai:easyai | 750 | `memory` tool long-term store |
 | `/var/lib/easyai/workspace/` | easyai:easyai | 750 | sandbox for *_file and bash tools |
 | `/var/lib/easyai/models/` | easyai:easyai | 750 | the GGUF symlink target; also `ggml-*.bin` whisper models and the `stt.bin` symlink (`[STT] model`) |
-| `/etc/systemd/system/easyai-server.service` | root:root | 644 | the unit file |
+| `/etc/systemd/system/easyai-server.service` | root:root | 644 | the unit file — the server **and** the voice assistant (`[ASSISTANT] enabled = on`, `--no-assistant` writes `off`; wake name via `--assistant-name`); the unit carries the `audio` group for the microphone and speaker. Since 2026-11-14 there is no `easyai-assistant.service`: the installer removes a stale one and the old `/usr/bin/easyai-assistant` on every run |
 | `/etc/systemd/system/easyai-server.service.d/override.conf` | root:root | 644 | LimitMEMLOCK / LimitCORE / Environment overrides |
 
 The installer creates the `easyai` system user / group if missing.
@@ -244,11 +243,12 @@ Roughly:
 ```ini
 [Unit]
 Description=easyai-server (llama.cpp + OpenAI shim)
-After=network.target
+After=network-online.target sound.target
 
 [Service]
 User=easyai
 Group=easyai
+SupplementaryGroups=render video systemd-journal audio
 ExecStart=/bin/sh -c '...EASYAI_API_KEY=$(cat /etc/easyai/api_key) ...
                       exec /usr/bin/easyai-server \
                           -m /var/lib/easyai/models/current.gguf \
@@ -282,6 +282,13 @@ NOT penalised — only boot-time failures hit the cap.
 
 Important pieces:
 
+- `SupplementaryGroups=render video systemd-journal audio` (and the
+  installer's `usermod -aG audio easyai`). `audio` is what lets the
+  built-in voice assistant open the ALSA microphone and speaker
+  (`[ASSISTANT] mic` / `speaker`; `easyai-server --list-audio-devices`
+  shows them); `systemd-journal` serves the dashboard's Log button;
+  `render` / `video` the GPU. `After=… sound.target` so the sound cards
+  exist when the assistant starts.
 - `User=easyai`. The agent runs unprivileged. `bash`, the unified
   `fs` tool, every external tool inherits this uid. THE single biggest
   "isolation" you have. Don't run as root.
@@ -377,6 +384,8 @@ Sections:
 | `[ENGINE]` | Model loading + inference tunables (context, ngl, KV, mlock, flash-attn, sampling, RoPE, split mode) | active |
 | `[MODEL_<pattern>]` | Per-model ENGINE overrides — same keys as `[ENGINE]`, matched by model filename substring | active |
 | `[STT]` | Voice transcription — whisper `model`, `language`, `threads` (see `easyai-server.md` §1) | active |
+| `[TTS]` | Text-to-speech behind `POST /v1/audio/speech` and the assistant's voice — `engine`, `kokoro_model`, `kokoro_voices`, `kokoro_voice_pt` / `_en`, `onnxruntime`, piper fallback (see `easyai-server.md` §1) | active |
+| `[ASSISTANT]` | The voice assistant built into the server — `enabled`, `name`, `call_words`, `mic`, `speaker`, `wake_model`, timings, `endpoint` (empty = this server), tools (see `easyai-assistant.md` §3); edited live from `/models` → Assistant | active |
 | `[MCP_USER]` | Bearer-token auth for `/mcp` (one user per line, `name = token`) | active |
 | `[TOOLS]` | Per-tool ACL (`mcp_allowed = …, mcp_denied = …`) | reserved for future |
 
@@ -482,26 +491,32 @@ runtime — see `design.md` §5c.
 
 ### Editing the INI and restarting from the dashboard
 
-`/models` → **Services** edits `easyai.ini` and starts / stops / restarts
-`easyai-server` and `easyai-assistant`. The installer prepares three
-things for that (re-run it with `--upgrade` on an older install):
+`/models` → **Services** edits `easyai.ini` as text and starts / stops /
+restarts the one unit, `easyai-server` (the voice assistant runs inside
+it since 2026-11-14; before that a second unit, `easyai-assistant`, was
+listed here). `/models` → **Assistant** is a form over the `[ASSISTANT]`
+section of the same file: every key validated, written in place with
+the comments kept, and applied live (**Save & apply** restarts the
+assistant inside the running server, no unit restart) — see
+`easyai-assistant.md` §4. The installer prepares three things for that
+(re-run it with `--upgrade` on an older install):
 
 | What | Why |
 | --- | --- |
 | `easyai.ini` mode `660`, `/etc/easyai` mode `2770`, both `root:easyai` | the server (user `easyai`) writes `easyai.ini.tmp`, renames it over the file, and keeps the previous content in `easyai.ini.prev` |
-| `/etc/polkit-1/rules.d/50-easyai-services.rules` | lets user `easyai` run `systemctl start/stop/restart` on exactly `easyai-server.service` and `easyai-assistant.service` (polkit action `org.freedesktop.systemd1.manage-units`), nothing else; no sudo, the unit's hardening stays |
-| `SupplementaryGroups=systemd-journal` on `easyai-server.service` | the **Log** button runs `journalctl -u <unit>` |
+| `/etc/polkit-1/rules.d/50-easyai-services.rules` | lets user `easyai` run `systemctl start/stop/restart` on exactly `easyai-server.service` (polkit action `org.freedesktop.systemd1.manage-units`), nothing else; no sudo, the unit's hardening stays. Until 2026-11-14 the rule also named `easyai-assistant.service`; `--upgrade` rewrites it |
+| `SupplementaryGroups=… systemd-journal audio` on `easyai-server.service` | the **Log** button runs `journalctl -u <unit>`; `audio` is for the assistant's microphone and speaker |
 
 Check by hand as the service user:
 
 ```bash
-sudo -u easyai systemctl restart easyai-assistant.service     # must not ask for a password
-sudo -u easyai journalctl -u easyai-assistant -n 3 --no-pager
+sudo -u easyai systemctl status easyai-server.service          # must not ask for a password (restart neither)
+sudo -u easyai journalctl -u easyai-server -n 3 --no-pager
 sudo -u easyai test -w /etc/easyai/easyai.ini && echo writable
 ```
 
 The INI holds the API keys: set `--webui-password` (the installer's default
-is `0000`) so the Services tab is behind the login overlay.
+is `0000`) so the Services and Assistant tabs are behind the login overlay.
 
 ### `/etc/easyai/api_key`
 
@@ -1080,12 +1095,29 @@ git pull
 `--upgrade`:
 
 - Refreshes `/usr/bin/easyai-*` and `/usr/lib/easyai/`
-- Re-renders the systemd unit (so flag changes propagate)
+- Re-renders the systemd unit (so flag changes propagate), now with
+  the `audio` group and `After=… sound.target` for the built-in
+  assistant, and rewrites the polkit rule for the one unit
+- **Purges the stale artefacts of the separate assistant** (2026-11-14):
+  `systemctl disable --now` + `reset-failed` on `easyai-assistant.service`
+  and the older `easyai-tts-kokoro.service`, removes their unit files
+  and `.d/` directories, `daemon-reload`, and deletes
+  `/usr/bin/easyai-assistant` and `/opt/easyai/kokoro`. Each removal is
+  logged; nothing is printed when nothing is there
+- Builds the tests too (`-DEASYAI_BUILD_TESTS=ON`) and runs `ctest`
+  after the build; a failing test is a warning naming it, not a stop
+- Checks the voice at the end: `easyai-server --config
+  /etc/easyai/easyai.ini --list-voices` must report `engine = kokoro`,
+  else a warning says why and how to fix it
 - WILL refresh `/etc/easyai/system.txt_template` (the canonical
   factory copy)
 - Does NOT touch `/etc/easyai/system.txt` (operator-supplied; not
   installed by default), `/etc/easyai/api_key`,
   `/var/lib/easyai/rag/*` — your data is safe
+- Does NOT touch `easyai.ini` either: on an install from before
+  2026-11-14 add `enabled = on` to `[ASSISTANT]` (or flip the switch in
+  `/models` → Assistant) so the assistant starts with the server, and
+  drop `endpoint = http://127.0.0.1:…` for the loopback default
 - Does NOT touch `/etc/easyai/external-tools/*` — your manifests
   are safe
 - WILL refresh the README in `external-tools/` and the
@@ -1099,7 +1131,8 @@ git pull
 After upgrading, sanity-check:
 
 ```bash
-journalctl -u easyai-server -n 50 --no-pager | grep -E "memory enabled|external-tools|loaded"
+journalctl -u easyai-server -n 50 --no-pager | grep -E "memory enabled|external-tools|loaded|\[assistant\]"
+systemctl list-units --all 'easyai-*'      # only easyai-server.service (and easyai-tdp.timer) should remain
 ```
 
 ---
@@ -1115,6 +1148,7 @@ sudo rm -rf /etc/systemd/system/easyai-server.service.d
 sudo systemctl daemon-reload
 
 sudo rm -f /usr/bin/easyai-server /usr/bin/easyai-cli /usr/bin/easyai-local
+sudo rm -f /usr/bin/easyai-assistant /etc/systemd/system/easyai-assistant.service   # pre-2026-11-14 leftovers, if the installer never ran since
 sudo rm -rf /usr/lib/easyai/
 
 # data — back up first if you might want it back

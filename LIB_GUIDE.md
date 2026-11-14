@@ -302,7 +302,7 @@ err)` returns PCM16; `encode_wav_pcm16()` wraps it. `easyai/audio_io.hpp`:
 `audio::Capture` (blocking `read()` of one period, ALSA or CoreAudio) and
 `audio::Playback::play()`. `easyai/assistant_core.hpp`: `Vad`,
 `Segmenter`, `wake_match()`, `SentenceChunker`, `guess_language()`,
-`make_beep()` — the model-free pieces of `easyai-assistant`, all pure and
+`make_beep()` — the model-free pieces of `easyai::Assistant` (the voice assistant built into easyai-server; `easyai/assistant.hpp` holds the class itself and `audio::list_devices()`), all pure and
 unit-tested (`tests/test_assistant.cpp`).
 
 ## 6. Linking

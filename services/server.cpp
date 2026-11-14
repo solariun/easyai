@@ -36,6 +36,7 @@
 #include "easyai/models_dashboard.hpp"   // native MODELS dashboard engine
 #include "easyai/stt.hpp"                // voice transcription (whisper.cpp)
 #include "easyai/tts.hpp"                // text-to-speech (piper / say / espeak-ng child process)
+#include "easyai/assistant.hpp"          // the built-in voice assistant ([ASSISTANT]), audio devices, Kokoro voice catalogue
 
 #include <random>             // session-token generation for the /models gate
 #include <filesystem>         // ai.gguf symlink re-point on model hot-swap
@@ -108,6 +109,7 @@ constexpr std::string_view kBrandSvg = R"SVG(<svg xmlns="http://www.w3.org/2000/
 #include <iomanip>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -1536,7 +1538,16 @@ struct ServerCtx {
     easyai::Tts                tts;
     std::mutex                 tts_mu;
     std::string                tts_error;       // why no engine is usable; empty when one is
+    easyai::Tts::Config        tts_cfg;         // the [TTS] values in effect (the Assistant tab re-configures the voices)
     std::atomic<uint64_t>      n_speech{0};
+    // The built-in voice assistant ([ASSISTANT], spec.md rules 13-16): one
+    // instance owned by the server. start/stop and assistant_cfg (the INI
+    // values in effect) are serialised by assistant_mu; the hooks lend it
+    // stt / tts / log and the loopback endpoint.
+    easyai::Assistant          assistant;
+    easyai::Assistant::Config  assistant_cfg;
+    easyai::Assistant::Hooks   assistant_hooks;
+    std::mutex                 assistant_mu;
     bool                       default_enable_thinking = true;   // --reasoning; per-request chat_template_kwargs overrides
     bool                       no_think = false;// strip <think> from responses
     // Ambient reasoning-effort level applied to every request unless the
@@ -1875,7 +1886,7 @@ static bool parse_chat_request(const httplib::Request & req,
         out.reasoning_effort     = body["reasoning_effort"].get<std::string>();
     }
     // chat_template_kwargs.enable_thinking — the llama-server way to switch a
-    // reasoning model's thinking off for one request (easyai-assistant uses it).
+    // reasoning model's thinking off for one request (the voice assistant uses it).
     if (body.contains("chat_template_kwargs") && body["chat_template_kwargs"].is_object()) {
         const auto & kw = body["chat_template_kwargs"];
         if (kw.contains("enable_thinking") && kw["enable_thinking"].is_boolean()) {
@@ -3609,15 +3620,17 @@ static void route_transcriptions(ServerCtx & ctx, const httplib::Request & req,
 
 // ---------------------------------------------------------------------------
 // POST /v1/audio/speech  →  OpenAI-shaped text-to-speech (spec.md
-// "easyai-assistant"). {model, input, voice, response_format, speed} in,
+// "easyai-assistant — voice assistant service"). {model, input, voice, response_format, speed} in,
 // audio/wav (PCM16 mono) out. voice: "pt" | "en" | engine voice name.
 // ---------------------------------------------------------------------------
 static constexpr std::size_t kTtsMaxChars = 4000;
 
 static void route_speech(ServerCtx & ctx, const httplib::Request & req, httplib::Response & res) {
-    if (!ctx.tts.available()) {
+    bool tts_ok; std::string tts_err;
+    { std::lock_guard<std::mutex> lk(ctx.tts_mu); tts_ok = ctx.tts.available(); tts_err = ctx.tts_error; }
+    if (!tts_ok) {
         res.status = 503;
-        res.set_content(error_json("no text-to-speech engine: " + (ctx.tts_error.empty() ? std::string("configure [TTS]") : ctx.tts_error),
+        res.set_content(error_json("no text-to-speech engine: " + (tts_err.empty() ? std::string("configure [TTS]") : tts_err),
                                    "tts_not_available"), "application/json");
         return;
     }
@@ -3681,9 +3694,21 @@ static void route_health(ServerCtx & ctx, const httplib::Request &,
     j["stt_model"]  = stt_model_id(ctx);
     if (!ctx.stt.is_loaded() && !ctx.stt_error.empty()) j["stt_error"] = ctx.stt_error;
     j["tls"] = ctx.tls;
-    j["tts_available"] = ctx.tts.available();
-    j["tts_engine"]    = ctx.tts.engine();
-    if (ctx.tts.engine() == "http" || ctx.tts.engine() == "kokoro") j["tts_fallback"] = ctx.tts.fallback_engine();
+    {
+        std::lock_guard<std::mutex> lk(ctx.tts_mu);   // the Assistant tab may re-configure the voices meanwhile
+        j["tts_available"] = ctx.tts.available();
+        j["tts_engine"]    = ctx.tts.engine();
+        if (ctx.tts.engine() == "http" || ctx.tts.engine() == "kokoro") j["tts_fallback"] = ctx.tts.fallback_engine();
+    }
+    {
+        // The built-in voice assistant: enabled = the INI value in effect,
+        // running = its thread is up. The live state (listening, speaking…)
+        // says what the room is doing and stays behind the dashboard's
+        // password (/models/api/status, /models/api/assistant/status).
+        std::lock_guard<std::mutex> lk(ctx.assistant_mu);
+        j["assistant_enabled"] = ctx.assistant_cfg.enabled;
+    }
+    j["assistant_running"] = ctx.assistant.running();
 
     // Compatibility shims this server speaks. Lets clients
     // auto-detect which API they can use without trial requests.
@@ -3785,7 +3810,7 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "\n"
         "Nearly every flag has an INI equivalent. Precedence:\n"
         "  CLI flag  >  [section] key in the --config INI  >  built-in default.\n"
-        "Sections: [SERVER], [ENGINE], [STT], [TTS], [MCP_USER] (Bearer auth for /mcp),\n"
+        "Sections: [SERVER], [ENGINE], [STT], [TTS], [ASSISTANT], [MCP_USER] (Bearer auth for /mcp),\n"
         "[MODEL_<glob>] (per-model [ENGINE] overrides). Default INI: /etc/easyai/easyai.ini.\n"
         "Each option below shows its INI key, then the CLI flag(s).\n"
         "\n"
@@ -3797,6 +3822,14 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "    --no-mcp-auth         Force /mcp open even if [MCP_USER] is set.\n"
         "    --no-python           Force the python evaluate tool off.\n"
         "    --show-system-prompt  Print the resolved system prompt and exit.\n"
+        "    --list-audio-devices  List the microphones / speakers the OS knows and exit\n"
+        "                          (ids for [ASSISTANT] mic / speaker).\n"
+        "    --list-voices         Configure [TTS] like at start-up, print the engine and its\n"
+        "                          voices (Kokoro catalogue, * = current pt/en voice) and exit.\n"
+        "    --assistant-options   Print every [ASSISTANT] option (key, flag, value in effect,\n"
+        "                          default, help) and exit.\n"
+        "    --assistant-say <text>         Speak <text> on the configured speaker and exit (0/1).\n"
+        "    --assistant-say-lang <pt|en>   Voice for --assistant-say (default auto).\n"
         "    -h, --help            Show this help and exit.\n"
         "\n"
         "[SERVER]  network & identity\n"
@@ -3851,7 +3884,7 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "  language  --stt-language <code>  auto (default) or ISO-639-1, e.g. pt, en.\n"
         "  threads   --stt-threads <n>      whisper threads (0 = its default).\n"
         "\n"
-        "[TTS]  text-to-speech (POST /v1/audio/speech, easyai-assistant voice)\n"
+        "[TTS]  text-to-speech (POST /v1/audio/speech, the voice assistant's voice)\n"
         "  engine    --tts-engine <e>       auto (default) | kokoro | http | piper | say (macOS) | espeak | none.\n"
         "  kokoro_model  --tts-kokoro-model <onnx>   Kokoro-82M, the natural voice, run in-process (C++; onnxruntime\n"
         "  kokoro_voices --tts-kokoro-voices <bin>   and espeak-ng opened at run time). auto prefers it when both files\n"
@@ -3909,7 +3942,18 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "  max_tokens              --max-tokens <n>              Cap tokens generated per request.\n"
         "  max_incomplete_retries  --max-incomplete-retries <n>  Retries on announce-without-act (default 10).\n"
         "  seed                    --seed <u32>                  RNG seed (0=random).\n"
+        "\n"
+        "[ASSISTANT]  the built-in voice assistant (/models \xe2\x86\x92 Assistant)\n"
+        "  Every key is also a flag --assistant-<key-with-dashes> <value> (Bool: on|off).\n"
         , argv0);
+    for (const auto & o : easyai::Assistant::options()) {
+        const std::string arg = o.type == easyai::Assistant::Option::Bool ? "<on|off>"
+                              : o.type == easyai::Assistant::Option::Int  ? "<n>"
+                              : o.choices.empty()                          ? "<v>"
+                                                                           : "<" + o.choices + ">";
+        std::fprintf(stderr, "  %-16s %s %s\n%-45s%s%s%s%s\n", o.key.c_str(), o.flag.c_str(), arg.c_str(), "",
+                     o.help.c_str(), o.def.empty() ? "" : " (default ", o.def.c_str(), o.def.empty() ? "" : ")");
+    }
     std::exit(1);
 }
 
@@ -4108,6 +4152,19 @@ struct ServerArgs {
     // the INI cannot disable its own auth (that would be the
     // operator shooting themselves in the foot).
     bool        no_mcp_auth    = false;
+
+    // ----- [ASSISTANT] -------------------------------------------------------
+    // Assistant::from_ini(ini) first, then every --assistant-<key> flag the
+    // parser collected (raw text, validated by Assistant::set) so the CLI
+    // wins over the INI like the other sections.
+    easyai::Assistant::Config            assistant;
+    std::map<std::string, std::string>   assistant_cli;
+    // print-and-exit utilities (no INI key); handled before Engine::load()
+    bool        list_audio_devices = false;
+    bool        list_voices        = false;
+    bool        assistant_options  = false;
+    std::string assistant_say;                  // text to speak, then exit 0/1
+    std::string assistant_say_lang = "auto";    // pt | en | auto
 
     // ----- which CLI flags were explicitly passed -------------------------
     // The INI overlay applies as DEFAULTS — if the operator passed a CLI
@@ -4331,6 +4388,14 @@ static const std::vector<FlagDef> & kFlags() {
         { {"--catalog-size"},      "SERVER", "catalog_size",   "catalog_size",   true,  SET_INT(&ServerArgs::catalog_size) },
         { {"--webui-password"},    "SERVER", "webui_password",  "webui_password", true,  SET_STR(&ServerArgs::webui_password) },
         { {"--webui"},             "SERVER", "webui_mode",     "webui_mode",     true,  SET_STR(&ServerArgs::webui_mode) },
+        // ----- voice assistant utilities: print and exit (no INI key) -----
+        // The --assistant-<key> option flags are not rows: parse_args maps
+        // them through Assistant::key_of_flag / Assistant::options().
+        { {"--list-audio-devices"},"",       "",               "list_audio_devices", false, SET_BOOL_TRUE(&ServerArgs::list_audio_devices) },
+        { {"--list-voices"},       "",       "",               "list_voices",    false, SET_BOOL_TRUE(&ServerArgs::list_voices) },
+        { {"--assistant-options"}, "",       "",               "assistant_options", false, SET_BOOL_TRUE(&ServerArgs::assistant_options) },
+        { {"--assistant-say"},     "",       "",               "assistant_say",  true,  SET_STR(&ServerArgs::assistant_say) },
+        { {"--assistant-say-lang"},"",       "",               "assistant_say_lang", true, SET_STR(&ServerArgs::assistant_say_lang) },
 
         // ----- ENGINE -----
         { {"-c","--ctx"},          "ENGINE", "context",        "context",        true,  SET_INT(&ServerArgs::n_ctx) },
@@ -4393,6 +4458,22 @@ static ServerArgs parse_args(int argc, char ** argv) {
             if (matched) break;
         }
         if (!matched) {
+            // --assistant-<key-with-dashes> <value>: one flag per row of
+            // Assistant::options(). The value is kept as text and applied
+            // over the INI in main() (Assistant::set validates it there).
+            const std::string key = easyai::Assistant::key_of_flag(s);
+            bool known = false;
+            if (!key.empty())
+                for (const auto & o : easyai::Assistant::options()) if (o.key == key) { known = true; break; }
+            if (known) {
+                if (i + 1 >= argc) {
+                    std::fprintf(stderr, "missing value for %s\n", s.c_str());
+                    die_usage(argv[0]);
+                }
+                a.assistant_cli[key] = argv[++i];
+                a.cli_set.insert("assistant_" + key);
+                continue;
+            }
             std::fprintf(stderr, "unknown arg: %s\n", s.c_str());
             die_usage(argv[0]);
         }
@@ -5161,8 +5242,10 @@ static ordered_json endpoint_directory(const ServerCtx & ctx, const ServerArgs &
         "whisper transcription; multipart file= (WAV) or raw audio/wav; json | text | verbose_json",
         easyai::Stt::available());
     add("Voice (TTS)",       "POST", "/v1/audio/speech",         v1_auth,
-        "OpenAI text-to-speech: {input, voice: pt|en, response_format: wav} -> audio/wav (piper / say / espeak-ng)",
+        "OpenAI text-to-speech: {input, voice: pt|en, response_format: wav} -> audio/wav (kokoro / piper / say / espeak-ng)",
         ctx.tts.available());
+    add("Voice (TTS)",       "GET",  "/v1/audio/voices",         v1_auth,
+        "voices of the [TTS] engine in effect: {engine, fallback, voices: [{id, lang, gender, grade, available}]}");
     add("Ollama-compatible", "GET",  "/api/tags",               v1_auth, "model list (Ollama clients)");
     add("Ollama-compatible", "GET",  "/api/show",               v1_auth, "model details (Ollama clients)");
     add("Ollama-compatible", "POST", "/api/show",               v1_auth, "model details (Ollama clients)");
@@ -5179,9 +5262,17 @@ static ordered_json endpoint_directory(const ServerCtx & ctx, const ServerArgs &
     add("Models API",        "GET",  "/models/api/stt",         ui_auth, "voice model: current, local, catalogue");
     add("Models API",        "POST", "/models/api/stt/run",     ui_auth, "hot-swap the voice model {name, link}");
     add("Models API",        "POST", "/models/api/stt/download", ui_auth, "download a whisper model {name}");
-    add("Models API",        "GET",  "/models/api/services",    ui_auth, "systemd state of easyai-server / easyai-assistant + config file info");
-    add("Models API",        "POST", "/models/api/services/action", ui_auth, "start | stop | restart one of the two units {name, action}");
-    add("Models API",        "GET",  "/models/api/services/log", ui_auth, "journal tail of a unit ?name=&lines=");
+    add("Models API",        "GET",  "/models/api/services",    ui_auth, "systemd state of the easyai-server unit + config file info");
+    add("Models API",        "POST", "/models/api/services/action", ui_auth, "start | stop | restart the easyai-server unit {name, action}");
+    add("Models API",        "GET",  "/models/api/services/log", ui_auth, "journal tail of the unit ?name=&lines=");
+    add("Models API",        "GET",  "/models/api/assistant/status",  ui_auth, "built-in voice assistant: state, devices in use, counters, last 60 log lines");
+    add("Models API",        "GET",  "/models/api/assistant/options", ui_auth, "every [ASSISTANT] option + value, audio devices, voices, wake models, INI path");
+    add("Models API",        "GET",  "/models/api/assistant/devices", ui_auth, "microphones / speakers the OS knows (refresh)");
+    add("Models API",        "GET",  "/models/api/assistant/log",     ui_auth, "assistant log tail ?lines= (max 400)");
+    add("Models API",        "POST", "/models/api/assistant/action",  ui_auth, "start | stop | restart the assistant {action} (runtime only)");
+    add("Models API",        "POST", "/models/api/assistant/config",  ui_auth, "save [ASSISTANT] keys to the INI {values, apply}; tts.kokoro_voice_pt / _en go to [TTS]");
+    add("Models API",        "POST", "/models/api/assistant/say",     ui_auth, "speak a text on the server's speaker {text, lang}");
+    add("Models API",        "POST", "/models/api/assistant/ask",     ui_auth, "ask the assistant in writing: the answer is spoken and returned {text}");
     add("Models API",        "GET",  "/models/api/config",      ui_auth, "the INI file (server + assistant sections) as text");
     add("Models API",        "POST", "/models/api/config",      ui_auth, "save the INI file {text}: checked, previous copy kept; restart to apply");
     return e;
@@ -5258,22 +5349,25 @@ static bool models_require_auth(const ServerCtx & ctx,
 
 // ============================================================================
 // Services + configuration administration (dashboard "Services" tab):
-// GET  /models/api/services         systemd state of the two units + config file info
+// GET  /models/api/services         systemd state of the server unit + config file info
 // POST /models/api/services/action  {name, action: start|stop|restart}
 // GET  /models/api/services/log     ?name=&lines=   journalctl tail
 // GET  /models/api/config           the INI text
 // POST /models/api/config           {text} → validated, previous copy kept, atomic replace
 // systemctl is called as the service user: the installer's polkit rule lets
-// `easyai` manage exactly these two units, so no sudo and no root here.
+// `easyai` manage exactly this unit, so no sudo and no root here. The voice
+// assistant is built into this process since 2026-11 (its own unit is gone;
+// the installer purges the stale one), so one unit is all there is.
 // ============================================================================
 namespace admin {
 
-const char * const kUnits[] = {"easyai-server", "easyai-assistant"};
+const char * const kUnits[] = {"easyai-server"};
 constexpr int         kCmdTimeoutMs     = 8000;
 constexpr int         kLogLinesDefault  = 60;
 constexpr int         kLogLinesMax      = 500;
 constexpr std::size_t kConfigMaxBytes   = 1u << 20;   // 1 MiB: an INI is never this big
 constexpr int         kSelfRestartDelayMs = 400;      // let the HTTP reply leave before we go down
+static std::mutex     config_mu;                       // one INI read → modify → write at a time (Services editor vs Assistant tab)
 
 static bool unit_ok(const std::string & n) { for (const char * u : kUnits) if (n == u) return true; return false; }
 
@@ -5310,7 +5404,7 @@ static nlohmann::json service_status(const std::string & name) {
     return j;
 }
 
-// A quick syntax pass so a typo cannot take both services down at the next
+// A quick syntax pass so a typo cannot take the server down at the next
 // start: every non-blank line is a comment, a [section] or key = value.
 static bool ini_text_check(const std::string & text, std::string & err) {
     std::istringstream is(text); std::string line; int n = 0;
@@ -5354,6 +5448,310 @@ static bool write_config(const std::string & path, const std::string & text, std
 }
 
 }  // namespace admin
+
+// ============================================================================
+// The built-in voice assistant ([ASSISTANT]; spec.md "easyai-assistant —
+// voice assistant service", rules 13-16). This block holds what the server
+// lends to easyai::Assistant (the hooks), the [TTS] configuration shared
+// with POST /v1/audio/speech, the JSON pieces of /models/api/assistant/*
+// and the print-and-exit utilities (--list-audio-devices, --list-voices,
+// --assistant-options, --assistant-say).
+// ============================================================================
+namespace assistant_ui {
+
+constexpr std::size_t kConfigBodyMax = 64u << 10;   // POST /models/api/assistant/config body
+constexpr std::size_t kSayMaxChars   = 500;         // POST /models/api/assistant/say text
+constexpr std::size_t kAskMaxChars   = 2000;        // POST /models/api/assistant/ask text
+// Characters (UTF-8 code points), so an accented Portuguese sentence is measured the way the input field counts it.
+static std::size_t utf8_chars(const std::string & s) { std::size_t n = 0; for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++n; return n; }
+// say() and ask() block an HTTP worker for seconds (and queue on the voice):
+// at most this many at a time, the rest get 429 instead of parking every
+// worker of the pool behind one talkative dashboard.
+constexpr int kMaxInflight = 2;
+static std::atomic<int> inflight{0};
+struct InflightSlot {
+    bool taken;
+    InflightSlot() : taken(inflight.fetch_add(1) < kMaxInflight) { if (!taken) inflight.fetch_sub(1); }
+    ~InflightSlot() { if (taken) inflight.fetch_sub(1); }
+};
+constexpr int         kLogDefault    = 60;          // lines in GET /models/api/assistant/status
+constexpr int         kLogMax        = 400;         // GET /models/api/assistant/log?lines= cap (= Assistant::kLogKeep)
+// The UI gets this instead of the api_key and sends it back for "unchanged".
+const char * const    kSecretMask    = "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2";   // "••••"
+// Tts's own Kokoro defaults (src/tts.cpp) when [TTS] kokoro_voice_* is empty.
+const char * const    kKokoroDefaultPt = "pm_alex";
+const char * const    kKokoroDefaultEn = "am_michael";
+
+}  // namespace assistant_ui
+
+// [TTS] → ctx.tts. One code path for start-up, --list-voices and
+// --assistant-say; the Config is kept in ctx.tts_cfg so the Assistant tab
+// can change the two Kokoro voices and re-configure with everything else
+// unchanged. Returns the engine chosen ("none" when nothing is usable).
+static std::string configure_tts(ServerCtx & ctx, const ServerArgs & args, bool log) {
+    easyai::Tts::Config tc;
+    tc.engine = args.tts_engine; tc.url = args.tts_url; tc.piper = args.tts_piper;
+    tc.kokoro_model = args.tts_kokoro_model; tc.kokoro_voices = args.tts_kokoro_voices;
+    tc.kokoro_voice_pt = args.tts_kokoro_voice_pt; tc.kokoro_voice_en = args.tts_kokoro_voice_en;
+    tc.onnxruntime = args.tts_onnxruntime; tc.espeak_lib = args.tts_espeak_lib; tc.espeak_data = args.tts_espeak_data;
+    tc.voice_pt = args.tts_voice_pt; tc.voice_en = args.tts_voice_en;
+    ctx.tts_cfg = tc;
+    const std::string eng = ctx.tts.configure(tc, ctx.tts_error);
+    if (log) {
+        if (ctx.tts.available())
+            std::fprintf(stderr, "[easyai-server] tts: %s%s (POST /v1/audio/speech + the assistant's voice, voices pt/en)%s\n", eng.c_str(),
+                         eng == "http" ? (" " + args.tts_url).c_str() : eng == "kokoro" ? (" " + args.tts_kokoro_model).c_str() : "",
+                         (eng == "http" || eng == "kokoro") ? (", fallback " + ctx.tts.fallback_engine()).c_str() : "");
+        else
+            std::fprintf(stderr, "[easyai-server] tts: none%s (POST /v1/audio/speech answers 503; set [TTS] engine / piper / voices)\n",
+                         ctx.tts_error.empty() ? "" : (" — " + ctx.tts_error).c_str());
+    }
+    return eng;
+}
+
+// The loopback URL the assistant uses when [ASSISTANT] endpoint is empty:
+// args.host when it is a concrete address, else 127.0.0.1.
+static std::string assistant_self_endpoint(const ServerArgs & args, bool tls) {
+    std::string host = args.host;
+    if (host.empty() || host == "0.0.0.0" || host == "::" || host == "[::]" || host == "*") host = "127.0.0.1";
+    if (host.find(':') != std::string::npos && host.front() != '[') host = "[" + host + "]";
+    return std::string(tls ? "https" : "http") + "://" + host + ":" + std::to_string(args.port);
+}
+
+// What the server lends to the assistant (spec.md rule 13): in-process
+// transcription under stt_mu, speech under tts_mu, the log line prefix and
+// the loopback endpoint. ctx outlives the assistant (same struct), so the
+// lambdas capture it by reference.
+static void build_assistant_hooks(ServerCtx & ctx, const ServerArgs & args) {
+    easyai::Assistant::Hooks h;
+    h.stt = [&ctx](const std::vector<std::int16_t> & pcm, const std::string & language, const std::string & prompt,
+                   std::string & text, std::string & lang, std::string & err) -> bool {
+        std::vector<float> f(pcm.size());
+        for (std::size_t i = 0; i < pcm.size(); ++i) f[i] = pcm[i] / 32768.0f;
+        std::lock_guard<std::mutex> lk(ctx.stt_mu);
+        if (!ctx.stt.is_loaded()) {
+            err = ctx.stt_error.empty() ? std::string("no STT model loaded (set [STT] model or load one from /models)") : ctx.stt_error;
+            return false;
+        }
+        easyai::Stt::Result r;
+        if (!ctx.stt.transcribe(f.data(), f.size(), language, prompt, r)) { err = ctx.stt.last_error(); return false; }
+        text = r.text; lang = r.language;
+        ctx.n_transcriptions++;
+        return true;
+    };
+    h.tts = [&ctx](const std::string & text, const std::string & voice,
+                   std::vector<std::int16_t> & pcm, int & rate_hz, std::string & err) -> bool {
+        std::lock_guard<std::mutex> lk(ctx.tts_mu);
+        if (!ctx.tts.available()) {
+            err = ctx.tts_error.empty() ? std::string("no text-to-speech engine (configure [TTS])") : ctx.tts_error;
+            return false;
+        }
+        if (!ctx.tts.synthesize(text, voice, pcm, rate_hz, err)) return false;
+        ctx.n_speech++;
+        return true;
+    };
+    h.log = [](const std::string & line) { std::fprintf(stderr, "[assistant] %s\n", line.c_str()); };
+    h.self_endpoint     = assistant_self_endpoint(args, ctx.tls);
+    h.self_api_key      = ctx.api_key;
+    h.self_tls_insecure = ctx.tls;   // our own certificate is self-signed on most boxes
+    std::lock_guard<std::mutex> lk(ctx.assistant_mu);
+    ctx.assistant_hooks = std::move(h);
+}
+
+// say() / ask() while the assistant is stopped use the config and hooks the
+// server handed it with configure() (at start-up and after every saved
+// change), so a "Test voice" on a disabled assistant never opens the
+// microphone. The Assistant serialises playback itself, so a running one is
+// called without assistant_mu (a say() takes seconds; status polls must not
+// wait).
+static bool assistant_say_now(ServerCtx & ctx, const std::string & text, const std::string & lang, std::string & err) {
+    { std::lock_guard<std::mutex> lk(ctx.assistant_mu); if (!ctx.assistant.running()) ctx.assistant.configure(ctx.assistant_cfg, ctx.assistant_hooks); }
+    return ctx.assistant.say(text, lang, err);
+}
+static bool assistant_ask_now(ServerCtx & ctx, const std::string & question, std::string & answer, std::string & lang, std::string & err) {
+    { std::lock_guard<std::mutex> lk(ctx.assistant_mu); if (!ctx.assistant.running()) ctx.assistant.configure(ctx.assistant_cfg, ctx.assistant_hooks); }
+    return ctx.assistant.ask(question, answer, lang, err);
+}
+
+// {engine, fallback, kokoro, list: [{id, lang, gender, grade, available}],
+// current_pt, current_en} — the voices block of GET /models/api/assistant/options,
+// GET /v1/audio/voices and --list-voices.
+static ordered_json voices_json(ServerCtx & ctx) {
+    std::string engine, fallback; easyai::Tts::Config tc; std::set<std::string> have;
+    {
+        std::lock_guard<std::mutex> lk(ctx.tts_mu);
+        engine = ctx.tts.engine(); fallback = ctx.tts.fallback_engine(); tc = ctx.tts_cfg;
+        for (const auto & n : ctx.tts.kokoro_voice_names()) have.insert(n);   // what the loaded voices file really holds
+    }
+    const bool kokoro = engine == "kokoro";
+    const bool know = !have.empty();
+    ordered_json list = ordered_json::array();
+    for (const auto & v : easyai::kokoro_voice_catalog())
+        list.push_back({ {"id", v.id}, {"lang", v.lang}, {"gender", v.gender}, {"grade", v.grade},
+                         {"available", kokoro && (!know || have.count(v.id) > 0)} });
+    std::string cur_pt, cur_en;
+    if (kokoro) {
+        cur_pt = tc.kokoro_voice_pt.empty() ? assistant_ui::kKokoroDefaultPt : tc.kokoro_voice_pt;
+        cur_en = tc.kokoro_voice_en.empty() ? assistant_ui::kKokoroDefaultEn : tc.kokoro_voice_en;
+    } else {
+        cur_pt = tc.voice_pt; cur_en = tc.voice_en;
+    }
+    return { {"engine", engine}, {"fallback", fallback}, {"kokoro", kokoro}, {"list", list},
+             {"current_pt", cur_pt}, {"current_en", cur_en} };
+}
+
+// [{id, name, card, capture, playback, is_default}] from audio::list_devices.
+static ordered_json devices_json(std::string & err) {
+    ordered_json a = ordered_json::array();
+    for (const auto & d : easyai::audio::list_devices(err))
+        a.push_back({ {"id", d.id}, {"name", d.name}, {"card", d.card}, {"capture", d.capture},
+                      {"playback", d.playback}, {"is_default", d.is_default} });
+    return a;
+}
+
+// Every ggml-*.bin in the directory of the [STT] model (symlink resolved)
+// and in the download dir (deduplicated by real path), plus the current
+// wake_model when it is a file elsewhere. "server" is the UI's own choice.
+// Caller holds assistant_mu (reads assistant_cfg).
+static ordered_json wake_models_json(ServerCtx & ctx) {
+    namespace fs = std::filesystem;
+    std::vector<fs::path> dirs;
+    auto add_dir = [&](const std::string & p) {
+        if (p.empty()) return;
+        std::error_code ec; fs::path d = fs::weakly_canonical(fs::path(p), ec);
+        if (ec) d = p;
+        for (const auto & x : dirs) if (x == d) return;
+        dirs.push_back(d);
+    };
+    {
+        std::string m;
+        { std::lock_guard<std::mutex> lk(ctx.stt_mu); m = ctx.stt.is_loaded() ? ctx.stt.model_path() : ctx.stt_model_arg; }
+        if (!m.empty()) {
+            std::error_code ec; fs::path r = fs::weakly_canonical(fs::path(m), ec);
+            add_dir((ec ? fs::path(m) : r).parent_path().string());
+        }
+    }
+    if (ctx.models) add_dir(ctx.models->download_dir());
+
+    std::set<std::string> seen;
+    ordered_json out = ordered_json::array();
+    auto add_file = [&](const fs::path & f) {
+        std::error_code ec; fs::path r = fs::weakly_canonical(f, ec);
+        if (!seen.insert(ec ? f.string() : r.string()).second) return;
+        std::uintmax_t sz = fs::file_size(f, ec); if (ec) sz = 0;
+        out.push_back({ {"name", f.filename().string()}, {"path", f.string()}, {"size_bytes", (std::uint64_t) sz} });
+    };
+    for (const auto & d : dirs) {
+        std::error_code ec;
+        std::vector<fs::path> files;
+        fs::directory_iterator it(d, ec);
+        for (; !ec && it != fs::directory_iterator(); it.increment(ec)) {
+            const std::string n = it->path().filename().string();
+            if (n.rfind("ggml-", 0) != 0 || n.size() <= 4 || n.compare(n.size() - 4, 4, ".bin") != 0) continue;
+            std::error_code ec2;
+            if (it->is_regular_file(ec2)) files.push_back(it->path());
+        }
+        std::sort(files.begin(), files.end());
+        for (const auto & f : files) add_file(f);
+    }
+    const std::string cur = ctx.assistant_cfg.wake_model;
+    if (!cur.empty() && cur != "server" && cur != "none") {
+        std::error_code ec;
+        if (fs::is_regular_file(fs::path(cur), ec)) add_file(fs::path(cur));
+    }
+    return out;
+}
+
+// {enabled, state, mic, voice} for /models/api/status services.assistant.
+static ordered_json assistant_brief_json(ServerCtx & ctx) {
+    bool enabled;
+    { std::lock_guard<std::mutex> lk(ctx.assistant_mu); enabled = ctx.assistant_cfg.enabled; }
+    const easyai::Assistant::Status st = ctx.assistant.status();
+    return { {"enabled", enabled}, {"state", st.state}, {"mic", st.mic}, {"voice", st.voice} };
+}
+
+static ordered_json assistant_status_obj(ServerCtx & ctx) {
+    try { return ordered_json::parse(ctx.assistant.status_json()); }
+    catch (...) { return ordered_json{ {"state", ctx.assistant.status().state} }; }
+}
+
+// --list-audio-devices / --list-voices / --assistant-options / --assistant-say:
+// print to stdout and return the exit status (true = 0). No model is
+// loaded; --list-voices and --assistant-say configure [TTS] exactly like
+// the start-up path (so the installer's check sees the engine in use).
+static bool run_assistant_utility(const ServerArgs & args) {
+    bool ok = true;
+    if (args.list_audio_devices) {
+        std::string err;
+        const auto devs = easyai::audio::list_devices(err);
+        std::printf("audio backend: %s\n", easyai::audio::backend_name().c_str());
+        if (!err.empty()) { std::printf("error: %s\n", err.c_str()); ok = false; }
+        std::printf("%-30s %-7s %-8s %-24s %s\n", "id", "capture", "playback", "card", "name");
+        for (const auto & d : devs)
+            std::printf("%-30s %-7s %-8s %-24s %s%s\n", d.id.c_str(), d.capture ? "yes" : "-", d.playback ? "yes" : "-",
+                        d.card.c_str(), d.name.c_str(), d.is_default ? "  (default)" : "");
+        if (devs.empty() && err.empty()) std::printf("(no audio devices)\n");
+        std::printf("\n[ASSISTANT] mic / speaker take an id from this list (default: \"default\").\n");
+    }
+    if (args.assistant_options) {
+        std::printf("%-16s %-32s %-5s %-28s %-24s %s\n", "key", "flag", "type", "value", "default", "help");
+        for (const auto & o : easyai::Assistant::options()) {
+            std::string v = easyai::Assistant::get(args.assistant, o.key);
+            if (o.key == "api_key" && !v.empty()) v = assistant_ui::kSecretMask;
+            if (v.size() > 28) v = v.substr(0, 25) + "...";
+            std::string d = o.def; if (d.size() > 24) d = d.substr(0, 21) + "...";
+            const char * t = o.type == easyai::Assistant::Option::Bool ? "bool" : o.type == easyai::Assistant::Option::Int ? "int" : "str";
+            std::printf("%-16s %-32s %-5s %-28s %-24s %s%s%s\n", o.key.c_str(), o.flag.c_str(), t, v.c_str(), d.c_str(), o.help.c_str(),
+                        o.choices.empty() ? "" : " [", o.choices.empty() ? "" : (o.choices + "]").c_str());
+        }
+    }
+    if (args.list_voices || !args.assistant_say.empty()) {
+        auto ctx = std::make_unique<ServerCtx>();   // only its Tts / assistant are used; no model is loaded
+        ctx->api_key = args.api_key;
+        ctx->tls     = !args.tls_cert.empty();
+        const std::string eng = configure_tts(*ctx, args, /*log=*/ false);
+        if (args.list_voices) {
+            ordered_json v = voices_json(*ctx);
+            std::printf("engine   = %s\n", eng.c_str());
+            std::printf("fallback = %s\n", ctx->tts.fallback_engine().c_str());
+            if (!ctx->tts.available()) {
+                std::printf("error    = %s\n", ctx->tts_error.empty() ? "no usable engine (set [TTS] engine / kokoro_model / piper / voices)" : ctx->tts_error.c_str());
+                ok = false;
+            } else if (eng == "kokoro") {
+                std::printf("model    = %s\n", args.tts_kokoro_model.c_str());
+                std::printf("voices   = %s\n", args.tts_kokoro_voices.c_str());
+                std::printf("\n%-2s %-14s %-6s %-7s %-6s %s\n", "", "id", "lang", "gender", "grade", "available");
+                const std::string cur_pt = v["current_pt"].get<std::string>(), cur_en = v["current_en"].get<std::string>();
+                for (const auto & e : v["list"]) {
+                    const std::string id = e["id"].get<std::string>();
+                    std::printf("%-2s %-14s %-6s %-7s %-6s %s\n", (id == cur_pt || id == cur_en) ? "*" : "", id.c_str(),
+                                e["lang"].get<std::string>().c_str(), e["gender"].get<std::string>().c_str(),
+                                e["grade"].get<std::string>().c_str(), e["available"].get<bool>() ? "yes" : "-");
+                }
+                std::printf("\n* = current voice: pt %s, en %s ([TTS] kokoro_voice_pt / kokoro_voice_en)\n", cur_pt.c_str(), cur_en.c_str());
+            } else {
+                std::printf("voice_pt = %s\n", v["current_pt"].get<std::string>().empty() ? "(engine default)" : v["current_pt"].get<std::string>().c_str());
+                std::printf("voice_en = %s\n", v["current_en"].get<std::string>().empty() ? "(engine default)" : v["current_en"].get<std::string>().c_str());
+                std::printf("(the Kokoro catalogue applies when [TTS] engine is kokoro)\n");
+            }
+        }
+        if (!args.assistant_say.empty()) {
+            build_assistant_hooks(*ctx, args);
+            { std::lock_guard<std::mutex> lk(ctx->assistant_mu); ctx->assistant_cfg = args.assistant; }
+            std::string err;
+            const auto t0 = std::chrono::steady_clock::now();
+            if (!assistant_say_now(*ctx, args.assistant_say, args.assistant_say_lang, err)) {
+                std::fprintf(stderr, "easyai-server: --assistant-say failed: %s\n", err.empty() ? "unknown error" : err.c_str());
+                ok = false;
+            } else {
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                std::printf("spoke %zu chars in %.0f ms (tts %s via %s, lang %s, speaker %s)\n", args.assistant_say.size(), ms,
+                            eng.c_str(), args.assistant.tts.c_str(), args.assistant_say_lang.c_str(), args.assistant.speaker.c_str());
+            }
+        }
+    }
+    return ok;
+}
 
 int main(int argc, char ** argv) {
     ServerArgs args = parse_args(argc, argv);
@@ -5408,6 +5806,30 @@ int main(int argc, char ** argv) {
                 if (!ma.empty()) args.alias = ma;
             }
         }
+    }
+
+    // -------- [ASSISTANT]: the INI section, then the --assistant-<key> flags --
+    // (CLI > INI > the defaults of Assistant::Config; a bad value is fatal
+    // with the validator's message, like a typo'd flag.)
+    args.assistant = easyai::Assistant::from_ini(ini_config);
+    for (const auto & kv : args.assistant_cli) {
+        std::string err;
+        if (!easyai::Assistant::set(args.assistant, kv.first, kv.second, err)) {
+            std::string flag = "--assistant-" + kv.first;
+            for (const auto & o : easyai::Assistant::options()) if (o.key == kv.first) flag = o.flag;
+            std::fprintf(stderr, "easyai-server: %s %s: %s\n", flag.c_str(), kv.second.c_str(), err.c_str());
+            return 2;
+        }
+    }
+
+    // -------- print-and-exit utilities (before any model is loaded) --------
+    // --list-audio-devices, --list-voices, --assistant-options, --assistant-say
+    if (args.list_audio_devices || args.list_voices || args.assistant_options || !args.assistant_say.empty()) {
+        if (args.assistant_say_lang != "auto" && args.assistant_say_lang != "pt" && args.assistant_say_lang != "en") {
+            std::fprintf(stderr, "easyai-server: --assistant-say-lang must be pt, en or auto (got '%s')\n", args.assistant_say_lang.c_str());
+            return 2;
+        }
+        return run_assistant_utility(args) ? 0 : 1;
     }
 
     // -------- resolve system prompt --------------------------------------
@@ -8100,22 +8522,7 @@ int main(int argc, char ** argv) {
         std::fprintf(stderr, "[easyai-server] stt: no model (pass --stt-model or [STT] model; download one from /models)\n");
     }
     ctx->default_enable_thinking = args.reasoning;
-    {
-        easyai::Tts::Config tc;
-        tc.engine = args.tts_engine; tc.url = args.tts_url; tc.piper = args.tts_piper;
-        tc.kokoro_model = args.tts_kokoro_model; tc.kokoro_voices = args.tts_kokoro_voices;
-        tc.kokoro_voice_pt = args.tts_kokoro_voice_pt; tc.kokoro_voice_en = args.tts_kokoro_voice_en;
-        tc.onnxruntime = args.tts_onnxruntime; tc.espeak_lib = args.tts_espeak_lib; tc.espeak_data = args.tts_espeak_data;
-        tc.voice_pt = args.tts_voice_pt; tc.voice_en = args.tts_voice_en;
-        const std::string eng = ctx->tts.configure(tc, ctx->tts_error);
-        if (ctx->tts.available())
-            std::fprintf(stderr, "[easyai-server] tts: %s%s (POST /v1/audio/speech, voices pt/en)%s\n", eng.c_str(),
-                         eng == "http" ? (" " + args.tts_url).c_str() : eng == "kokoro" ? (" " + args.tts_kokoro_model).c_str() : "",
-                         (eng == "http" || eng == "kokoro") ? (", fallback " + ctx->tts.fallback_engine()).c_str() : "");
-        else
-            std::fprintf(stderr, "[easyai-server] tts: none%s (POST /v1/audio/speech answers 503; set [TTS] engine / piper / voices)\n",
-                         ctx->tts_error.empty() ? "" : (" — " + ctx->tts_error).c_str());
-    }
+    configure_tts(*ctx, args, /*log=*/ true);   // [TTS]: shared by POST /v1/audio/speech and the assistant
 
     // Engine::load() resolves symlinks on the model path (so the AI box's
     // /var/lib/easyai/models/ai.gguf → real-weight-file pattern surfaces
@@ -8637,6 +9044,20 @@ int main(int argc, char ** argv) {
         if (!require_auth(ctx_ref, q, r)) return;
         route_speech(ctx_ref, q, r);
     });
+    // GET /v1/audio/voices — the voices of the [TTS] engine in effect (Kokoro
+    // catalogue with availability; piper/say/espeak report their pt/en voice).
+    svr.Get("/v1/audio/voices", [&](const httplib::Request & q, httplib::Response & r) {
+        if (!require_auth(ctx_ref, q, r)) return;
+        ordered_json v = voices_json(ctx_ref);
+        ordered_json j = { {"engine", v["engine"]}, {"fallback", v["fallback"]}, {"voices", v["list"]} };
+        if (!v["kokoro"].get<bool>()) {
+            ordered_json own = ordered_json::array();
+            if (!v["current_pt"].get<std::string>().empty()) own.push_back({ {"id", v["current_pt"]}, {"lang", "pt-br"}, {"gender", ""}, {"grade", ""}, {"available", true} });
+            if (!v["current_en"].get<std::string>().empty()) own.push_back({ {"id", v["current_en"]}, {"lang", "en-us"}, {"gender", ""}, {"grade", ""}, {"available", true} });
+            j["voices"] = own;
+        }
+        r.set_content(j.dump(), "application/json");
+    });
 
     // Ollama-compat list-models. Same auth posture as /v1/models.
     svr.Get ("/api/tags",             [&](const auto & q, auto & r){
@@ -8774,7 +9195,7 @@ int main(int argc, char ** argv) {
         try { auto j = nlohmann::json::parse(req.body); name = j.value("name", ""); action = j.value("action", ""); }
         catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
         if (!admin::unit_ok(name) || (action != "start" && action != "stop" && action != "restart")) {
-            res.status = 400; res.set_content(error_json("name must be easyai-server or easyai-assistant, action start|stop|restart"), "application/json"); return;
+            res.status = 400; res.set_content(error_json("name must be easyai-server (the assistant is built into it: /models/api/assistant/action), action start|stop|restart"), "application/json"); return;
         }
         const std::string sc = admin::systemctl_bin();
         if (sc.empty()) { res.status = 501; res.set_content(error_json("no systemd on this host", "not_implemented"), "application/json"); return; }
@@ -8794,7 +9215,7 @@ int main(int argc, char ** argv) {
         if (rc != 0) {
             res.status = 500;
             res.set_content(error_json("systemctl " + action + " " + name + " failed: " + (err.empty() ? "exit " + std::to_string(rc) : err)
-                                       + " — the installer's polkit rule /etc/polkit-1/rules.d/50-easyai-services.rules lets the service user manage these units",
+                                       + " — the installer's polkit rule /etc/polkit-1/rules.d/50-easyai-services.rules lets the service user manage this unit",
                                        "server_error"), "application/json");
             return;
         }
@@ -8824,12 +9245,264 @@ int main(int argc, char ** argv) {
         if (text.size() > admin::kConfigMaxBytes) { res.status = 413; res.set_content(error_json("config larger than 1 MiB"), "application/json"); return; }
         std::string err, backup;
         if (!admin::ini_text_check(text, err)) { res.status = 400; res.set_content(error_json("not saved — " + err), "application/json"); return; }
+        std::lock_guard<std::mutex> cfg_lk(admin::config_mu);
         if (!admin::write_config(ctx_ref.config_path, text, err, backup)) { res.status = 500; res.set_content(error_json(err, "server_error"), "application/json"); return; }
         std::fprintf(stderr, "[easyai-server] config: %s saved from the dashboard (%zu bytes%s)\n", ctx_ref.config_path.c_str(), text.size(),
                      backup.empty() ? "" : (", previous copy " + backup).c_str());
         nlohmann::json j; j["ok"] = true; j["bytes"] = text.size(); j["backup"] = backup; j["path"] = ctx_ref.config_path;
         res.set_content(j.dump(), "application/json");
     });
+
+    // ---- Assistant tab: the built-in voice assistant (spec.md rule 14) ----
+    // Same auth as the other /models/api/* routes. Runtime actions never
+    // touch the INI; POST config writes the INI (and applies on request).
+    svr.Get("/models/api/assistant/status", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        bool enabled;
+        { std::lock_guard<std::mutex> lk(ctx_ref.assistant_mu); enabled = ctx_ref.assistant_cfg.enabled; }
+        ordered_json j;
+        j["status"]  = assistant_status_obj(ctx_ref);
+        j["enabled"] = enabled;
+        j["log"]     = ctx_ref.assistant.recent_log(assistant_ui::kLogDefault);
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Get("/models/api/assistant/options", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        ordered_json j;
+        {
+            std::lock_guard<std::mutex> lk(ctx_ref.assistant_mu);
+            ordered_json cfg;
+            for (const auto & kv : easyai::Assistant::to_map(ctx_ref.assistant_cfg))
+                cfg[kv.first] = kv.first == "api_key" ? (kv.second.empty() ? std::string() : std::string(assistant_ui::kSecretMask)) : kv.second;
+            j["config"] = cfg;
+            j["wake_models"] = wake_models_json(ctx_ref);
+            j["self_endpoint"] = ctx_ref.assistant_hooks.self_endpoint;
+        }
+        ordered_json opts = ordered_json::array();
+        for (const auto & o : easyai::Assistant::options()) {
+            ordered_json choices = ordered_json::array();
+            if (!o.choices.empty()) {
+                std::size_t b = 0;
+                while (b <= o.choices.size()) {
+                    const std::size_t bar = o.choices.find('|', b);
+                    const std::string c = o.choices.substr(b, bar == std::string::npos ? std::string::npos : bar - b);
+                    if (!c.empty()) choices.push_back(c);
+                    if (bar == std::string::npos) break;
+                    b = bar + 1;
+                }
+            }
+            opts.push_back({ {"key", o.key}, {"flag", o.flag},
+                             {"type", o.type == easyai::Assistant::Option::Bool ? "bool" : o.type == easyai::Assistant::Option::Int ? "int" : "str"},
+                             {"default", o.def}, {"choices", choices}, {"min", o.min}, {"max", o.max},
+                             {"group", o.group}, {"help", o.help} });
+        }
+        j["options"] = opts;
+        std::string derr;
+        j["devices"] = devices_json(derr);
+        if (!derr.empty()) j["devices_error"] = derr;
+        j["voices"]  = voices_json(ctx_ref);
+        struct stat st{};
+        const bool exists = ::stat(ctx_ref.config_path.c_str(), &st) == 0;
+        const std::string dir = ctx_ref.config_path.find('/') == std::string::npos ? std::string(".")
+                              : ctx_ref.config_path.substr(0, ctx_ref.config_path.find_last_of('/'));
+        j["ini"] = { {"path", ctx_ref.config_path}, {"exists", exists},
+                     {"writable", exists ? ::access(ctx_ref.config_path.c_str(), W_OK) == 0
+                                         : ::access(dir.empty() ? "/" : dir.c_str(), W_OK) == 0} };
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Get("/models/api/assistant/devices", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        std::string err;
+        ordered_json j; j["devices"] = devices_json(err);
+        if (!err.empty()) j["error"] = err;
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Get("/models/api/assistant/log", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        int lines = req.has_param("lines") ? std::atoi(req.get_param_value("lines").c_str()) : assistant_ui::kLogDefault;
+        lines = std::max(1, std::min(assistant_ui::kLogMax, lines));
+        ordered_json j; j["lines"] = ctx_ref.assistant.recent_log((std::size_t) lines);
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Post("/models/api/assistant/action", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        std::string action;
+        try { auto j = nlohmann::json::parse(req.body); action = j.value("action", ""); }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
+        if (action != "start" && action != "stop" && action != "restart") {
+            res.status = 400; res.set_content(error_json("action must be start, stop or restart"), "application/json"); return;
+        }
+        std::string err;
+        {
+            std::lock_guard<std::mutex> lk(ctx_ref.assistant_mu);
+            if (action == "stop") {
+                ctx_ref.assistant.stop();
+            } else if (!ctx_ref.assistant.start(ctx_ref.assistant_cfg, ctx_ref.assistant_hooks, err)) {   // start() while running = restart
+                res.status = 500;
+                res.set_content(error_json("assistant " + action + " failed: " + err, "server_error"), "application/json");
+                return;
+            }
+        }
+        std::fprintf(stderr, "[easyai-server] assistant: %s requested from the dashboard\n", action.c_str());
+        ordered_json j; j["ok"] = true; j["status"] = assistant_status_obj(ctx_ref);
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Post("/models/api/assistant/config", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        if (req.body.size() > assistant_ui::kConfigBodyMax) {
+            res.status = 413; res.set_content(error_json("body larger than 64 KiB"), "application/json"); return;
+        }
+        nlohmann::json body;
+        try { body = nlohmann::json::parse(req.body); } catch (...) { body = nlohmann::json(); }
+        if (!body.is_object() || !body.contains("values") || !body["values"].is_object()) {
+            res.status = 400; res.set_content(error_json("body must be {\"values\": {key: value, ...}, \"apply\": bool}"), "application/json"); return;
+        }
+        const bool apply = body.value("apply", false);
+        auto bad = [&](const std::string & key, const std::string & msg) {
+            res.status = 400;
+            ordered_json j; j["error"] = { {"message", msg}, {"type", "invalid_request_error"} }; j["key"] = key;
+            res.set_content(j.dump(), "application/json");
+        };
+
+        // Validate on a copy of the config in effect; collect what goes to
+        // [ASSISTANT] and what goes to [TTS] (the two Kokoro voices).
+        easyai::Assistant::Config cfg;
+        { std::lock_guard<std::mutex> lk(ctx_ref.assistant_mu); cfg = ctx_ref.assistant_cfg; }
+        std::map<std::string, std::string> a_vals, t_vals;
+        for (auto it = body["values"].begin(); it != body["values"].end(); ++it) {
+            const std::string key = it.key();
+            std::string val;
+            if      (it.value().is_string())  val = it.value().get<std::string>();
+            else if (it.value().is_boolean()) val = it.value().get<bool>() ? "on" : "off";
+            else if (it.value().is_number())  val = it.value().dump();
+            else { bad(key, key + ": the value must be a string, number or boolean"); return; }
+            if (key == "tts.kokoro_voice_pt" || key == "tts.kokoro_voice_en") {
+                bool known = false;
+                for (const auto & v : easyai::kokoro_voice_catalog()) if (v.id == val) { known = true; break; }
+                if (!known) { bad(key, key + ": '" + val + "' is not a Kokoro voice id (see GET /v1/audio/voices)"); return; }
+                {   // and the loaded voices file must hold it, or Tts would silently fall back to pm_alex / am_michael
+                    std::lock_guard<std::mutex> lk(ctx_ref.tts_mu);
+                    const auto have = ctx_ref.tts.kokoro_voice_names();
+                    if (!have.empty() && std::find(have.begin(), have.end(), val) == have.end()) {
+                        bad(key, key + ": '" + val + "' is not in the loaded voices file " + ctx_ref.tts_cfg.kokoro_voices); return;
+                    }
+                }
+                t_vals[key.substr(4)] = val;
+                continue;
+            }
+            if (key == "api_key" && (val.empty() || val == assistant_ui::kSecretMask)) continue;   // unchanged secret
+            std::string err;
+            if (!easyai::Assistant::set(cfg, key, val, err)) { bad(key, err); return; }
+            a_vals[key] = val;
+        }
+
+        ordered_json warnings = ordered_json::array();
+        std::string backup; bool saved = false;
+        if (!a_vals.empty() || !t_vals.empty()) {
+            std::string text, err;
+            std::lock_guard<std::mutex> cfg_lk(admin::config_mu);   // the Services editor may be saving the same file
+            { std::ifstream in(ctx_ref.config_path, std::ios::binary); if (in) text.assign(std::istreambuf_iterator<char>(in), {}); }
+            if ((!a_vals.empty() && !easyai::config::set_ini_values(text, "ASSISTANT", a_vals, err)) ||
+                (!t_vals.empty() && !easyai::config::set_ini_values(text, "TTS", t_vals, err))) {
+                bad("", "not saved — " + err); return;
+            }
+            if (admin::write_config(ctx_ref.config_path, text, err, backup)) {
+                saved = true;
+                std::fprintf(stderr, "[easyai-server] assistant: %zu [ASSISTANT] + %zu [TTS] key(s) saved to %s from the dashboard%s\n",
+                             a_vals.size(), t_vals.size(), ctx_ref.config_path.c_str(),
+                             backup.empty() ? "" : (", previous copy " + backup).c_str());
+            } else {
+                warnings.push_back("not saved: " + err + " (the values apply to this run only)");
+            }
+        }
+
+        // The Kokoro voices: re-configure the shared Tts with everything
+        // else as it was (the engine reloads; a sentence in flight finishes).
+        if (!t_vals.empty()) {
+            std::lock_guard<std::mutex> lk(ctx_ref.tts_mu);
+            easyai::Tts::Config tc = ctx_ref.tts_cfg;
+            if (t_vals.count("kokoro_voice_pt")) tc.kokoro_voice_pt = t_vals["kokoro_voice_pt"];
+            if (t_vals.count("kokoro_voice_en")) tc.kokoro_voice_en = t_vals["kokoro_voice_en"];
+            ctx_ref.tts_cfg = tc;   // what the next start-up / re-configure uses
+            std::string terr;
+            // The loaded engine switches voices in place — no model reload, no gap in POST /v1/audio/speech.
+            if (ctx_ref.tts.engine() != "kokoro") warnings.push_back("[TTS] engine in effect is " + ctx_ref.tts.engine() + "; the Kokoro voices apply when kokoro is the engine");
+            else if (!ctx_ref.tts.set_kokoro_voices(t_vals.count("kokoro_voice_pt") ? tc.kokoro_voice_pt : "", t_vals.count("kokoro_voice_en") ? tc.kokoro_voice_en : "", terr))
+                warnings.push_back("[TTS] voices saved to the INI but not applied: " + terr);
+            std::fprintf(stderr, "[easyai-server] tts: kokoro voices from the dashboard — pt=%s en=%s (engine %s)\n",
+                         ctx_ref.tts.kokoro_voice_pt().c_str(), ctx_ref.tts.kokoro_voice_en().c_str(), ctx_ref.tts.engine().c_str());
+        }
+
+        bool applied = false;
+        {
+            std::lock_guard<std::mutex> lk(ctx_ref.assistant_mu);
+            ctx_ref.assistant_cfg = cfg;
+            if (apply) {
+                if (cfg.enabled) {
+                    std::string err;
+                    if (!ctx_ref.assistant.start(cfg, ctx_ref.assistant_hooks, err)) {
+                        res.status = 500;
+                        ordered_json j;
+                        j["ok"] = false; j["saved"] = saved; j["backup"] = backup; j["applied"] = false;
+                        j["error"] = { {"message", "saved, but the assistant did not start: " + err}, {"type", "server_error"} };
+                        j["warnings"] = warnings;
+                        res.set_content(j.dump(), "application/json");
+                        return;
+                    }
+                } else {
+                    ctx_ref.assistant.stop();
+                }
+                applied = true;
+            }
+        }
+        ordered_json j;
+        j["ok"] = true; j["saved"] = saved; j["backup"] = backup; j["applied"] = applied;
+        j["status"] = assistant_status_obj(ctx_ref); j["warnings"] = warnings;
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Post("/models/api/assistant/say", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        std::string text, lang;
+        try { auto j = nlohmann::json::parse(req.body); text = j.value("text", ""); lang = j.value("lang", "auto"); }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
+        if (text.empty()) { res.status = 400; res.set_content(error_json("'text' is required"), "application/json"); return; }
+        if (assistant_ui::utf8_chars(text) > assistant_ui::kSayMaxChars) {
+            res.status = 400; res.set_content(error_json("'text' longer than " + std::to_string(assistant_ui::kSayMaxChars) + " characters"), "application/json"); return;
+        }
+        if (lang.empty()) lang = "auto";
+        if (lang != "auto" && lang != "pt" && lang != "en") { res.status = 400; res.set_content(error_json("'lang' must be pt, en or auto"), "application/json"); return; }
+        assistant_ui::InflightSlot slot;
+        if (!slot.taken) { res.status = 429; res.set_content(error_json("the assistant is busy with another say / ask — try again in a moment", "rate_limit_error"), "application/json"); return; }
+        std::string err;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!assistant_say_now(ctx_ref, text, lang, err)) {
+            res.status = 500; res.set_content(error_json("say failed: " + err, "server_error"), "application/json"); return;
+        }
+        ordered_json j; j["ok"] = true;
+        j["ms"] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        res.set_content(j.dump(), "application/json");
+    });
+    svr.Post("/models/api/assistant/ask", [&](const httplib::Request & req, httplib::Response & res) {
+        if (!models_require_auth(ctx_ref, req, res)) return;
+        std::string text;
+        try { auto j = nlohmann::json::parse(req.body); text = j.value("text", ""); }
+        catch (...) { res.status = 400; res.set_content(error_json("invalid JSON"), "application/json"); return; }
+        if (text.empty()) { res.status = 400; res.set_content(error_json("'text' is required"), "application/json"); return; }
+        if (assistant_ui::utf8_chars(text) > assistant_ui::kAskMaxChars) {
+            res.status = 400; res.set_content(error_json("'text' longer than " + std::to_string(assistant_ui::kAskMaxChars) + " characters"), "application/json"); return;
+        }
+        assistant_ui::InflightSlot slot;
+        if (!slot.taken) { res.status = 429; res.set_content(error_json("the assistant is busy with another say / ask — try again in a moment", "rate_limit_error"), "application/json"); return; }
+        std::string answer, lang, err;
+        const auto t0 = std::chrono::steady_clock::now();
+        if (!assistant_ask_now(ctx_ref, text, answer, lang, err)) {
+            res.status = 500; res.set_content(error_json("ask failed: " + err, "server_error"), "application/json"); return;
+        }
+        ordered_json j; j["ok"] = true; j["answer"] = answer; j["lang"] = lang;
+        j["ms"] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        res.set_content(j.dump(), "application/json");
+    });
+
 
     // Comprehensive runtime status for the dashboard's Status tab: process,
     // running model + live execution, active parameters, enabled services +
@@ -8893,6 +9566,8 @@ int main(int argc, char ** argv) {
             tools.push_back({ {"name", t.name},
                               {"description", t.short_description.empty() ? t.description
                                                                          : t.short_description} });
+        bool tts_avail; std::string tts_eng;
+        { std::lock_guard<std::mutex> lk(ctx_ref.tts_mu); tts_avail = ctx_ref.tts.available(); tts_eng = ctx_ref.tts.engine(); }
         ordered_json services = {
             {"tools_count", (int) ctx_ref.default_tools.size()},
             {"tools", tools},
@@ -8915,9 +9590,10 @@ int main(int argc, char ** argv) {
             {"stt_loaded", ctx_ref.stt.is_loaded()},
             {"stt_model", stt_model_id(ctx_ref)},
             {"stt_language", ctx_ref.stt_language},
-            {"tts_available", ctx_ref.tts.available()},
-            {"tts_engine", ctx_ref.tts.engine()},
+            {"tts_available", tts_avail},
+            {"tts_engine", tts_eng},
             {"transcriptions", ctx_ref.n_transcriptions.load()},
+            {"assistant", assistant_brief_json(ctx_ref)},
         };
 
         std::uint64_t rss_kb = 0, hwm_kb = 0; metrics::read_proc_self_status(rss_kb, hwm_kb);
@@ -9247,12 +9923,49 @@ int main(int argc, char ** argv) {
         }
     });
 
+    // -------- the built-in voice assistant ------------------------------
+    // Its chat goes through the loopback endpoint, so it starts once the
+    // listener is up (a thread waits for svr.is_running()) and stops after
+    // listen() returns. The hooks lend it the server's Stt / Tts.
+    build_assistant_hooks(*ctx, args);
+    { std::lock_guard<std::mutex> lk(ctx->assistant_mu); ctx->assistant_cfg = args.assistant; }
+    std::atomic<bool> listen_done{false};
+    std::thread assistant_starter;
+    if (args.assistant.enabled) {
+        assistant_starter = std::thread([&ctx_ref, &svr, &listen_done]() {
+            while (!svr.is_running() && !listen_done.load(std::memory_order_relaxed))
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (listen_done.load(std::memory_order_relaxed)) return;
+            std::lock_guard<std::mutex> lk(ctx_ref.assistant_mu);
+            std::string err;
+            if (!ctx_ref.assistant.start(ctx_ref.assistant_cfg, ctx_ref.assistant_hooks, err)) {
+                std::fprintf(stderr, "[easyai-server] assistant: FAILED to start — %s (fix [ASSISTANT] or start it from /models \xe2\x86\x92 Assistant)\n",
+                             err.c_str());
+            } else {
+                const auto & c = ctx_ref.assistant_cfg;
+                std::fprintf(stderr, "[easyai-server] assistant: started — say \"hello %s\" (mic %s, speaker %s, wake model %s, tts %s; /models \xe2\x86\x92 Assistant)\n",
+                             c.name.c_str(), c.mic.c_str(), c.speaker.c_str(), c.wake_model.c_str(), c.tts.c_str());
+            }
+        });
+    } else {
+        std::fprintf(stderr, "[easyai-server] assistant: disabled ([ASSISTANT] enabled = off; turn it on from /models \xe2\x86\x92 Assistant or --assistant-enabled on)\n");
+    }
+
     g_server.store(&svr);
     std::signal(SIGINT,  on_signal);
     std::signal(SIGTERM, on_signal);
 
     bool ok = svr.listen(args.host.c_str(), args.port);
     g_server.store(nullptr);
+
+    // The assistant first: its thread talks to the listener that just closed.
+    listen_done.store(true, std::memory_order_relaxed);
+    if (assistant_starter.joinable()) assistant_starter.join();
+    {
+        std::lock_guard<std::mutex> lk(ctx->assistant_mu);
+        if (ctx->assistant.running()) std::fprintf(stderr, "[easyai-server] assistant: stopping\n");
+        ctx->assistant.stop();
+    }
 
     // The MODELS engine is owned by `ctx` (unique_ptr); its destructor joins
     // any in-flight download worker when ctx unwinds at the end of main().

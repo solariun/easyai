@@ -183,6 +183,7 @@ set(EASYAI_SOURCES
     src/tts.cpp
     src/audio_io.cpp
     src/assistant_core.cpp
+    src/assistant.cpp
     src/kokoro.cpp
     # vendored httplib (see header comment above)
     ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor/cpp-httplib/httplib.cpp
@@ -265,7 +266,7 @@ endif()
 # degrade to "HTTPS not in this build" instead of a hard error — point
 # the build at brew openssl via -DOPENSSL_ROOT_DIR=$(brew --prefix
 # openssl@3) (the install + build_macos scripts do this automatically).
-# Audio backend for easyai::audio (easyai-assistant microphone / speaker):
+# Audio backend for easyai::audio (the voice assistant inside easyai-server: microphone / speaker):
 # CoreAudio on macOS, ALSA on Linux when its headers are present. Without
 # either, the library builds and the assistant reports "no audio backend".
 if (APPLE)
@@ -277,9 +278,9 @@ else()
         target_compile_definitions(easyai PRIVATE EASYAI_HAVE_ALSA=1)
         target_include_directories(easyai PRIVATE ${EASYAI_ALSA_INCLUDE})
         target_link_libraries(easyai PRIVATE ${EASYAI_ALSA_LIB})
-        message(STATUS "easyai: ALSA found — easyai-assistant microphone/speaker enabled")
+        message(STATUS "easyai: ALSA found — easyai-server's voice assistant has microphone/speaker")
     else()
-        message(STATUS "easyai: ALSA not found (apt install libasound2-dev) — easyai-assistant builds without audio")
+        message(STATUS "easyai: ALSA not found (apt install libasound2-dev) — easyai-server builds without audio (no voice assistant)")
     endif()
 endif()
 
@@ -395,20 +396,6 @@ if (EASYAI_BUILD_SERVICES)
     # /v1/chat/completions endpoint (our easyai-server, llama-server, etc.).
     # No local model — pair with easyai-local when you want to run a GGUF
     # in-process instead.
-    # easyai-assistant — always-listening voice assistant (mic → wake word →
-    # /v1/audio/transcriptions → /v1/chat/completions → /v1/audio/speech →
-    # speaker). Uses cpp-httplib directly for the two audio endpoints, so it
-    # needs the same OpenSSL view of the header as libeasyai.
-    add_executable(easyai-assistant services/assistant.cpp)
-    target_link_libraries(easyai-assistant PRIVATE easyai)
-    target_include_directories(easyai-assistant PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor/cpp-httplib
-        ${CMAKE_CURRENT_SOURCE_DIR}/../llama.cpp/vendor)
-    if (OpenSSL_FOUND AND TARGET OpenSSL::SSL AND TARGET OpenSSL::Crypto)
-        target_compile_definitions(easyai-assistant PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT=1)
-        target_link_libraries(easyai-assistant PRIVATE OpenSSL::SSL OpenSSL::Crypto)
-    endif()
-
     add_executable(easyai-cli services/cli.cpp)
     target_link_libraries(easyai-cli PRIVATE easyai)
     target_include_directories(easyai-cli PRIVATE
@@ -509,8 +496,7 @@ if (EASYAI_INSTALL)
             easyai-server
             easyai-mcp-server
             easyai-chat
-            easyai-agent
-            easyai-assistant)
+            easyai-agent)
         if (CURL_FOUND)
             list(APPEND _easyai_install_bins easyai-recipes)
         endif()
