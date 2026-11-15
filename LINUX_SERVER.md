@@ -1137,6 +1137,17 @@ systemctl list-units --all 'easyai-*'      # only easyai-server.service (and eas
 
 ---
 
+### Upgrading from the October standalone assistant: what the installer repairs
+
+A run of the current installer over an October box also: sets every file in
+`/var/lib/easyai/models` and `/var/lib/easyai/tts` to `easyai:easyai` (files
+downloaded as root were unreadable by the service — `whisper … failed to
+open`), rewrites `name = easy` to `max` and `wake_model = …/ggml-tiny.bin` to
+`ggml-base.bin` when the INI still carries those retired 2026-10-16 template
+values (anything else you set stays; `--assistant-name <name>` on the upgrade
+sets the name explicitly), and re-execs itself from `~/opt/easyai/scripts`
+when started from a stale copy elsewhere.
+
 ## 13. Uninstalling
 
 The installer doesn't ship an uninstaller (yet). Manual:

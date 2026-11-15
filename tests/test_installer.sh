@@ -53,4 +53,8 @@ name="re-exec the checkout installer"; check grep -q 'exec bash "\$checkout_inst
 name="reset-failed before start"; check test "$(grep -c 'systemctl reset-failed "\$service_name"' "$script")" -ge 2
 name="purge drops wants links"; check grep -qF '/etc/systemd/system/*.wants/"$unit"' "$script"
 name="espeak never automatic";  check test "$(grep -c 'engine = espeak after apt' "$script")" = 0
+name="model ownership pass";    check grep -q 'chown -h -c "\$service_user":"\$service_group"' "$script"
+name="migrate name easy";       check grep -q '"\$ini_asst_name" == "easy"' "$script"
+name="migrate wake tiny";       check grep -q 'ggml-tiny\\.bin' "$script"
+name="--assistant-name on upgrade"; check grep -q 'assistant_name_set=1' "$script"
 exit $fail

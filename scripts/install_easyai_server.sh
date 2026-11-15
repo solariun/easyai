@@ -358,6 +358,7 @@ do_assistant=1                                # [ASSISTANT] enabled = on: the vo
                                               # ("hello max"). Needs whisper. --no-assistant writes enabled = off
                                               # (the dashboard /models → Assistant turns it on later).
 assistant_name="max"                          # --assistant-name <name>: wake word "hello <name>" / "olá <name>"
+assistant_name_set=0                          # 1 when --assistant-name was given: an existing INI takes it too
 wake_model="base"                             # small whisper for the wake word (ggml-base.bin, 142 MB; tiny
                                               # mishears a pt-BR "olá max" too often)
 do_piper=1                                    # piper TTS for POST /v1/audio/speech (male voices: pt_BR faber,
@@ -563,7 +564,7 @@ while [[ $# -gt 0 ]]; do
         --with-whisper)     do_whisper=1; shift ;;
         --no-assistant)     do_assistant=0; shift ;;
         --with-assistant)   do_assistant=1; shift ;;
-        --assistant-name)   assistant_name="$2"; shift 2 ;;
+        --assistant-name)   assistant_name="$2"; assistant_name_set=1; shift 2 ;;
         --no-piper)         do_piper=0; shift ;;
         --no-kokoro)        do_kokoro=0; shift ;;
         --kokoro-voice-pt)  kokoro_voice_pt="$2"; shift 2 ;;
@@ -1760,6 +1761,23 @@ RAG_README
                 log "migrating $ini_file: [ASSISTANT] enabled = $migrate_enabled (the assistant is built into easyai-server now)"
                 sudo sed -i "0,/^[[:space:]]*\[ASSISTANT\]/s//&\nenabled         = $migrate_enabled/" "$ini_file"
             fi
+            # The 2026-10-16 template (one day's default) wrote `name = easy` and
+            # `wake_model = …/ggml-tiny.bin`; the name has been max and the wake
+            # model base since 2026-10-17 (Gustavo: "hello Max", tiny mishears
+            # pt-BR). A stale copy of that installer re-wrote them on ai-pro on
+            # 2026-11-14 ("hello easy" greeted the room). Only those two exact
+            # retired values are rewritten; anything an operator chose stays.
+            # --assistant-name <name> given on this run sets the name regardless.
+            ini_asst_name="$(sudo awk '/^[[:space:]]*\[ASSISTANT\]/{s=1;next} /^[[:space:]]*\[/{s=0} s && /^[[:space:]]*name[[:space:]]*=/{sub(/^[^=]*=[[:space:]]*/,""); sub(/[[:space:]]*$/,""); print; exit}' "$ini_file")"
+            if [[ $assistant_name_set -eq 1 && "$ini_asst_name" != "$assistant_name" ]] || [[ "$ini_asst_name" == "easy" && "$assistant_name" != "easy" ]]; then
+                log "migrating $ini_file: [ASSISTANT] name = $assistant_name (was '${ini_asst_name:-unset}'; say \"hello $assistant_name\")"
+                sudo sed -i "/^[[:space:]]*\[ASSISTANT\]/,/^[[:space:]]*\[/ s|^\([[:space:]]*name[[:space:]]*=\).*|\1 $assistant_name|" "$ini_file"
+            fi
+            if sudo awk '/^[[:space:]]*\[ASSISTANT\]/{s=1;next} /^[[:space:]]*\[/{s=0} s && /^[[:space:]]*wake_model[[:space:]]*=[[:space:]]*.*\/ggml-tiny\.bin[[:space:]]*$/{f=1} END{exit !f}' "$ini_file" \
+                    && [[ "$wake_model" != "tiny" ]]; then
+                log "migrating $ini_file: [ASSISTANT] wake_model = $service_model_dir/ggml-$wake_model.bin (tiny mishears a pt-BR call)"
+                sudo sed -i "/^[[:space:]]*\[ASSISTANT\]/,/^[[:space:]]*\[/ s|^\([[:space:]]*wake_model[[:space:]]*=\).*|\1 $service_model_dir/ggml-$wake_model.bin|" "$ini_file"
+            fi
         else
             log "migrating $ini_file: adding [ASSISTANT] enabled = $migrate_enabled"
             printf '\n[ASSISTANT]\nenabled         = %s\nwake_model      = %s/ggml-%s.bin\n' "$migrate_enabled" "$service_model_dir" "$wake_model" | sudo tee -a "$ini_file" >/dev/null
@@ -2663,6 +2681,22 @@ if [[ $do_service -eq 1 && $do_whisper -eq 1 && "$stt_model" != "none" ]]; then
             sudo ln -sfn "$stt_file" "$stt_link"
         fi
     fi
+fi
+
+# ---------- model files belong to the service user ---------------------------
+# Files placed by an earlier installer or by hand (sudo curl, cp as root) end
+# up root:root 0640 and the service cannot open them: on ai-pro the STT model
+# behind stt.bin and ggml-tiny.bin were unreadable from October to 2026-11-15
+# ("failed to open", the assistant heard nothing). Fix ownership of what is
+# in the model and voice directories, keep every other permission bit.
+if [[ $do_service -eq 1 ]]; then
+    for d in "$service_model_dir" "$tts_dir"; do
+        [[ -d "$d" ]] || continue
+        fixed="$(sudo find "$d" -maxdepth 1 \( -type f -o -type l \) -exec chown -h -c "$service_user":"$service_group" {} + 2>/dev/null | wc -l)"
+        sudo find "$d" -maxdepth 1 -type f ! -perm -u+r -exec chmod -c u+r {} + 2>/dev/null | wc -l | xargs -I{} test {} -eq 0 || true
+        sudo find "$d" -maxdepth 1 -type f -exec chmod u+rw {} + 2>/dev/null || true
+        [[ "$fixed" -gt 0 ]] && log "ownership of $fixed file(s) in $d set to $service_user:$service_group (the service could not read them)"
+    done
 fi
 
 # ---------- wake-word model + piper voices (assistant / TTS) ----------------

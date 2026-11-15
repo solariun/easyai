@@ -1582,7 +1582,19 @@ proof is the log of the next `--upgrade` that brings a new installer.
    against `$prefix/lib/easyai` (`--config /dev/null --assistant-options`,
    no model, exit 0) and `die`s before touching the unit when it does not
    run; `tests/test_installer.sh` checks the chain, the purge and the
-   self-test.
+   self-test. Every file in the model and voice directories is set to the
+   service user (`chown -c`, logged when something changed): files placed
+   by an earlier installer or by hand were root:root 0640 and the service
+   could not open them (ai-pro: the STT model behind `stt.bin` and
+   `ggml-tiny.bin`, "failed to open", from October to 2026-11-15 — the
+   assistant heard nothing). An existing INI is migrated only for the two
+   values the retired 2026-10-16 template wrote and nothing else: `name =
+   easy` → `max` (the name since 2026-10-17; "hello Max" is the standard)
+   and `wake_model = …/ggml-tiny.bin` → `ggml-base.bin`; `--assistant-name
+   <name>` given on an upgrade sets the name in the INI as well. The name
+   stays configurable in three places: `[ASSISTANT] name`,
+   `--assistant-name` (server and installer) and the Assistant tab's Wake
+   word group.
 
 **Evidence of the bug.** `ai.local` reflogs: llama.cpp
 `pull --ff-only` to `0a1ef309c` at 14:24 (unpinned, the June script),
