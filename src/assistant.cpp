@@ -506,7 +506,15 @@ struct Assistant::Impl {
     SentenceChunker          chunker;
     std::vector<std::string> aliases, call_words;
     std::string              wake_prompt, base_sys;
-    std::string              lang = "en";
+    std::string              lang = "en";      // the language of the current turn: "pt" or "en" (rule 5)
+    // Language enforcement for the turn: was the first sentence checked, which
+    // language it came in when it was the wrong one (→ one retry), is this the
+    // retry. cancel_external_: stop() / reset_runtime() cancelled the chat, so
+    // a cancelled attempt is theirs, never ours to retry.
+    bool                     turn_gate_checked = false;
+    std::string              turn_mismatch;
+    bool                     turn_retry = false;
+    std::atomic<bool>        cancel_external_{false};
     int                      turns = 0;
     bool                     server_down = false;
     bool                     stt_hook_down = false;   // the server's own STT answered "no model": logged once
@@ -606,8 +614,36 @@ struct Assistant::Impl {
     }
 
     // ---- runtime pieces (speaker + client), built from cfg on demand ----------------
+    // ---- the language of a turn (rule 5): the answer comes in the language of
+    // the question, the voice follows the text it speaks (rule 6) --------------
+    static std::string language_line(const std::string & l) {
+        return l == "pt"
+            ? "Idioma desta resposta: português do Brasil. Responda somente em português, mesmo que a pergunta misture idiomas."
+            : "Language of this answer: English. Answer only in English, even if the question mixes languages.";
+    }
+    static std::string language_nudge(const std::string & l) {
+        return l == "pt" ? "\n\n(Responda somente em português do Brasil.)" : "\n\n(Answer only in English.)";
+    }
+    static std::string lang_name(const std::string & l) { return l == "pt" ? "Portuguese" : l == "en" ? "English" : l; }
+    // The voice a sentence is spoken with follows the sentence itself; the
+    // question's language decides only when the text gives no evidence.
+    std::string voice_for(const std::string & text) const { const std::string d = detect_language(text); return d.empty() ? lang : d; }
+    // The first sentence of an answer: true = speak it. False = the model
+    // answered in the other language; the attempt is cancelled before a word
+    // is spoken and answer() asks once more, with the language spelled out.
+    bool gate_ok(const std::string & s) {
+        if (turn_gate_checked) return true;
+        turn_gate_checked = true;
+        if (turn_retry) return true;
+        const std::string d = detect_language(s);
+        if (d.empty() || d == lang) return true;
+        turn_mismatch = d;
+        return false;
+    }
+
     void build_runtime() {
         std::lock_guard<std::mutex> lk(rt_mu);
+        if (!speaker && !cli) cancel_external_ = false;   // a fresh runtime: no cancel of ours is pending
         if (!speaker) {
             speaker = std::make_unique<Speaker>(*this);
             with_status([&](Status & x) { x.voice = speaker->describe(); });
@@ -627,6 +663,7 @@ struct Assistant::Impl {
     };
     void reset_runtime(const Config * new_cfg = nullptr, const Hooks * new_hooks = nullptr) {
         std::unique_lock<std::mutex> lk(rt_mu);
+        cancel_external_ = true;
         if (cli) cli->request_cancel();
         if (speaker) speaker->cancel_pending();
         rt_cv.wait(lk, [&] { return inflight == 0; });
@@ -660,11 +697,13 @@ struct Assistant::Impl {
         cli->tls_insecure(tls_insecure());
 #endif
         cli->on_token([this](const std::string & piece) {
+            if (!turn_mismatch.empty()) return;   // this attempt is being cancelled: nothing of it is spoken
             chunker.push(piece);
             std::string s;
             while (chunker.pop(s)) {
+                if (!gate_ok(s)) { chunker.clear(); cli->request_cancel(); return; }
                 set_state("speaking");
-                speaker->speak(s, lang);
+                speaker->speak(s, voice_for(s));
             }
         });
         cli->on_tool([this](const ToolCall & c, const ToolResult &) { logf("tool: %s", c.name.c_str()); });
@@ -805,7 +844,10 @@ struct Assistant::Impl {
 
     // ---- one question → spoken answer (caller holds chat_mu) -----------------------------------
     std::string answer(const std::string & question, const std::string & lang_hint) {
-        lang = lang_hint.empty() ? guess_language(question) : lang_hint;
+        {   // the assistant speaks Portuguese and English (Limits): anything else is answered in English
+            const std::string l = lang_hint.empty() ? guess_language(question) : lang_hint;
+            lang = l.rfind("pt", 0) == 0 ? "pt" : "en";
+        }
         const auto now = std::chrono::steady_clock::now();
         if (turns > 0 && (turns >= cfg.history_turns ||
                           std::chrono::duration_cast<std::chrono::seconds>(now - last_turn).count() >= cfg.history_idle_s)) {
@@ -813,19 +855,34 @@ struct Assistant::Impl {
         }
         with_status([&](Status & x) { x.state = "thinking"; x.last_question = question; x.last_question_lang = lang; x.last_question_at = now_s(); ++x.n_questions; });
         logf("Q (%s): %s", lang.c_str(), question.c_str());
-        cli->system(base_sys + "\n" + clock_line());   // the internal clock, fresh every turn
+        cli->system(base_sys + "\n" + clock_line() + "\n" + language_line(lang));   // the internal clock and the language, fresh every turn
         chunker.clear();
+        turn_gate_checked = false; turn_mismatch.clear(); turn_retry = false;
+        const std::string history_before = cli->dump_history();
         const auto t0 = std::chrono::steady_clock::now();
         std::string reply = cli->chat(question);
-        const std::string rest = chunker.flush();
-        if (!rest.empty()) { set_state("speaking"); speaker->speak(rest, lang); }
+        std::string rest = chunker.flush();
+        if (!turn_gate_checked && !rest.empty() && !gate_ok(rest)) rest.clear();   // a short answer: all of it is the first sentence
+        if (!turn_mismatch.empty() && !stop_ && !cancel_external_) {
+            // The model ignored the language; nothing was spoken. Roll the
+            // conversation back and ask once more with the language spelled
+            // out in the question itself. The retry is spoken whatever comes.
+            logf("answer came in %s to a question in %s — asking again", lang_name(turn_mismatch).c_str(), lang_name(lang).c_str());
+            cli->clear_cancel();
+            std::string herr;
+            if (!cli->load_history(history_before, &herr)) vlogf("history rollback: %s", herr.c_str());
+            turn_retry = true; turn_gate_checked = false; turn_mismatch.clear(); chunker.clear();
+            reply = cli->chat(question + language_nudge(lang));
+            rest = chunker.flush();
+        }
+        if (!rest.empty()) { set_state("speaking"); speaker->speak(rest, voice_for(rest)); }
         if (reply.empty()) {
             const std::string e = cli->last_error();
             logf("chat failed: %s", e.c_str());
             with_status([&](Status & x) { ++x.n_errors; x.last_error = "chat: " + e; });
             if (!server_down && !cli->cancel_requested()) { speaker->speak(unavailable_phrase(lang), lang); server_down = true; }
         } else {
-            logf("A: %s", reply.c_str());
+            logf("A (%s): %s", lang_name(voice_for(reply)).c_str(), reply.c_str());
             with_status([&](Status & x) { x.last_answer = reply; x.last_answer_at = now_s(); ++x.n_answers; });
             server_down = false;
             ++turns; last_turn = std::chrono::steady_clock::now();
@@ -1062,6 +1119,7 @@ void Assistant::stop() {
     p_->stop_ = true;
     {
         std::lock_guard<std::mutex> lk(p_->rt_mu);
+        p_->cancel_external_ = true;
         if (p_->cli) p_->cli->request_cancel();
         if (p_->speaker) p_->speaker->cancel_pending();
     }

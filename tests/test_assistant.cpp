@@ -178,6 +178,18 @@ int main() {
     CHECK(guess_language("Qual é a previsão do tempo para hoje?") == "pt");
     CHECK(guess_language("What is the weather like today?") == "en");
     CHECK(guess_language("xyz") == "en");
+    // detect_language: the voice follows the text (rule 6) and a wrong-language answer is caught (rule 5)
+    CHECK(detect_language("Conte até três.") == "pt");                                   // accents + numbers (the dashboard ask that came out en before)
+    CHECK(detect_language("Um, dois, três.") == "pt");
+    CHECK(detect_language("São onze e cinquenta e dois da manhã.") == "pt");
+    CHECK(detect_language("Vou consultar a ferramenta de data e hora.") == "pt");
+    CHECK(detect_language("Hoje é sábado, quinze de novembro.") == "pt");
+    CHECK(detect_language("Today is Saturday, November fifteenth, twenty twenty-six.") == "en");
+    CHECK(detect_language("Let me check the web.") == "en");
+    CHECK(detect_language("What day is it today?") == "en");
+    CHECK(detect_language("It is eleven fifty in the morning.") == "en");
+    CHECK(detect_language("xyz") == "" && detect_language("") == "" && detect_language("42") == "");   // no evidence
+    CHECK(detect_language("ok") == "" && detect_language("no") == "");                               // words both languages use count for neither
 
     // --- /proc/asound/pcm: the AI box (HDMI-only card 0, analog card 1 with capture) ---
     {

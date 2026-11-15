@@ -85,13 +85,22 @@ levels, every transcript the wake model heard, and timings.
    comes back with the text. An empty transcript gives a double beep.
 4. **Answer.** `/v1/chat/completions` on this server over loopback
    (`endpoint` empty), streaming, with the built-in system prompt (short,
-   same language, no lists, no reasoning, announce tools, never cite
+   same language — enforced: the turn's language (whisper's detection, or
+   the text's own words for a written question, or `[ASSISTANT] language`
+   when forced) is written into the prompt every turn, and the first
+   sentence of the answer is checked before a word is spoken; an answer
+   in the other language is cancelled and asked once more with the
+   language spelled out — no lists, no reasoning, announce tools, never cite
    sources) plus an **internal clock** line with the current local date
    and time, refreshed every turn, so date and time questions need no
    tool; and `chat_template_kwargs.enable_thinking=false`. Tools run
    inside the assistant exactly like in `easyai-cli`: `datetime`, `web`,
    and any `EASYAI-*.tools` manifests under `external_tools`.
-5. **Voice.** Each complete sentence goes to the server's Kokoro
+5. **Voice.** Each complete sentence is spoken with the voice of its own
+   language (`pm_alex` for Portuguese text, `am_michael` for English,
+   decided from the sentence's words and accents, the question's language
+   only when the text gives no clue), so a mixed answer switches voice
+   mid-way and the English voice never reads Portuguese. Each sentence goes to the server's Kokoro
    in-process (or `tts_endpoint`, or a local engine) and is played while
    the next one is still being generated. The microphone is muted until
    playback ends plus 300 ms.

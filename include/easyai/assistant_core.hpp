@@ -118,7 +118,17 @@ private:
 constexpr int kMinQuestionWords = 2;
 bool looks_like_question(const std::string & transcript);
 
-// "pt" or "en" from common function words; "en" when undecided.
+// Language of a text: "pt" or "en", "" when undecided (no evidence or a tie).
+// Accented letters that only Portuguese uses (ã õ ç á é í ó ú â ê ô à) weigh
+// twice, then the function words of each language are counted; words that
+// exist in both (a, me, no, do, as) count for neither. Used on the question
+// (when whisper gave no language), on the first sentence of an answer (the
+// model must answer in the question's language — a mismatch is asked again,
+// rule 5) and on every sentence before it is spoken (the voice follows the
+// text, rule 6).
+std::string detect_language(const std::string & text);
+// detect_language(), "en" when undecided (the old contract, kept for callers
+// that need an answer).
 std::string guess_language(const std::string & text);
 
 // count beeps of kBeepHz/kBeepMs with kBeepGapMs gaps, PCM16 at rate_hz.

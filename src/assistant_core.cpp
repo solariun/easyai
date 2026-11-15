@@ -37,10 +37,42 @@ const char * kEasyaiAliases[] = {"iziai", "isiai", "isia", "ziai", "zia", "siai"
 // Names whose spelling misleads the phonemizer: how to write them for the voice.
 struct SpokenName { const char * name, * en, * pt; };
 const SpokenName kSpokenNames[] = {{"easyai", "easy AI", "ísi ai"}};
-const char * kPtWords[] = {"que", "nao", "voce", "e", "de", "para", "com", "uma", "um", "isso", "esta", "como", "qual", "quem",
-                           "onde", "quando", "por", "me", "eu", "sim", "tudo", "bem", "obrigado", "hora", "hoje"};
-const char * kEnWords[] = {"the", "is", "what", "are", "you", "how", "and", "it", "to", "of", "a", "in", "that", "this",
-                           "time", "please", "can", "do", "me", "yes", "no", "today", "thanks", "who", "where"};
+// Function words of each language, normalized (accents folded). Words that
+// both languages use (a, me, no, do, as, um/hum, ok) are in neither list.
+const char * kPtWords[] = {"que", "nao", "voce", "voces", "e", "de", "da", "das", "dos", "para", "pra", "com", "sem", "uma", "um",
+                           "isso", "isto", "esse", "essa", "este", "esta", "aquele", "aquela", "como", "qual", "quais", "quem",
+                           "onde", "quando", "porque", "por", "pelo", "pela", "eu", "ele", "ela", "eles", "elas", "nos", "sim",
+                           "tudo", "bem", "obrigado", "obrigada", "hora", "horas", "hoje", "amanha", "ontem", "agora", "dia",
+                           "dias", "bom", "boa", "noite", "tarde", "manha", "muito", "muita", "mais", "menos", "tem", "ter",
+                           "ser", "sao", "foi", "estou", "esta", "estao", "pode", "posso", "favor", "aqui", "ali", "tambem",
+                           "ja", "ainda", "so", "ate", "dois", "duas", "tres", "quatro", "cinco", "seis", "sete", "oito", "nove",
+                           "dez", "conte", "conta", "diga", "fale", "quanto", "quantos", "quanta", "quantas", "previsao", "tempo",
+                           "clima", "seu", "sua", "meu", "minha", "nosso", "nossa", "sobre", "entre", "depois", "antes",
+                           "sempre", "nunca", "coisa", "pessoa", "gente", "vamos", "vou", "vai", "o", "os", "na", "nas",
+                           "ou", "mas", "porem", "entao", "assim", "aqui", "la", "deste", "desta", "neste", "nesta", "ola",
+                           "oi", "tchau", "sim", "certo", "claro", "pronto", "cinquenta", "quarenta", "trinta", "vinte",
+                           "cem", "mil", "onze", "doze", "meia", "segunda", "terca", "quarta", "quinta", "sexta", "sabado",
+                           "domingo", "janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho", "agosto", "setembro",
+                           "outubro", "novembro", "dezembro"};
+const char * kEnWords[] = {"the", "is", "are", "what", "you", "your", "how", "and", "it", "to", "of", "in", "that", "this",
+                           "these", "those", "time", "please", "can", "could", "does", "did", "yes", "today", "tomorrow",
+                           "yesterday", "thanks", "thank", "who", "where", "when", "why", "which", "with", "for", "on", "at",
+                           "from", "by", "about", "there", "here", "have", "has", "had", "will", "would", "should", "i", "we",
+                           "they", "he", "she", "my", "our", "their", "not", "be", "was", "were", "one", "two", "three",
+                           "four", "five", "six", "seven", "eight", "nine", "ten", "tell", "say", "count", "now", "day", "days",
+                           "morning", "night", "evening", "good", "hello", "hi", "weather", "like", "know", "want", "need",
+                           "am", "pm", "hour", "hours", "minute", "minutes", "let", "check", "web", "something", "anything",
+                           "nothing", "sorry", "right", "left", "up", "down", "out", "into", "over", "than", "then", "so",
+                           "but", "or", "if", "just", "very", "much", "many", "more", "less", "fifty", "forty", "thirty",
+                           "twenty", "hundred", "thousand", "eleven", "twelve", "half", "monday", "tuesday", "wednesday",
+                           "thursday", "friday", "saturday", "sunday", "january", "february", "march", "april", "may",
+                           "june", "july", "august", "september", "october", "november", "december"};
+
+// Letters only Portuguese writes (UTF-8); each one is strong evidence.
+const char * kPtAccents[] = {"\xc3\xa3", "\xc3\xb5", "\xc3\xa7", "\xc3\xa1", "\xc3\xa9", "\xc3\xad", "\xc3\xb3", "\xc3\xba",
+                             "\xc3\xa2", "\xc3\xaa", "\xc3\xb4", "\xc3\xa0",
+                             "\xc3\x83", "\xc3\x95", "\xc3\x87", "\xc3\x81", "\xc3\x89", "\xc3\x8d", "\xc3\x93", "\xc3\x9a",
+                             "\xc3\x82", "\xc3\x8a", "\xc3\x94", "\xc3\x80"};
 
 std::vector<std::string> words(const std::string & s) {
     std::vector<std::string> out; std::stringstream ss(s); std::string w;
@@ -285,13 +317,23 @@ bool looks_like_question(const std::string & transcript) {
     return n >= kMinQuestionWords;
 }
 
-std::string guess_language(const std::string & text) {
+std::string detect_language(const std::string & text) {
     int pt = 0, en = 0;
+    for (const char * a : kPtAccents) {
+        const std::string acc(a);
+        for (std::size_t pos = text.find(acc); pos != std::string::npos; pos = text.find(acc, pos + acc.size())) pt += 2;
+    }
     for (const auto & w : words(normalize_text(text))) {
         for (const char * p : kPtWords) if (w == p) { ++pt; break; }
         for (const char * p : kEnWords) if (w == p) { ++en; break; }
     }
+    if (pt == en) return "";
     return pt > en ? "pt" : "en";
+}
+
+std::string guess_language(const std::string & text) {
+    const std::string d = detect_language(text);
+    return d.empty() ? "en" : d;
 }
 
 std::vector<PcmDevice> parse_asound_pcm(const std::string & text) {

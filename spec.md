@@ -1876,7 +1876,26 @@ flowchart LR
    clock**: every turn the system prompt is re-set to the base prompt
    plus `clock_line()` — "Internal clock: Friday, 2026-10-17 14:32
    (-03)." from `localtime` — so "que horas são" is answered without a
-   tool and a long-running process never drifts. The request carries
+   tool and a long-running process never drifts. **The
+   language is enforced, not hoped for (2026-11-15, Gustavo: "match the
+   language it is speaking … imperative … enforce it").** The turn's
+   language is `pt` or `en`: whisper's detected language when the
+   question was spoken, `detect_language(question)` for a written one,
+   `[ASSISTANT] language` when forced; anything else counts as `en`
+   (Limits). Every turn the system prompt also carries
+   `language_line(lang)` — "Idioma desta resposta: português do Brasil.
+   Responda somente em português…" / "Language of this answer: English.
+   Answer only in English…". The first complete sentence of the stream
+   (or the whole answer when it is shorter than one sentence) goes through
+   `detect_language` before anything is spoken: a confident other language
+   cancels the attempt (`Client::request_cancel`), the conversation is
+   rolled back to `dump_history()` taken before the turn, and the question
+   is asked once more with `language_nudge(lang)` appended ("(Responda
+   somente em português do Brasil.)" / "(Answer only in English.)"), logged
+   as "answer came in English to a question in Portuguese — asking again".
+   The retry is spoken whatever it brings (its sentences still get the
+   matching voice, rule 6). A cancel that came from `stop()` or a
+   reconfiguration is never retried. The request carries
    `chat_template_kwargs: {"enable_thinking": false}` and
    `reasoning_effort: "low"`; a server that ignores them still works.
    Tools: `[ASSISTANT] tools` (csv, default `datetime,web`) plus
@@ -1899,7 +1918,16 @@ flowchart LR
    auto|server|kokoro|piper|espeak|say`: `auto` uses the server's voice
    when it answers, else local Kokoro when `kokoro_model` / `kokoro_voices`
    are set, else `piper` if `[ASSISTANT] piper` is set, else `say` on
-   macOS, else nothing (espeak only when written by hand). Voice
+   macOS, else nothing (espeak only when written by hand). **The voice
+   follows the sentence, not the question** (2026-11-15): every sentence
+   is spoken with `voice_for(sentence)` = `detect_language(sentence)`,
+   the turn's language only when the text gives no evidence — so a
+   Portuguese answer to a question whisper took for English is still
+   read by `pm_alex`, and a mixed answer switches voice per sentence.
+   `detect_language` (assistant_core) weighs the letters only Portuguese
+   writes (ã õ ç á é í ó ú â ê ô à) twice and counts the function words of
+   each language; words both use (a, me, no, do, as, ok) count for
+   neither; a tie is "" (undecided). Voice
    per language: `voice_pt`, `voice_en` (server: `pt`, `en` voice ids;
    `say`: `Eddy (Portuguese (Brazil))`, `Daniel`; piper: paths of the
    `.onnx` voices). Capture is muted from the first sentence until
@@ -2382,6 +2410,21 @@ flowchart LR
   running is a stale copy (rule 16). Rejected: keeping espeak as a
   last-resort fallback (one robotic sentence undoes the impression the
   natural voice makes; silence plus a log line is the honest failure).
+- **Answer language enforced in code, voice chosen per sentence**
+  (Gustavo, 2026-11-15: "change the assistant part to match the language
+  it is speaking, it is imperative … enforce it and make it happen"). The
+  system prompt alone ("same language as the question") is a request the
+  model may ignore, and the voice used to follow the question: a
+  Portuguese answer to "Conte até três" (which the old word-list guess
+  took for English) was read by the English voice. Now the language is
+  decided before the turn and written into the prompt, the first sentence
+  is checked before it is spoken and a wrong one costs one silent retry
+  (~3 s on the box) instead of a wrong-language answer, and each sentence
+  picks its own voice. Rejected: translating a wrong-language answer
+  (another generation, drifts from what the model said), a language
+  model for detection (two languages, function words and accents are
+  enough and cost nothing), refusing to speak after a failed retry (an
+  answer in the wrong language with the right voice beats silence).
 
 ### Proof (2026-10-16, macOS; Linux box pending Gustavo's install)
 
@@ -2465,6 +2508,21 @@ flowchart LR
 - Installer: `bash -n`, `--help` prints the whole header, the INI
   migration block run with a stubbed `sudo` inserts `enabled = on` once
   after `[ASSISTANT]` (idempotent) and creates the section when absent.
+- Language enforcement (2026-11-15, dashboard `ask` through the box's own
+  model, Gemma 4 26B): "Conte até três." → `Q (pt)`, "Um, dois, três.",
+  Portuguese voice (before this change the word-list guess said `en` and
+  the English voice read it); "Que dia é hoje e que horas são?" → two
+  Portuguese sentences, each with the Portuguese voice; "What day is it
+  today and what time is it?" → English, English voice; "Me explique em
+  uma frase o que é machine learning." → Portuguese despite the English
+  term; `language = pt` + "What is the capital of France?" → "A capital
+  da França é Paris."; `language = en` + "Qual é a capital da Alemanha?"
+  → the model answered in Portuguese, the gate cancelled it unspoken,
+  "answer came in Portuguese to a question in English — asking again",
+  retry "The capital of Germany is Berlin." in the English voice (5.3 s
+  for the two attempts, 2.6–5.4 s for the single ones). `detect_language`
+  checks in `tests/test_assistant.cpp` (eleven sentences, three
+  undecided).
 
 ### Limits
 
