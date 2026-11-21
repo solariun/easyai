@@ -1471,6 +1471,19 @@ flowchart LR
    (2026-10-12). `--llama-ref <sha|tag|latest>` / `--whisper-ref …` override;
    `latest` means floating upstream main. A port to a newer llama.cpp
    updates both the code and these two defaults in the same commit.
+6. CI builds what the installer builds (2026-11-21). Every llama.cpp clone
+   in `.github/workflows/` (build.yml and release.yml, three jobs each)
+   runs `scripts/ci_clone_llama.sh`, which reads the 40-hex `llama_ref`
+   from `install_easyai_server.sh` and fetches exactly that commit
+   (`git fetch --depth 1 <url> <sha>`). The pin has one home; no workflow
+   clones a floating branch. `tests/test_installer.sh` fails on an
+   unpinned `git clone … llama.cpp` in a workflow or a missing script call.
+   Why: CI cloned floating main and went red on all three Linux jobs from
+   `1d43d60` on — upstream changed `common_get_device_memory_data()` to a
+   path list while easyai is pinned at `fd55cb98` (b11658+1), so CI was
+   testing a combination no install builds. Verified: the script fetches
+   `fd55cb98…` in 6 s, and a clean `git archive HEAD` copy configures and
+   builds with CI's exact commands against it.
 
 **Decisions.** Pinning in the installer rather than vendoring: a submodule
 or vendored copy would double the repository size and still need the same

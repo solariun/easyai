@@ -114,4 +114,13 @@ name="no do_lemonade switch";       check test "$(grep -c 'do_lemonade' "$script
 # Old command lines still run: the two flags are accepted and ignored under set -euo pipefail.
 awk '/^while \[\[ \$# -gt 0 \]\]; do$/{p=1} p{print} p&&/^done$/{exit}' "$script" > "$tmpd/argloop.sh"
 name="--no-lemonade / --with-lemonade accepted"; check bash -c 'set -euo pipefail; f="$1"; set -- --no-lemonade --with-lemonade; source "$f" 2>/dev/null; test $# -eq 0' _ "$tmpd/argloop.sh"
+
+# ---- CI builds the installer's pinned llama.cpp (2026-11-21) ---------------
+wf="$here/../.github/workflows"
+ci_clone="$here/../scripts/ci_clone_llama.sh"
+name="installer pins a 40-hex llama_ref"; check test "$(grep -cE '^llama_ref="[0-9a-f]{40}"' "$script")" = 1
+name="ci_clone_llama.sh reads that pin"; check test "$(sed -n 's/^llama_ref="\([0-9a-f]\{40\}\)".*/\1/p' "$script" | head -1)" = "$(grep -oE '^llama_ref="[0-9a-f]{40}"' "$script" | grep -oE '[0-9a-f]{40}')"
+name="ci_clone_llama.sh parses";       check bash -n "$ci_clone"
+name="no unpinned llama.cpp clone in CI"; check test "$(grep -hE 'git clone .*llama\.cpp' "$wf"/*.yml | wc -l)" = 0
+name="every CI job uses the pinned clone"; check test "$(grep -h 'bash scripts/ci_clone_llama.sh ../llama.cpp' "$wf"/*.yml | wc -l)" = 6
 exit $fail

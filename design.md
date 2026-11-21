@@ -2066,6 +2066,14 @@ Things to watch:
 The recommended workflow is to pin both `easyai/` and `llama.cpp/` as
 git submodules in your application repo so an upgrade is a single commit.
 
+easyai itself pins llama.cpp in one place: `llama_ref` in
+`scripts/install_easyai_server.sh`. The installer checks out that commit,
+and since 2026-11-21 so do CI and the release builds
+(`scripts/ci_clone_llama.sh`) — before, CI cloned floating main and broke
+on an upstream signature change (`common_get_device_memory_data`) that no
+install ever built. A port to a newer llama.cpp bumps `llama_ref` and the
+code in the same commit.
+
 ---
 
 ## 10. Stack-overflow audit

@@ -12,8 +12,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone llama.cpp
-        run: git clone --depth 1 https://github.com/ggml-org/llama.cpp.git ../llama.cpp
+      - name: Clone llama.cpp (the installer's pinned llama_ref)
+        run: bash scripts/ci_clone_llama.sh ../llama.cpp
 
       - name: Install dependencies
         run: |
@@ -41,8 +41,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone llama.cpp
-        run: git clone --depth 1 https://github.com/ggml-org/llama.cpp.git ../llama.cpp
+      - name: Clone llama.cpp (the installer's pinned llama_ref)
+        run: bash scripts/ci_clone_llama.sh ../llama.cpp
 
       - name: Install cross-compiler
         run: |
@@ -74,8 +74,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone llama.cpp
-        run: git clone --depth 1 https://github.com/ggml-org/llama.cpp.git ../llama.cpp
+      - name: Clone llama.cpp (the installer's pinned llama_ref)
+        run: bash scripts/ci_clone_llama.sh ../llama.cpp
 
       - name: Install cross-compiler
         run: |
