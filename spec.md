@@ -2531,3 +2531,250 @@ flowchart LR
   produces bursts that cost a tiny-whisper run each (~0.3 s CPU).
 - Languages: pt and en voices ship; whisper detects others and the
   answer is spoken with the `en` voice.
+
+## Disk-paged MoE experts — models larger than memory (AUTHORITATIVE — 2026-11-20)
+
+Gustavo, 2026-11-20: "change the easyai code to be able to load models too
+big to fit on the memory and page it from the disk … today we rely entirely
+on full on GPU, I want it also work by having a page cache for hot expert
+processing." Until this date every model was loaded whole into GPU memory
+(`ngl = 99`, `mlock = on`, `no_mmap = on` in the installed INI), so a GGUF
+larger than memory did not load. Code: `include/easyai/paging.hpp`,
+`src/paging.cpp`, `Engine::Impl::plan_memory()` in `src/engine.cpp`,
+`services/server.cpp`. Test: `tests/test_paging.cpp` (ctest `paging`).
+
+Three tiers, one per kind of memory:
+
+| Tier | Holds | Managed by |
+|------|-------|------------|
+| disk — the GGUF, mmap'd | every routed expert | the kernel (page faults) + `ExpertPager` read-ahead |
+| RAM page cache | recently read experts, reclaimable | the kernel; `ExpertPager` decides what to read ahead |
+| GPU hot-expert cache | the experts used in generation, LRU | llama.cpp `moe_cache_size` (upstream, experimental) — discrete GPUs; off by default on an iGPU (rule 4) |
+
+### Rules
+
+1. `memory_mode = auto | gpu | paged` — `[ENGINE] memory_mode`,
+   `--memory-mode`, `Engine::memory_mode()`. Default `auto`. Aliases:
+   `full`/`vram` → gpu, `disk`/`mmap` → paged; anything else is a startup
+   error (exit 1).
+2. `auto` reads the tensor table of the GGUF and of every split
+   (`-0000k-of-0000N`) without loading it. Budget = RAM − max(4 GiB, RAM/16)
+   on an iGPU / unified-memory or CPU-only machine, VRAM − max(512 MiB,
+   VRAM/32) on a discrete GPU. Tensors ≤ budget → `gpu`, which is the
+   historical load, byte for byte (`mlock`, `no_mmap`, `ngl` exactly as
+   configured). Otherwise → `paged`. An unreadable footprint → `gpu`.
+   When `auto` chose `gpu` and that load fails (the weights fit but the KV
+   cache of the configured context or the compute buffers do not), the
+   load is retried once as `paged` with the reason "auto: the full-GPU
+   load failed … — paged" — the server never comes up model-less for a
+   model that pages.
+   On ai-pro (91.2 GiB RAM) the budget is 85.5 GiB, so Ornith-1.5-122B
+   (≈ 75 GiB of tensors) keeps loading exactly as before.
+3. `paged`, MoE model: the GGUF is mmap'd (`load_mode = mmap`, nothing
+   pinned; an INI `mlock`/`no_mmap` is ignored and the reason says so);
+   the routed experts (`blk.N.ffn_{gate,up,down,gate_up}_exps`, llama.cpp's
+   `LLM_FFN_EXPS_REGEX`) get the CPU buffer type, i.e. zero-copy views of
+   the mapping; CPU weight repacking is off (`no_extra_bufts`), because
+   `CPU_REPACK` would copy every expert into anonymous RAM; llama.cpp's
+   `fit_params` is off; `ngl` stays as configured, so with 99 every
+   attention / shared-expert / embedding tensor and the KV cache are on the
+   GPU; `n_ubatch` is raised to min(`batch`, 2048) because each prompt
+   ubatch touches almost every expert and so streams the missing ones from
+   disk once — fewer, larger ubatches mean fewer passes.
+4. GPU hot-expert cache = llama.cpp's `moe_cache_size` (an LRU of single
+   experts in device memory, used for ubatches of ≤ 32 tokens, i.e.
+   generation and speculative verification). `[ENGINE] expert_cache =
+   auto | off | <MiB>`, `--expert-cache`, `Engine::expert_cache_mb()`
+   (-1 auto, 0 off). `auto` on unified memory (iGPU / APU, ai-pro) is
+   **off**: the CPU computes the routed experts straight from the page
+   cache (measured below). `auto` on a discrete GPU measures what the
+   dense weights + KV + compute buffers need with a no-alloc dry run
+   (`common_get_device_memory_data`) and gives the rest of the free VRAM
+   minus 1 GiB to the cache, capped at the expert bytes; under 1 GiB →
+   off. An explicit size is used as given on either kind of GPU. If the
+   context cannot be created with the cache, the load is retried once
+   without it and the reason says "GPU expert cache did not fit — off".
+5. `ExpertPager` — the RAM tier. After the load it reserves one graph of
+   64 tokens with every token an output (`llama_graph_reserve`, so no
+   layer is trimmed to one row and none uses the cache banks), and reads
+   each MoE layer's host expert tensors from its `MUL_MAT_ID` nodes
+   (a node already rewritten to a device copy `"<backend>#<name>#<n>"` is
+   resolved back to the leaf `<name>`). Its graph eval callback asks only
+   for the `ffn_moe_topk-<layer>` nodes of those layers, reads the
+   selected experts, and:
+   - replays llama.cpp's LRU (same slot count per group of layers with the
+     same expert layout: largest n with Σ pad(nb2·(n+1), alignment) ≤
+     budget·group_share; same touch/evict order) to know which experts
+     the GPU cache will upload from host memory; for a large ubatch every
+     routed expert the cache does not hold;
+   - probes those experts' bytes in the page cache with
+     `preadv2(RWF_NOWAIT)` of one byte per sampled page of the GGUF file
+     (resolved through `/proc/self/maps`), and for the ones not cached
+     issues `MADV_WILLNEED` on the expert's slice — one large asynchronous
+     read instead of 128 KiB page-fault read-arounds;
+   - counts routed / GPU hits / RAM hits / disk reads / bytes read ahead.
+   `[ENGINE] no_expert_prefetch = on` (`--no-expert-prefetch`,
+   `Engine::expert_prefetch(false)`) removes the pager and its callback
+   entirely (no per-layer sync).
+6. `paged`, dense model: whole layers on the GPU, n = budget / (tensors /
+   (n_layer + 1)) − 1, with the budget cut to ¾ on unified memory so the
+   page cache can feed the rest; a smaller `ngl` from the user wins; the
+   rest of the layers run on the CPU from the mapping.
+7. The MTP and draft-model contexts get no expert cache and no callback;
+   the draft model never inherits the target's tensor overrides.
+8. A hot-swap (`Engine::reload`) re-plans from the user's settings every
+   time: nothing of a previous paged load (overrides, cache, ubatch,
+   callback) carries over to the next model.
+9. Visible everywhere: one `[easyai] memory: mode=… (reason) weights=…
+   experts=… gpu_expert_cache=… ngl=…` line at load, an `expert pager on
+   N MoE layers, GPU cache mirror M expert slots` line, a `memory:` line in
+   the server banner, `/health` → `memory {mode, requested, reason,
+   weights_bytes, experts_bytes, ram_bytes, gpu_layers,
+   gpu_expert_cache_bytes, expert_prefetch, experts {layers,
+   gpu_cache_slots, ubatches, routed, gpu_hits, ram_hits, disk_reads,
+   prefetch_bytes, gpu_hit_rate, ram_hit_rate, disk_rate}}`,
+   `/models/api/status` → `model.memory` and `parameters.memory_mode /
+   expert_cache / expert_prefetch`, `/metrics` →
+   `easyai_experts_routed_total`, `easyai_experts_served_total{tier=gpu|
+   ram|disk}`, `easyai_experts_prefetch_bytes_total`, and the periodic
+   METRICS line ends with `experts: gpu=…% ram=…% disk=…% read_ahead=…`.
+   `EASYAI_PAGING_DEBUG=1` prints every MoE matmul the pager looked at.
+10. Every flag is in the INI (2026-11-21, Gustavo: "be sure all the new
+    command line also appear in the ini"). `memory_mode`, `expert_cache`
+    and `no_expert_prefetch` are `kFlags()` rows (`[ENGINE]`, so also valid
+    in a `[MODEL_<pattern>]` profile; CLI > `[MODEL_*]` > `[ENGINE]`). They
+    are written in the installer's INI template (`memory_mode = auto`,
+    `expert_cache = auto`, `#no_expert_prefetch = on`), in
+    `resources/easyai.ini.example` (`[ENGINE]` with comments and the
+    `[MODEL_TEMPLATE]` reference) and in `easyai-server.md`. An INI written
+    before this change gets them from `install_easyai_server.sh --upgrade`:
+    `ini_add_engine_keys` adds each key that `[ENGINE]` lacks (commented or
+    not) once, right under the `[ENGINE]` header (a new `[ENGINE]` at the end
+    when there is none), at its default — behaviour unchanged — and never
+    changes a value that is there; a key present only in a `[MODEL_*]`
+    profile still gets its `[ENGINE]` line. ctest `ini_keys`
+    (`tests/test_ini_keys.sh`) fails when any `kFlags()` row with a CLI flag
+    and an INI key is missing from its section of
+    `resources/easyai.ini.example` or from `easyai-server.md`.
+
+### Decisions
+
+- **Reuse llama.cpp's GPU expert cache; do not write a second one.** Only
+  the graph builder can point a matmul at a device copy of an expert, and
+  the pinned checkout (b11658) already ships `llama_moe_cache` with exactly
+  that. easyai owns the decision (on/off/size) and the tier below it.
+- **No GPU expert cache by default on unified memory.** Measured on
+  ai-pro (Proof below): with the experts in the page cache the CPU
+  generates at 14 tok/s; a 2 GiB GPU cache drops that to 8.9 and an
+  8 GiB one to 9.5 with slower prompts, because every miss is a
+  single-threaded copy into GTT plus a per-layer sync, and the cache's
+  RAM comes out of the page cache (disk reads rose from 10 % to 19–25 %).
+  On a discrete GPU the trade is the opposite (VRAM is separate and much
+  faster than PCIe), so `auto` keeps the leftover VRAM there — not
+  measured, there is no discrete card on ai-pro.
+- **No mlock-pinned "hot set" in RAM.** On ai-pro the GPU is an iGPU: its
+  cache already lives in RAM, so pinning a second copy of the same hot
+  experts spends the same bytes twice. The kernel's active list keeps
+  experts that are read repeatedly, and a GPU-cached expert is never read
+  from host memory again, so its page-cache copy ages out by itself.
+- **Mirror the LRU instead of reading ahead every routed expert.** An
+  expert the GPU already holds must not be read from disk; replaying the
+  same deterministic LRU tells which uploads will happen. Measured: the
+  mirror's slot count equals llama.cpp's own log line (below).
+- **`preadv2(RWF_NOWAIT)`, not `mincore()`.** Since Linux 5.0
+  (CVE-2019-5489) `mincore()` reports every page of a file mapping as
+  resident when the process may not write the file — the root-owned
+  Ornith GGUFs on ai-pro, and any test user. The first build used
+  `mincore()` and counted 100 % RAM hits while the disk was busy.
+- **`auto` never pages a model that fits.** Paging buys nothing for a
+  model that fits, and the live box must not change behaviour on upgrade.
+- **The load still reads the whole file once.** llama.cpp's
+  `init_mappings(true)` maps with `MAP_POPULATE`; the pinned checkout is
+  not patched, so a paged load costs one sequential read of the GGUF.
+- **The disk sets the speed.** ai-pro's Kingston OM8TAP4512K1 (PCIe 4 ×4)
+  reads data written two days earlier at 1.3–1.4 GB/s (16 parallel
+  streams: 1.39 GiB/s) but data written in October at 340–450 MB/s and
+  July data at ~250 MB/s (`dd iflag=direct`, 2026-11-20) — reads of aged
+  data degrade on this drive. Rewriting a GGUF (copy + rename) restores
+  the fresh speed; do that before paging a large model.
+
+### Proof (2026-11-20, ai-pro, Vulkan RADV 890M, live server running beside it)
+
+- `ctest -R paging`: names, mode parsing, the plan on ai-pro's numbers
+  (80 GiB → gpu, 150 GiB → paged, request wins, discrete 24 GiB card,
+  dense split), cache sizing, slot arithmetic, the LRU against
+  llama.cpp's touch/evict order, `/proc/self/maps` resolution, the
+  `RWF_NOWAIT` probe seeing a `POSIX_FADV_DONTNEED` eviction, and the
+  pager fed by hand on an mmap'd temp file.
+- Qwen3.6-35B-A3B Q4_K_M (21.2 GB, 18.2 GiB of experts), `--memory-mode
+  paged --expert-cache 2048`, `--verbose`: llama.cpp printed `Vulkan0 MoE
+  cache size = 2045.27 MiB for 18600.00 MiB of host experts`, `20 layers,
+  q6_K: 562 slots`, `20 layers, q4_K: 562 slots`; easyai printed `expert
+  pager on 40 MoE layers, GPU cache mirror 1124 expert slots` (562 + 562).
+  The answers were coherent ("A CPU cache is a small, extremely fast
+  memory storage located close to the processor …").
+- Run under a 10–12 GiB memory cgroup and, separately, beside the live
+  server (≈ 15 GiB of page cache left): the experts paged —
+  `disk_reads` 79 % on a cold first prompt, 27 % in steady generation
+  with GPU hits at 51 %, 36.8 GB queued for read-ahead.
+- Benchmark, same model rewritten to a fresh file (`~/models`, 1.4 GB/s
+  reads), page cache evicted before each start, live server beside it
+  (≈ 15 GiB of page cache left for the 18.2 GiB of experts), 8K context,
+  three chat requests of ~200 tokens each on top of a 2.5K-token system
+  prompt (prompt t/s is the server's cumulative average):
+
+  | Config | Load | Prompt t/s | Gen t/s (1st → 3rd) | Experts served gpu / ram / disk (3rd) |
+  |--------|------|-----------|---------------------|----------------------------------------|
+  | A — GPU cache 2 GiB + read-ahead | 19 s | 73 → 79 | 8.2 → 8.9 | 55 / 29 / 16 % |
+  | B — GPU cache 2 GiB, no read-ahead | 19 s | 66 → 73 | 7.5 → 8.6 | (no pager) |
+  | C — no GPU cache + read-ahead | 18 s | 76 → 108 | 13.7 → 14.4 | 0 / 89 / 11 % |
+  | D — GPU cache 8 GiB + read-ahead | 21 s | 48 → 58 | 7.4 → 9.5 | 80 / 2 / 19 % |
+  | E — as C with 12 threads | 18 s | 83 → 101 | 13.9 → 14.2 | 0 / 91 / 9 % |
+
+  Read-ahead: +3–10 % (A vs B). No GPU cache on the iGPU: +60 % generation
+  (C vs A). The same 21 GB file in its July copy took 200–286 s to load
+  (aged-data reads, above).
+- Final build, defaults (`--memory-mode paged`, `expert_cache` auto) on a
+  second architecture, Gemma4-26B-A4B Q4_K_M (fused `ffn_gate_up_exps`):
+  `GPU expert cache off (unified memory: …)`, `expert pager on 30 MoE
+  layers`, a correct answer at 10.6 tok/s from the July file with 7.9 %
+  of experts from disk; `/metrics` → `easyai_experts_served_total{tier=
+  "ram"} 5828`, `{tier="disk"} 1223`; `/models/api/status` →
+  `parameters.memory_mode = paged`, `expert_cache = auto`. ctest 8/8.
+- A model four times larger than the memory left: Nex-N2.6 IQ1_M
+  (bartowski/Nex-N2.6-GGUF, `glm5-next`, 320.8 B total / ~18 B active,
+  three splits, 77.3 GiB of tensors, 70.2 GiB of experts, sha256-checked
+  fresh download), `--memory-mode paged` beside the live server with
+  ≈ 20 GiB of RAM free: `expert pager on 42 MoE layers`; "In two
+  sentences: why is the sky blue?" → a correct Rayleigh-scattering answer;
+  "Name three prime numbers greater than 100." → 101, 103, 107. Prompt
+  7.9–9.4 tok/s, generation 0.64–0.67 tok/s, 67–75 % of the routed
+  experts from disk. With ai-pro to itself the same file is under the
+  85.5 GiB budget and `auto` loads it whole.
+- Rule 10 (2026-11-21): `ini_keys` found eight flags missing from
+  `resources/easyai.ini.example` — the three of this section plus
+  `tls_cert`, `tls_key`, `data_dir`, `catalog_size`, `reasoning_effort`
+  (`frequency_penalty`, `split_mode` and the RoPE / YaRN keys were only in
+  the `[MODEL_TEMPLATE]` block; `[ENGINE]` now has them too); after the
+  fix 91 keys pass, and renaming `;tls_key` in the example fails the test.
+  `tests/test_installer.sh` runs the real `ini_add_engine_keys` on temp
+  INIs: an old `[ENGINE]` gets the three keys under its header with `ngl`
+  / `mlock` and a `[MODEL_Big] memory_mode = paged` left as they were; a
+  second run adds nothing and leaves the same bytes; `memory_mode = gpu` +
+  `;expert_cache = 4096` gets only `no_expert_prefetch`; a file without
+  `[ENGINE]` gets one. Run the way the installer runs it (`bash -c
+  "$(declare -f …)"`) the file keeps its 0640 mode. `easyai-server
+  --config` on the example with every new key uncommented loads without a
+  warning. ctest 9/9.
+
+### Limits
+
+- One GPU: with several devices the mirror is not exact (llama.cpp splits
+  the cache across them); read-ahead still works, a few experts may be
+  read that the GPU already holds.
+- Prompt processing of a model larger than memory streams the experts
+  that are not cached once per ubatch; long prompts are disk-bound.
+- The `/models` dashboard still scores fits for a fully resident model:
+  a MoE marked too big may run paged.
+- `MAP_POPULATE` at load (above). A model larger than RAM + the slow
+  aged-data reads of ai-pro's NVMe make the first load several minutes.

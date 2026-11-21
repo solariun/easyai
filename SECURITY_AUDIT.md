@@ -36,6 +36,7 @@ narrative record.
 | Installer hardening | [§20.4](#204-medium--installer-numeric-flags-flow-into-ini-via-heredoc-without-validation), [§20.5](#205-low--easyai-ini-bak-could-inherit-loose-permissions), [§22.3](#223-low--installer-non-numeric-knobs-flow-into-ini-without-shape-validation-fixed) |
 | Concurrency | [§10](#10-concurrency) |
 | Memory ownership | [§11](#11-memory--resource-ownership) |
+| Disk-paged MoE experts (`memory_mode`, `/proc/self/maps`, `preadv2`, installer INI upgrade) | [§26](#26-eleventh-pass--2026-11-20-disk-paged-moe-experts-memory_mode) |
 
 ---
 
@@ -2727,3 +2728,76 @@ expectation just needed to be loud.
 adding a new prompt-render codepath, a new HTTP boundary, or
 a new untrusted source that flows into `Tool::system_addendum`
 / `Config::system_appendix`.*
+
+---
+
+## 26. ELEVENTH PASS — 2026-11-20 (disk-paged MoE experts, `memory_mode`)
+
+New code: `src/paging.cpp` / `include/easyai/paging.hpp`
+(`easyai::paging`), `Engine::Impl::plan_memory()` in `src/engine.cpp`, three
+`[ENGINE]` flags in `services/server.cpp`, and `ini_add_engine_keys` in
+`scripts/install_easyai_server.sh` (2026-11-21). Spec: "Disk-paged MoE
+experts — models larger than memory". Audited at intro; no HIGH or MEDIUM
+finding.
+
+### 26.1 NEW SURFACE — operator settings only
+
+`memory_mode`, `expert_cache` and `no_expert_prefetch` come from the CLI or
+the INI (operator-controlled), never from a request. `memory_mode` is
+parsed against a closed list (unknown → startup error, exit 1);
+`expert_cache` accepts `auto` / `off` / a positive MiB count (anything else
+→ exit 1). No HTTP route changes them; a hot-swap from `/models` re-plans
+from the same operator values.
+
+### 26.2 NEW SURFACE — graph callback reads router output (INFO, bounded)
+
+The pager's `cb_eval` copies the `ffn_moe_topk-<layer>` tensor (expert ids
+the model computed) with `ggml_backend_tensor_get` into a buffer sized by
+`ggml_nbytes` of that tensor. Every id is checked `0 ≤ e < n_expert` (and
+against the per-layer arrays) before it indexes anything
+(`ExpertLru::cached`, `ExpertLru::plan`, `ExpertPager::observe`); an
+out-of-range id is skipped. The ids only choose which slice of the model's
+own mapping is read ahead, so a model producing odd ids can at worst cause
+extra reads of its own GGUF.
+
+### 26.3 NEW SURFACE — `/proc/self/maps` + read-only probe fds (INFO)
+
+`file_of_address()` parses `/proc/self/maps` with a fixed `sscanf` format
+(`%7s` for the perms field) and accepts only absolute paths; anonymous
+mappings and `" (deleted)"` files are rejected, so a GGUF renamed over
+after load is never re-opened by name. The matched files are opened
+`O_RDONLY | O_CLOEXEC` (no subprocess inherits them) and closed with the
+pager. Residency is probed with `preadv2(…, RWF_NOWAIT)` of one byte per
+sampled page into a stack byte that is discarded; read-ahead is
+`madvise(MADV_WILLNEED)` on page-aligned ranges inside the existing
+mapping. Nothing is written, nothing is pinned (`mlock` is not used in
+paged mode).
+
+### 26.4 INFO — `/health` and `/models/api/status` carry the memory plan
+
+`/health` (open by design, liveness probe) now includes `memory`: mode,
+the reason string, weight / expert / RAM byte counts, the GPU cache size
+and the expert-tier counters. It holds no path and no request content —
+the same class of host facts `/health` already exposed (backend, model id).
+Operators who treat RAM size as sensitive should keep `/health` behind
+the reverse proxy as §14 already recommends.
+
+### 26.5 NEW SURFACE — installer `ini_add_engine_keys` (2026-11-21)
+
+Runs as root on `--upgrade` via `sudo bash -c "$(declare -f
+ini_add_engine_keys); ini_add_engine_keys \"$1\"" _ "$ini_file"`: the
+INI path is passed as a positional argument, never spliced into the
+command string. The helper only appends fixed literal lines (no operator or
+network value), writes through `mktemp` (O_EXCL, 0600) and then `cat tmp >
+ini`, which keeps the file's inode, owner and `0640 root:easyai` mode (the
+INI may carry `[MCP_USER]` tokens, cf. §20.5). Existing values are never
+rewritten. Tested in `tests/test_installer.sh` on temp files.
+
+### 26.6 Accepted residual risk
+
+- `EASYAI_PAGING_DEBUG` (environment, operator-only) prints tensor names
+  of the loaded model to stderr; no request data.
+- All of §25.6 carried forward.
+
+*Re-run when the pager starts acting on anything other than the model's
+own mapping, or when a request can choose the memory mode.*

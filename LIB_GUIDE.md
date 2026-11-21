@@ -264,6 +264,34 @@ be.chat("hello", [](const std::string & p){ std::fputs(p.c_str(), stdout); });
 `extra_tools` + `system_appendix` were added at the same time as
 `Session` so the lower-level Backend path stays at parity.
 
+### Models larger than memory: `Engine::memory_mode`
+
+`Engine` decides at `load()` where the weights live (header:
+`easyai/paging.hpp`, contract: spec.md "Disk-paged MoE experts"):
+
+```cpp
+easyai::Engine e;
+e.model(path).gpu_layers(99)
+ .memory_mode("auto")     // "gpu" (all in GPU memory) | "paged" | "auto"
+ .expert_cache_mb(-1)     // GPU hot-expert cache: -1 auto (off on iGPUs), 0 off, N MiB
+ .expert_prefetch(true);  // read routed experts ahead from disk
+if (!e.load()) return 1;
+const auto m = e.memory_info();
+// m.mode "gpu"|"paged", m.reason, m.model_bytes, m.expert_bytes,
+// m.gpu_cache_bytes, m.pager.{routed, gpu_hits, ram_hits, disk_reads, prefetch_bytes}
+```
+
+`paged` keeps a MoE model's routed experts in the mmap'd GGUF (read on
+demand), everything else on the GPU, and an `ExpertPager` that reads
+ahead the routed experts that are not in RAM. On a discrete GPU a VRAM
+LRU of hot experts (llama.cpp's MoE cache) sits on top; on an iGPU
+`expert_cache_mb(-1)` leaves it off and the CPU computes the experts from
+the page cache. `auto` pages only when the tensors exceed RAM (iGPU
+/ CPU-only) or VRAM (discrete GPU) minus a reserve, so a model that fits
+loads exactly as before. `reload()` re-plans for each model.
+`memory_info()` is safe to call from another thread while the engine
+generates.
+
 ### Voice: `easyai::Stt`
 
 Speech-to-text over whisper.cpp, in the same library. Input is 16 kHz

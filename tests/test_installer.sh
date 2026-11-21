@@ -57,4 +57,35 @@ name="model ownership pass";    check grep -q 'chown -h -c "\$service_user":"\$s
 name="migrate name easy";       check grep -q '"\$ini_asst_name" == "easy"' "$script"
 name="migrate wake tiny";       check grep -q 'ggml-tiny\\.bin' "$script"
 name="--assistant-name on upgrade"; check grep -q 'assistant_name_set=1' "$script"
+
+# ---- models larger than memory: the keys are in the INI (2026-11-21) -------
+name="INI template memory_mode";  check test "$(ini_template | grep -cE '^memory_mode *= *auto$')" = 1
+name="INI template expert_cache"; check test "$(ini_template | grep -cE '^expert_cache *= *auto$')" = 1
+name="INI template no_expert_prefetch"; check test "$(ini_template | grep -cE '^#no_expert_prefetch *= *on$')" = 1
+name="upgrade calls ini_add_engine_keys"; check grep -q 'declare -f ini_add_engine_keys); ini_add_engine_keys' "$script"
+# Run the real helper (extracted from the installer) on temp INIs.
+eval "$(awk '/^ini_add_engine_keys\(\) \{/{p=1} p{print} p&&/^}/{exit}' "$script")"
+tmpd="$(mktemp -d)"; trap 'rm -rf "$tmpd"' EXIT
+engine_block() { awk '/^[[:space:]]*\[/{s=($0 ~ /^[[:space:]]*\[ENGINE\]/); next} s' "$1"; }
+# 1. an old INI: [ENGINE] without the keys, a [MODEL_*] that has one
+printf '[SERVER]\nport = 80\n\n[ENGINE]\nngl = 99\nmlock = on\n\n[MODEL_Big]\nmemory_mode = paged\n' > "$tmpd/a.ini"
+out="$(ini_add_engine_keys "$tmpd/a.ini")"
+name="upgrade adds the three keys"; check test "$out" = "memory_mode expert_cache no_expert_prefetch"
+name="added inside [ENGINE]";       check test "$(engine_block "$tmpd/a.ini" | grep -cE '^memory_mode *= *auto$|^expert_cache *= *auto$|^#no_expert_prefetch *= *on$')" = 3
+name="[ENGINE] values kept";        check test "$(engine_block "$tmpd/a.ini" | grep -cE '^ngl = 99$|^mlock = on$')" = 2
+name="[MODEL_*] untouched";         check grep -q '^memory_mode = paged$' "$tmpd/a.ini"
+cp "$tmpd/a.ini" "$tmpd/a2.ini"; out="$(ini_add_engine_keys "$tmpd/a.ini")"
+name="second upgrade adds nothing"; check test -z "$out"
+name="second upgrade same bytes";   check cmp -s "$tmpd/a.ini" "$tmpd/a2.ini"
+# 2. an operator's own value (and a commented key) is never touched
+printf '[ENGINE] ; tuned\nmemory_mode = gpu\n;expert_cache = 4096\n' > "$tmpd/b.ini"
+out="$(ini_add_engine_keys "$tmpd/b.ini")"
+name="only the missing key added";  check test "$out" = "no_expert_prefetch"
+name="operator value kept";         check test "$(grep -c '^memory_mode = gpu$' "$tmpd/b.ini")" = 1
+name="no second memory_mode";       check test "$(grep -cE '^[#;]?memory_mode' "$tmpd/b.ini")" = 1
+# 3. no [ENGINE] at all → one is appended
+printf '[SERVER]\nport = 80\n' > "$tmpd/c.ini"
+ini_add_engine_keys "$tmpd/c.ini" >/dev/null
+name="[ENGINE] appended";           check test "$(grep -c '^\[ENGINE\]$' "$tmpd/c.ini")" = 1
+name="appended keys in [ENGINE]";   check test "$(engine_block "$tmpd/c.ini" | grep -cE '^memory_mode|^expert_cache|^#no_expert_prefetch')" = 3
 exit $fail

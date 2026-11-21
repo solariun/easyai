@@ -381,7 +381,7 @@ Sections:
 | Section | Purpose | Status |
 | --- | --- | --- |
 | `[SERVER]` | HTTP layer + paths + tool gating + MCP auth posture | active |
-| `[ENGINE]` | Model loading + inference tunables (context, ngl, KV, mlock, flash-attn, sampling, RoPE, split mode) | active |
+| `[ENGINE]` | Model loading + inference tunables (context, ngl, KV, mlock, memory_mode / expert_cache, flash-attn, sampling, RoPE, split mode) | active |
 | `[MODEL_<pattern>]` | Per-model ENGINE overrides — same keys as `[ENGINE]`, matched by model filename substring | active |
 | `[STT]` | Voice transcription — whisper `model`, `language`, `threads` (see `easyai-server.md` §1) | active |
 | `[TTS]` | Text-to-speech behind `POST /v1/audio/speech` and the assistant's voice — `engine`, `kokoro_model`, `kokoro_voices`, `kokoro_voice_pt` / `_en`, `onnxruntime`, piper fallback (see `easyai-server.md` §1) | active |
@@ -676,8 +676,8 @@ Metal, Vulkan ≥ recent). Required for some KV-quant combinations.
 
 Offload up to 99 layers to the GPU (effectively "all of them" for any
 current model). The installer now pins this instead of auto-fit
-(`-1`). If the model doesn't fit in VRAM, llama.cpp falls back to
-partial offload at load time.
+(`-1`). A model larger than memory is handled by `memory_mode` (below),
+not by lowering `ngl`.
 
 ### `--mlock` and `--no-mmap`
 
@@ -688,6 +688,51 @@ all GPU backends.
 
 The drop-in's `LimitMEMLOCK=infinity` is what makes `mlock` actually
 work (the systemd default is too small).
+
+Both apply only while the model fits (`memory_mode = gpu`, or `auto`
+deciding so). A paged load ignores them and says so in its memory line.
+
+### `memory_mode` — models larger than RAM (2026-11-20)
+
+```ini
+[ENGINE]
+memory_mode  = auto     # auto | gpu | paged
+expert_cache = auto     # GPU hot-expert cache: auto (off on the iGPU) | off | <MiB>
+#no_expert_prefetch = on
+```
+
+The same keys are flags (`--memory-mode`, `--expert-cache`,
+`--no-expert-prefetch`) and work in a `[MODEL_<pattern>]` profile, e.g.
+`[MODEL_Nex-N2.6]` + `memory_mode = paged` to page one model only. A fresh
+install writes them into `/etc/easyai/easyai.ini`; `--upgrade` keeps the
+existing INI but adds the three keys under `[ENGINE]` once, at their
+defaults (the installer prints `migrating … added [ENGINE] memory_mode
+expert_cache no_expert_prefetch`), and never changes a value already
+there. Every key is listed in `resources/easyai.ini.example`.
+
+With `auto` (the default) nothing changes for a model that fits in
+RAM − max(4 GiB, RAM/16) — on ai-pro (91 GiB) that is 85.5 GiB, so the
+current Ornith-1.5-122B still loads whole and pinned. A bigger MoE GGUF
+loads `paged`: its routed experts stay in the mmap'd file under
+`/var/lib/easyai/models` and are read on demand, the rest of the model
+and the KV cache sit on the iGPU, the CPU computes the routed experts
+from the page cache (on the iGPU `expert_cache = auto` means no GPU
+expert cache — measured 60 % faster), and easyai reads ahead the experts
+about to be used. Raise `threads` only if the CPU, not the disk, is busy:
+12 threads gave the same 14 tok/s as 8 on ai-pro. The
+service user must be able to read every split of the GGUF (the installer
+sets `easyai:easyai` on the model directory). Check it with:
+
+```bash
+journalctl -u easyai-server -b | grep "\[easyai\] memory"
+curl -s http://localhost/health | jq .memory
+```
+
+Paging speed is the disk's speed. ai-pro's NVMe reads files written in
+the last days at ~1.4 GB/s but files written weeks earlier at
+0.25–0.45 GB/s, so refresh a big GGUF before paging it (as root, with the
+service stopped): `cp model.gguf model.gguf.new && mv model.gguf.new
+model.gguf && chown easyai:easyai model.gguf`.
 
 ### `RADV_PERFTEST=gpl` (AMD Radeon)
 

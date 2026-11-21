@@ -305,6 +305,40 @@ Webui title default also flips to `"Deep"`.
 ## 5. Recent commits (most recent first)
 
 ```
+2026-11-20/21 — models larger than memory: [ENGINE] memory_mode.
+             Operator ask: "load models too big to fit on the memory
+             and page it from the disk ... a page cache for hot expert
+             processing", then "be sure all the new command line also
+             appear in the ini" and "all md and document files MUST be
+             updated".
+
+  Code: include/easyai/paging.hpp + src/paging.cpp (easyai::paging —
+  GGUF footprint scan, auto/gpu/paged plan, ExpertLru mirror of
+  llama.cpp's moe_cache LRU, ExpertPager graph callback that reads
+  ffn_moe_topk-<layer> and MADV_WILLNEED-reads the experts not in the
+  page cache, residency via preadv2(RWF_NOWAIT) because mincore lies
+  for read-only files); Engine::Impl::plan_memory() in src/engine.cpp
+  (re-planned on every load/reload, auto falls back to paged once);
+  services/server.cpp flags --memory-mode / --expert-cache /
+  --no-expert-prefetch ([ENGINE] + [MODEL_*]), banner line, /health
+  memory, /models/api/status model.memory, easyai_experts_* metrics.
+
+  Installer: INI template has memory_mode / expert_cache /
+  #no_expert_prefetch; --upgrade adds them once to an existing INI
+  (ini_add_engine_keys). resources/easyai.ini.example now lists every
+  flag's INI key (ctest ini_keys guards it: tests/test_ini_keys.sh).
+
+  Measured on ai-pro (Radeon 890M iGPU, 91 GiB RAM, live 122B server
+  beside the tests): GPU expert cache is SLOWER on the iGPU (14 tok/s
+  without vs 8.9 / 9.5 with 2 / 8 GiB) → auto = off on unified memory;
+  read-ahead +3-10 %; Nex-N2.6 321B IQ1_M (77 GiB) paged at 0.65 tok/s
+  with ~20 GiB free. The NVMe reads aged files 4-5x slower than fresh
+  ones: copy a GGUF to a new file before paging it.
+
+  Tests: tests/test_paging.cpp (ctest paging), installer checks for the
+  INI keys + the upgrade helper, ctest ini_keys. 9/9.
+  Spec: "Disk-paged MoE experts — models larger than memory" rules 1-10.
+
 2026-05-13 — install_easyai_server.sh: cap easyai-server restart at 2.
              Operator ask: "change the easyai-server service to try
              to initialize twice and stop".  Previous unit had
@@ -1960,6 +1994,11 @@ c6a09d6  Single combined bar above the textarea (tone + ctx + last)
   on last good state and wait for next token to settle.
 
 ## 6. Known issues / pending validation
+
+- **Paged mode on a discrete GPU** — `expert_cache = auto` gives the
+  leftover VRAM to llama.cpp's MoE cache there; never measured (ai-pro is
+  an iGPU). The `/models` dashboard still scores fit as if the whole model
+  must be resident.
 
 - **HTTPS for `easyai::Client`** — not wired yet.  Needs cpp-httplib's
   `CPPHTTPLIB_OPENSSL_SUPPORT` define + linking OpenSSL into the

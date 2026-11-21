@@ -785,6 +785,44 @@ verify_sha256() {
     got      ${got:-<unreadable>}"
 }
 
+# ini_add_engine_keys <ini>: --upgrade keeps an existing easyai.ini, so the
+# [ENGINE] keys shipped after it was written never showed up in it. Append
+# each missing one ONCE, right under the [ENGINE] header, with its default
+# value (behaviour unchanged — the server's default is the same), so the
+# operator sees and can change it. A key already in [ENGINE], commented out
+# or not, is never touched; a key that is only in a [MODEL_*] profile still
+# gets its [ENGINE] line. No [ENGINE] section → one is appended. Prints the
+# names it added. Pure file I/O so tests/test_installer.sh runs it on a temp
+# file; the caller runs it under sudo (the INI is root:easyai 0640).
+ini_add_engine_keys() {
+    local f="$1" key want=() add="" tmp
+    local -A line=(
+        [memory_mode]="memory_mode      = auto"
+        [expert_cache]="expert_cache     = auto"
+        [no_expert_prefetch]="#no_expert_prefetch = on"
+    )
+    for key in memory_mode expert_cache no_expert_prefetch; do
+        if ! awk -v k="$key" '
+                /^[[:space:]]*\[/ { s = ($0 ~ /^[[:space:]]*\[ENGINE\]/); next }
+                s && $0 ~ "^[[:space:]]*[#;]?[[:space:]]*" k "[[:space:]]*=" { f = 1 }
+                END { exit !f }' "$f"; then
+            want+=("$key")
+            add+="${line[$key]}"$'\n'
+        fi
+    done
+    [[ ${#want[@]} -eq 0 ]] && return 0
+    add="# Models larger than memory (added by --upgrade): memory_mode = auto | gpu | paged,"$'\n'"# expert_cache = auto | off | <MiB> (auto is off on an iGPU), no_expert_prefetch = on"$'\n'"# stops the expert read-ahead. See easyai-server.md \"Models larger than memory\"."$'\n'"$add"
+    tmp="$(mktemp)" || return 1
+    if grep -qE '^[[:space:]]*\[ENGINE\]' "$f"; then
+        BLOCK="$add" awk '{ print } !done && /^[[:space:]]*\[ENGINE\]/ { printf "%s", ENVIRON["BLOCK"]; done = 1 }' "$f" > "$tmp"
+    else
+        { cat "$f"; printf '\n[ENGINE]\n%s' "$add"; } > "$tmp"
+    fi
+    # cat > keeps the file's inode, owner and mode (0640 root:easyai).
+    cat "$tmp" > "$f" && rm -f "$tmp" || { rm -f "$tmp"; return 1; }
+    echo "${want[*]}"
+}
+
 # ---------- pre-flight ------------------------------------------------------
 [[ $EUID -eq 0 ]] && die "do not run as root — script calls sudo as needed"
 
@@ -1782,6 +1820,11 @@ RAG_README
             log "migrating $ini_file: adding [ASSISTANT] enabled = $migrate_enabled"
             printf '\n[ASSISTANT]\nenabled         = %s\nwake_model      = %s/ggml-%s.bin\n' "$migrate_enabled" "$service_model_dir" "$wake_model" | sudo tee -a "$ini_file" >/dev/null
         fi
+        # [ENGINE] keys newer than this INI (memory_mode / expert_cache /
+        # no_expert_prefetch, 2026-11-20) appear once, at their defaults.
+        added_keys="$(sudo bash -c "$(declare -f ini_add_engine_keys); ini_add_engine_keys \"\$1\"" _ "$ini_file")" \
+            || warn "could not add the new [ENGINE] keys to $ini_file (defaults still apply)"
+        [[ -n "$added_keys" ]] && log "migrating $ini_file: added [ENGINE] $added_keys at their defaults (behaviour unchanged)"
     fi
     if [[ ! -f "$ini_file" || $do_force -eq 1 ]]; then
         if [[ -f "$ini_file" && $do_force -eq 1 ]]; then
@@ -2133,6 +2176,20 @@ cache_type_v     = $cache_type_v
 mlock            = $([[ "$mlock" -eq 1 ]] && echo on || echo off)
 no_mmap          = $([[ "$no_mmap" -eq 1 ]] && echo on || echo off)
 split_mode       = $split_mode
+
+# Models larger than memory (2026-11-20). memory_mode = auto keeps the
+# full-GPU load above (mlock / no_mmap as set) for any model whose
+# weights fit in RAM minus max(4 GiB, RAM/16); a bigger MoE GGUF loads
+# "paged": its routed experts stay in the mmap'd file and are read from
+# disk on demand, the rest of the model and the KV cache stay on the GPU,
+# and the CPU computes the routed experts from the page cache. A discrete
+# GPU also keeps the hot experts in VRAM (expert_cache = auto | off | size
+# in MiB; auto is off on an iGPU, where it was measured slower). gpu
+# forces the old path, paged forces paging. no_expert_prefetch = on stops
+# the read-ahead.
+memory_mode      = auto
+expert_cache     = auto
+#no_expert_prefetch = on
 
 # RoPE / YaRN context extension — required when ctx exceeds the model's
 # native training context. "yarn" scaling with rope_freq_scale=4 and

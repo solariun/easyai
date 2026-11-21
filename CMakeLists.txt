@@ -156,6 +156,7 @@ endif()
 set(EASYAI_SOURCES
     # core
     src/engine.cpp
+    src/paging.cpp
     src/tool.cpp
     src/builtin_tools.cpp
     src/remote_model_tool.cpp
@@ -437,6 +438,9 @@ if (EASYAI_BUILD_TESTS)
     add_executable(easyai-test-reasoning-effort tests/test_reasoning_effort.cpp)
     target_link_libraries(easyai-test-reasoning-effort PRIVATE easyai llama-common)
     add_test(NAME reasoning_effort COMMAND easyai-test-reasoning-effort)
+    add_executable(easyai-test-paging tests/test_paging.cpp)
+    target_link_libraries(easyai-test-paging PRIVATE easyai)
+    add_test(NAME paging COMMAND easyai-test-paging)
     add_executable(easyai-test-stt tests/test_stt.cpp)
     target_link_libraries(easyai-test-stt PRIVATE easyai)
     add_test(NAME stt COMMAND easyai-test-stt)
@@ -453,6 +457,7 @@ if (EASYAI_BUILD_TESTS)
     target_link_libraries(easyai-test-local-models PRIVATE easyai)
     add_test(NAME local_models COMMAND easyai-test-local-models)
     add_test(NAME installer COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_installer.sh)
+    add_test(NAME ini_keys COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ini_keys.sh)
 endif()
 
 # ============================================================================

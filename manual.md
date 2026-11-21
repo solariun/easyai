@@ -34,7 +34,7 @@ C++17 program". By the end you will know how to:
 | **5** | Authoring custom tools | Builder API, schemas, sandboxes, error handling, the `Plan` tool, `system_*` tools cookbook |
 | **6** | Deploying easyai-server | Single-binary install, systemd unit, nginx TLS termination, per-model INI profiles, multiple-server fan-out |
 | **7** | Operating the server   | `/health` and `/metrics`, presets at runtime, log rotation, crash capture |
-| **8** | Performance & tuning   | KV cache types, flash-attn, mlock, ngl auto-fit, RoPE/YaRN context extension, GPU split mode, sampler choices |
+| **8** | Performance & tuning   | KV cache types, flash-attn, mlock, models larger than memory (paged MoE experts), ngl auto-fit, RoPE/YaRN context extension, GPU split mode, sampler choices |
 | **9** | Recipes (cookbook)     | Real prompts + flag combinations, including the planning agent, papers digest, host triage |
 | **10** | Troubleshooting       | Build, GPU, runtime, model, tool, network, TLS issues |
 | **11** | Design references     | Pointers into `design.md` for the deeper "why" |
@@ -2860,7 +2860,10 @@ Stateless except for whatever you put in `/var/lib/easyai/`
 * `GET /health` — JSON status.  Cheap, use it as a liveness probe.
 * `GET /metrics` — Prometheus text exposition (only when `--metrics`
   was passed).  Counters: `easyai_requests_total`,
-  `easyai_tool_calls_total`, `easyai_errors_total`.
+  `easyai_tool_calls_total`, `easyai_errors_total`; for a paged model
+  (8.10) also `easyai_experts_routed_total`,
+  `easyai_experts_served_total{tier="gpu|ram|disk"}` and
+  `easyai_experts_prefetch_bytes_total`.
 * `GET /props` — full server config snapshot (n_ctx, model alias,
   build info).
 
@@ -2924,7 +2927,8 @@ RDNA2+ with recent llama.cpp (validated on gfx1035).
 `--mlock` pins the model in RAM so the OS can't page it out under
 pressure.  Required on the AI box because GTT-mapped pages would
 otherwise be swap candidates.  Needs `LimitMEMLOCK=infinity` in the
-systemd unit (the installer sets this).
+systemd unit (the installer sets this).  It applies to the `gpu` memory
+mode only — see 8.10: a paged model must not be pinned.
 
 ### 8.5 Sampling
 
@@ -3063,6 +3067,88 @@ CLI / INI: `-sm` / `--split-mode` / `[ENGINE] split_mode`.
 Single-GPU setups should use `"none"` (the installer default).
 Multi-GPU rigs benefit from `"layer"` or `"row"` depending on the
 model size vs. per-GPU VRAM.
+
+### 8.10 Models larger than memory — paged MoE experts
+
+A mixture-of-experts model reads only a few of its experts per token,
+so it does not need all of them in memory at once. `memory_mode` decides
+where the weights live:
+
+| Mode | Weights | When |
+|------|---------|------|
+| `gpu` | everything in GPU memory (`mlock` / `no_mmap` / `ngl` as configured) | the historical path |
+| `paged` | routed experts stay in the mmap'd GGUF, read from disk on demand; attention, shared experts, embeddings and the KV cache on the GPU | forced |
+| `auto` (default) | `paged` only when the tensors exceed RAM − max(4 GiB, RAM/16) (iGPU / CPU-only) or VRAM − max(512 MiB, VRAM/32) (discrete GPU), else `gpu` | — |
+
+Library:
+
+```cpp
+easyai::Engine e;
+e.model("/models/big-moe-00001-of-00004.gguf")
+ .gpu_layers(99)
+ .memory_mode("auto")      // "gpu" | "paged" | "auto"
+ .expert_cache_mb(-1)      // GPU hot-expert cache: -1 auto (off on iGPUs), 0 off, N MiB
+ .expert_prefetch(true);   // read routed experts ahead from disk
+e.load();
+auto m = e.memory_info();  // mode, reason, bytes, cache size, pager stats
+std::printf("%s: %s\n", m.mode.c_str(), m.reason.c_str());
+```
+
+Server — every key is also a flag, and all three are written in
+`resources/easyai.ini.example` and in the installer's INI:
+
+| INI key (`[ENGINE]`) | Flag | Default | Meaning |
+|------|------|---------|---------|
+| `memory_mode` | `--memory-mode` | `auto` | `auto` \| `gpu` \| `paged` (aliases `full`/`vram`, `disk`/`mmap`) |
+| `expert_cache` | `--expert-cache` | `auto` | GPU hot-expert cache: `auto` \| `off` \| size in MiB |
+| `no_expert_prefetch` | `--no-expert-prefetch` | `off` | `on` = no read-ahead of routed experts |
+
+```ini
+[ENGINE]
+memory_mode      = auto
+expert_cache     = auto
+#no_expert_prefetch = on
+
+; one model only — a [MODEL_<pattern>] profile takes the same keys
+[MODEL_Nex-N2.6]
+memory_mode      = paged
+```
+
+`install_easyai_server.sh --upgrade` keeps an existing INI but adds these
+three keys under `[ENGINE]` once, at their defaults, when they are missing
+(a value already there is never changed).
+
+`easyai-local`, `easyai-agent` and any program that uses `easyai::Engine`
+or `easyai::Session` get `auto` without a flag: a GGUF that does not fit
+pages, one that fits loads exactly as before.
+
+How the experts are served, fastest first:
+
+1. **GPU hot-expert cache** (discrete GPUs) — llama.cpp's MoE cache keeps
+   the experts used in generation in VRAM (LRU, per expert). `expert_cache
+   = auto` gives it the VRAM left after the dense weights, the KV cache
+   and the compute buffers. On an iGPU `auto` turns it off: the cache
+   would copy experts into the same RAM the page cache uses, and the CPU
+   computing straight from the page cache measured 60 % faster on ai-pro.
+2. **RAM page cache** — recently used experts; the CPU computes them in
+   place (or, with a GPU cache, they are copied to it on a miss).
+3. **Disk** — otherwise the pages come from the GGUF. easyai sees the
+   router's choice per layer and has the kernel read the missing experts
+   as one large read each before they are used (with a GPU cache it skips
+   the ones the GPU already holds).
+
+Rules of thumb:
+
+- Generation speed depends on how much of each token's active experts
+  are in tiers 1–2. Watch `GET /health` → `memory.experts.disk_rate`: a
+  few percent is fine, tens of percent means the disk sets the pace.
+- Prompt processing touches almost every expert per ubatch, so each
+  2048-token ubatch of a long prompt streams the uncached experts once.
+- The first load reads the whole file once (llama.cpp maps with
+  `MAP_POPULATE`).
+- Prefer the freshest copy of the GGUF on the fastest disk: some SSDs
+  (ai-pro's included) read data written weeks earlier several times slower
+  than fresh data.
 
 ---
 
@@ -3205,7 +3291,8 @@ When `--api-key` is set, every `/v1/*` request must carry
 (useful for liveness probes and Prometheus scrapes).
 
 `/metrics` exposes Prometheus-style counters
-(`easyai_requests_total`, `easyai_errors_total`, `easyai_tool_calls_total`)
+(`easyai_requests_total`, `easyai_errors_total`, `easyai_tool_calls_total`,
+and for a paged model the `easyai_experts_*` tiers of 8.10)
 that you can wire into Grafana or alertmanager.
 
 ### 9.5 Behind a reverse proxy

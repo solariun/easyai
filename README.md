@@ -27,7 +27,7 @@ the lib surface.
 |----------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
 | `easyai-local`       | Local-only REPL: loads a GGUF in-process via `easyai::Engine` (driven through `easyai::Session`). Drop-in `llama-cli` replacement — one-shot scripting (`-p`), tools, presets, optional `<think>` strip, sandboxed `*_file` tools, opt-in `bash` tool. |
 | `easyai-cli`         | Agentic OpenAI-protocol client — no local model.  Full-screen chat **TUI** (opencode-style look & feel: markdown, live tool rows with diffs, `/`-command + `@`-file completion, themes — default for interactive terminals; `--plain` for the legacy line REPL), `--shell` (hybrid AI shell), or `-p` one-shot.  Full sampling control (`--temperature`, `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`, `--frequency-penalty`, `--presence-penalty`, `--seed`, `--max-tokens`, `--stop`), plan tool, server-management subcommands (`--list-models`, `--list-tools`, `--health`, `--props`, `--metrics`, `--set-preset`).  HTTPS via OpenSSL; `--insecure-tls` / `--ca-cert` for dev/internal CAs.  Full doc: [`easyai-cli.md`](easyai-cli.md). |
-| `easyai-server`      | Drop-in `llama-server` replacement: OpenAI-compat HTTP **with full SSE streaming**, embedded SvelteKit webui, Bearer auth, Prometheus `/metrics`, KV-cache controls, flash-attn, mlock.  Built-in **[MODELS dashboard](MODELS.md)** (`/models`) — native hardware-aware model recommendations, local-model parameters + in-process hot-swap, a GGUF download manager and a whisper voice-model panel, password-gated.  Speaks MCP, OpenAI, Ollama and OpenAI audio (`/v1/audio/transcriptions`, `/v1/audio/speech` with Kokoro-82M in C++, mic chip in the chat) from one process; optional TLS.  Carries the always-listening **voice assistant** ("hello Max" / "olá Max" on the box's own mic and speaker, Linux ALSA / macOS CoreAudio, no third-party libs; 1.5 s pause, three sounds, answer spoken with a male pt-BR / en voice, thinking off, tools run inside; `[ASSISTANT] enabled = on`, a dashboard tab with every device, voice and key) — a separate `easyai-assistant` binary until 2026-11-14.  Full docs: [`easyai-server.md`](easyai-server.md), [`easyai-assistant.md`](easyai-assistant.md). |
+| `easyai-server`      | Drop-in `llama-server` replacement: OpenAI-compat HTTP **with full SSE streaming**, embedded SvelteKit webui, Bearer auth, Prometheus `/metrics`, KV-cache controls, flash-attn, mlock, **models larger than memory** (MoE experts paged from disk with a GPU hot-expert cache — `memory_mode`).  Built-in **[MODELS dashboard](MODELS.md)** (`/models`) — native hardware-aware model recommendations, local-model parameters + in-process hot-swap, a GGUF download manager and a whisper voice-model panel, password-gated.  Speaks MCP, OpenAI, Ollama and OpenAI audio (`/v1/audio/transcriptions`, `/v1/audio/speech` with Kokoro-82M in C++, mic chip in the chat) from one process; optional TLS.  Carries the always-listening **voice assistant** ("hello Max" / "olá Max" on the box's own mic and speaker, Linux ALSA / macOS CoreAudio, no third-party libs; 1.5 s pause, three sounds, answer spoken with a male pt-BR / en voice, thinking off, tools run inside; `[ASSISTANT] enabled = on`, a dashboard tab with every device, voice and key) — a separate `easyai-assistant` binary until 2026-11-14.  Full docs: [`easyai-server.md`](easyai-server.md), [`easyai-assistant.md`](easyai-assistant.md). |
 | `easyai-mcp-server`  | **Standalone Model Context Protocol provider — no model loaded.** Same tool catalogue as `easyai-server` (built-ins + knowledge tools + external-tools), exposed over `POST /mcp` with a configurable cpp-httplib worker pool (`--threads`) and an in-flight `tools/call` cap (`--max-concurrent-calls`) for thousands-of-clients deployments.  Full doc: [`easyai-mcp-server.md`](easyai-mcp-server.md). |
 | `easyai-library-demo`| Five-line `easyai::Session` template — pair with [`LIB_GUIDE.md`](LIB_GUIDE.md).  The smallest "build an agent, register a tool, chat" program in the repo. |
 | `easyai-agent`       | A demo agent showing every built-in tool plus an inline custom tool.                                                                                |
@@ -93,6 +93,38 @@ Full catalogue and safety model: **[`AI_TOOLS.md`](AI_TOOLS.md)**.
 A running log of user-facing changes. Latest first — keep this list
 current as features land so anyone returning to the repo (or
 landing on it for the first time) sees what shipped recently.
+
+### 2026-11-20 — models larger than memory (`memory_mode`)
+
+- **A GGUF bigger than RAM now loads.** `[ENGINE] memory_mode = auto |
+  gpu | paged` (`--memory-mode`, `Engine::memory_mode()`). `paged` keeps a
+  MoE model's routed experts in the mmap'd GGUF and reads them from disk
+  on demand; attention, shared experts, embeddings and the KV cache stay
+  on the GPU. A dense model gets as many whole layers on the GPU as fit.
+- **`auto` (default) changes nothing for a model that fits**: it pages
+  only when the weights exceed RAM − max(4 GiB, RAM/16) (VRAM − max(512
+  MiB, VRAM/32) on a discrete GPU), and retries once paged if a full-GPU
+  load fails.
+- **Hot experts**: easyai reads the router's choice per layer and has the
+  kernel read the experts not yet in RAM as one large read each
+  (`--no-expert-prefetch` turns it off; +3–10 % measured). The page cache
+  keeps the hot ones in RAM. `expert_cache = auto | off | <MiB>`
+  (`--expert-cache`) sizes llama.cpp's GPU hot-expert cache — the leftover
+  VRAM on a discrete GPU, **off on an iGPU**, where it measured slower
+  (ai-pro: 14 tok/s without it, 8.9 with 2 GiB, 9.5 with 8 GiB).
+- **Visible**: a `memory:` banner line, `/health` → `memory`,
+  `/models/api/status` → `model.memory`, `easyai_experts_*` in `/metrics`,
+  expert tiers on the METRICS line.
+- **INI**: the three keys are in the installer's INI and in
+  `resources/easyai.ini.example`; `--upgrade` adds them once to an existing
+  INI at their defaults. A `[MODEL_<pattern>]` profile can set them for
+  one model. New ctest `ini_keys` fails when any flag's INI key is missing
+  from the example or from `easyai-server.md`.
+- Measured on ai-pro beside the live 122B server (~20 GiB free): a
+  321B-total / 18B-active MoE (Nex-N2.6 IQ1_M, 77 GiB) ran at 0.65 tok/s
+  with 67–75 % of its experts read from disk; a 35B-A3B MoE at 14 tok/s.
+  Full reference: [`easyai-server.md`](easyai-server.md) "Models larger
+  than memory", [`manual.md`](manual.md) 8.10, `spec.md`.
 
 ### 2026-11-14 — the voice assistant moves into easyai-server
 
@@ -1517,6 +1549,9 @@ has a matching INI key (see [`easyai-server.md`](easyai-server.md) §1).
 | `-np, --parallel N` | 1 | Compat-only; warns when >1. |
 | `--mlock` | off | mlock model weights into RAM. |
 | `--no-mmap` | off | Disable mmap (read GGUF into RAM). |
+| `--memory-mode auto\|gpu\|paged` | auto | Models larger than memory: `paged` keeps a MoE's routed experts in the mmap'd GGUF (read from disk on demand) and the rest on the GPU; `auto` pages only when the weights do not fit. INI `[ENGINE] memory_mode` (also per `[MODEL_*]`). |
+| `--expert-cache auto\|off\|MiB` | auto | GPU hot-expert cache for a paged MoE (llama.cpp's MoE cache); `auto` = leftover VRAM on a discrete GPU, off on an iGPU. INI `[ENGINE] expert_cache`. |
+| `--no-expert-prefetch` | off | Paged mode: no read-ahead of routed experts. INI `[ENGINE] no_expert_prefetch = on`. |
 | `--numa STRATEGY` | off | `distribute`,`isolate`,`numactl`,`mirror`. |
 | `--metrics` | off | Expose Prometheus `/metrics`. |
 | `--reasoning on\|off` | on | Enable model thinking. |
@@ -1722,6 +1757,8 @@ Full local engine. Header:
 | `.no_kv_offload(on) / .kv_unified(on)` | `bool` | off | KV placement / layout. |
 | `.add_kv_override(spec)` | `string` | — | GGUF metadata override (repeatable). |
 | `.flash_attn(on) / .use_mlock(on) / .use_mmap(on)` | `bool` | auto/off/on | Compute / memory. |
+| `.memory_mode(mode)` | `string` | `auto` | `gpu` (all weights in GPU memory), `paged` (MoE experts read from the mmap'd GGUF on demand, GPU cache of hot experts), `auto` (paged only when the weights exceed memory). `memory_info()` reports the outcome and the pager's counters. |
+| `.expert_cache_mb(mb) / .expert_prefetch(on)` | `long long` / `bool` | -1 / on | Paged mode: GPU hot-expert cache size (-1 auto, 0 off) and read-ahead of routed experts. |
 | `.numa(strategy)` | `string` | off | `distribute` / `isolate` / `numactl` / `""`. |
 | `.split_mode(mode)` | `string` | `none` | Multi-GPU split: `none`, `layer`, `row`, `tensor`. |
 | `.rope_scaling(mode)` | `string` | `yarn` | RoPE scaling: `none`, `linear`, `yarn`. |

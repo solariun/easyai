@@ -4,6 +4,7 @@
 #include "easyai/log.hpp"          // raw transaction log + problem markers
 
 #include "common.h"
+#include "fit.h"              // common_get_device_memory_data (paged-mode cache sizing)
 #include "sampling.h"
 #include "speculative.h"
 #include "chat.h"
@@ -19,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -869,6 +871,9 @@ common_chat_params apply_reasoning_effort(const common_chat_templates * template
 // ===========================================================================
 struct Engine::Impl {
     common_params               params;
+    // Disk-paged MoE experts (easyai/paging.hpp). Declared before `init` so
+    // it outlives the context whose eval callback points at it.
+    std::unique_ptr<paging::ExpertPager> pager;
     common_init_result_ptr      init;
     common_chat_templates_ptr   templates;
     common_sampler            * sampler = nullptr;
@@ -899,6 +904,26 @@ struct Engine::Impl {
     // Engine API exposes and derive params.load_mode from them.
     bool                        want_mmap     = true;
     bool                        want_mlock    = false;
+    // false until use_mmap()/use_mlock() is called: llama.cpp's own default
+    // (LLAMA_LOAD_MODE_AUTO, which turns mmap off on devices without mmap
+    // support) then stays in force for the gpu path
+    bool                        load_mode_set = false;
+    // The user's n_gpu_layers; load() re-derives params.n_gpu_layers from it
+    // because a paged load may lower it and a reload must start clean.
+    int                         want_ngl      = -1;
+    int                         want_ubatch   = 512;  // llama.cpp's default physical batch
+
+    // ---- models larger than memory (see Engine::memory_mode) -------------
+    paging::MemoryMode          mem_requested   = paging::MemoryMode::Auto;
+    long long                   expert_cache_mb = -1;   // -1 auto, 0 off
+    bool                        expert_prefetch = true;
+    mutable std::mutex          mem_mu;                 // guards mem_info + pager swap
+    Engine::MemoryInfo          mem_info;
+
+    // Decide gpu vs paged for params.model.path and rewrite the load params
+    // accordingly. Never fails: an unreadable footprint keeps the gpu path.
+    // force_paged: auto's second try after a full-GPU load failed.
+    void plan_memory(bool force_paged = false);
     void apply_load_mode() {
         params.load_mode = want_mmap
             ? (want_mlock ? LLAMA_LOAD_MODE_MMAP_MLOCK : LLAMA_LOAD_MODE_MMAP)
@@ -1528,7 +1553,7 @@ Engine & Engine::operator=(Engine &&) noexcept = default;
 Engine & Engine::model(std::string path)        { p_->params.model.path = std::move(path); return *this; }
 Engine & Engine::context(int n)                 { p_->params.n_ctx = n; if (p_->params.n_batch > n) p_->params.n_batch = n; return *this; }
 Engine & Engine::batch(int n)                   { p_->params.n_batch = n; return *this; }
-Engine & Engine::gpu_layers(int n)              { p_->params.n_gpu_layers = n; return *this; }
+Engine & Engine::gpu_layers(int n)              { p_->want_ngl = n; p_->params.n_gpu_layers = n; return *this; }
 Engine & Engine::threads(int n)                 { p_->params.cpuparams.n_threads = n; p_->params.cpuparams_batch.n_threads = n; return *this; }
 Engine & Engine::seed(uint32_t s)               { p_->params.sampling.seed = s; return *this; }
 Engine & Engine::system(std::string s)          { p_->system_prompt = std::move(s); return *this; }
@@ -1722,8 +1747,171 @@ Engine & Engine::flash_attn(bool on) {
                                     : LLAMA_FLASH_ATTN_TYPE_DISABLED;
     return *this;
 }
-Engine & Engine::use_mlock(bool on)        { p_->want_mlock = on; p_->apply_load_mode(); return *this; }
-Engine & Engine::use_mmap (bool on)        { p_->want_mmap  = on; p_->apply_load_mode(); return *this; }
+Engine & Engine::use_mlock(bool on)        { p_->want_mlock = on; p_->load_mode_set = true; p_->apply_load_mode(); return *this; }
+Engine & Engine::use_mmap (bool on)        { p_->want_mmap  = on; p_->load_mode_set = true; p_->apply_load_mode(); return *this; }
+
+Engine & Engine::memory_mode(const std::string & mode) {
+    paging::MemoryMode m;
+    if (!paging::parse_memory_mode(mode, m)) {
+        p_->last_error = "memory_mode: unknown mode '" + mode + "' (expected auto|gpu|paged)";
+        return *this;
+    }
+    p_->mem_requested = m;
+    return *this;
+}
+Engine & Engine::expert_cache_mb(long long mb) { p_->expert_cache_mb = mb < 0 ? -1 : mb; return *this; }
+Engine & Engine::expert_prefetch(bool on)     { p_->expert_prefetch = on; return *this; }
+
+Engine::MemoryInfo Engine::memory_info() const {
+    std::lock_guard<std::mutex> lk(p_->mem_mu);
+    MemoryInfo m = p_->mem_info;
+    if (p_->pager) m.pager = p_->pager->stats();
+    return m;
+}
+
+// ---------------------------------------------------------------------------
+// Memory plan — gpu vs paged (spec.md "Disk-paged MoE experts")
+// ---------------------------------------------------------------------------
+static ggml_backend_dev_t first_gpu_device() {
+    for (size_t i = 0; i < ggml_backend_dev_count(); ++i) {
+        ggml_backend_dev_t d = ggml_backend_dev_get(i);
+        const auto t = ggml_backend_dev_type(d);
+        if (t == GGML_BACKEND_DEVICE_TYPE_GPU || t == GGML_BACKEND_DEVICE_TYPE_IGPU) return d;
+    }
+    return nullptr;
+}
+
+void Engine::Impl::plan_memory(bool force_paged) {
+    // Start from the user's settings: a reload after a paged load must not
+    // inherit the previous model's overrides.
+    if (load_mode_set) apply_load_mode();
+    else               params.load_mode = LLAMA_LOAD_MODE_AUTO;
+    params.n_gpu_layers   = want_ngl;
+    params.tensor_buft_overrides.clear();
+    params.no_extra_bufts = false;
+    params.fit_params     = true;
+    params.moe_cache_size = 0;
+    params.cb_eval        = nullptr;
+    params.cb_eval_user_data = nullptr;
+    params.n_ubatch       = want_ubatch;
+    {
+        std::lock_guard<std::mutex> lk(mem_mu);
+        pager.reset();
+        mem_info = Engine::MemoryInfo{};
+        mem_info.requested = paging::memory_mode_name(mem_requested);
+    }
+
+    paging::PlanInput in;
+    in.requested = force_paged ? paging::MemoryMode::Paged : mem_requested;
+    in.model     = paging::scan_gguf(params.model.path);
+    in.ram_total = paging::ram_total_bytes();
+    ggml_backend_dev_t gpu = first_gpu_device();
+    size_t gpu_free = 0, gpu_total = 0;
+    if (gpu && want_ngl != 0) {
+        ggml_backend_dev_memory(gpu, &gpu_free, &gpu_total);
+        in.gpu_total      = gpu_total;
+        in.unified_memory = ggml_backend_dev_type(gpu) == GGML_BACKEND_DEVICE_TYPE_IGPU;
+    }
+    paging::MemoryPlan plan = paging::plan_memory(in);
+    if (force_paged) plan.reason = "auto: the full-GPU load failed (weights + KV + buffers did not fit) — paged";
+
+    Engine::MemoryInfo info;
+    info.requested    = paging::memory_mode_name(mem_requested);
+    info.mode         = paging::memory_mode_name(plan.mode);
+    info.reason       = plan.reason;
+    info.model_bytes  = in.model.tensor_bytes;
+    info.expert_bytes = in.model.expert_bytes;
+    info.ram_bytes    = in.ram_total;
+    info.gpu_layers   = params.n_gpu_layers;
+
+    if (plan.mode == paging::MemoryMode::Paged) {
+        if (load_mode_set && (want_mlock || !want_mmap)) {
+            info.reason += "; mlock/no_mmap ignored (paging needs the mmap)";
+        }
+        params.load_mode      = LLAMA_LOAD_MODE_MMAP;  // read on demand, never pinned
+        params.no_extra_bufts = true;   // CPU repacking would copy every expert into RAM
+        params.fit_params     = false;  // the placement below is deliberate
+
+        if (in.model.moe()) {
+            params.tensor_buft_overrides.push_back(llm_ffn_exps_cpu_override());
+            params.tensor_buft_overrides.push_back({nullptr, nullptr});
+
+            // A prompt ubatch routes to nearly every expert, so each one
+            // streams the experts that are not in memory from disk once:
+            // fewer, larger ubatches mean fewer passes over the file. Set
+            // before the dry run below so the compute buffers it measures
+            // are the real ones.
+            params.n_ubatch = std::max(params.n_ubatch, std::min(params.n_batch, 2048));
+
+            std::uint64_t cache = 0;
+            if (!gpu || want_ngl == 0 || expert_cache_mb == 0) {
+                cache = 0;
+            } else if (expert_cache_mb > 0) {
+                cache = (std::uint64_t) expert_cache_mb * 1024ull * 1024ull;
+            } else if (in.unified_memory) {
+                // auto on an iGPU: off — see auto_expert_cache_bytes
+                cache = 0;
+                info.reason += "; GPU expert cache off (unified memory: the CPU computes the experts from the page cache)";
+            } else {
+                // auto on a discrete GPU: measure what the dense weights +
+                // KV + compute buffers take with a no-alloc dry run, give
+                // the rest of the VRAM to the hot-expert cache
+                try {
+                    auto mp = common_model_params_to_llama(params);
+                    auto cp = common_context_params_to_llama(params);
+                    std::vector<ggml_backend_dev_t> devs;
+                    uint32_t hp_ngl = 0, hp_nct = 0, hp_nex = 0;
+                    auto dmd = common_get_device_memory_data(params.model.path.c_str(), &mp, &cp, devs,
+                                                             hp_ngl, hp_nct, hp_nex, GGML_LOG_LEVEL_ERROR);
+                    if (dmd.size() >= 2) {
+                        const std::uint64_t need = dmd[0].model + dmd[0].context + dmd[0].compute;
+                        const std::uint64_t avail = dmd[0].free > 0 ? (std::uint64_t) dmd[0].free : gpu_free;
+                        cache = paging::auto_expert_cache_bytes(avail, need, in.model.expert_bytes,
+                                                                in.ram_total, false);
+                    }
+                } catch (const std::exception & e) {
+                    easyai::log::error("[easyai] memory: dry run for the expert cache failed (%s) — cache off", e.what());
+                    cache = 0;
+                }
+            }
+            params.moe_cache_size = (size_t) cache;
+            info.gpu_cache_bytes  = cache;
+
+
+            if (expert_prefetch) {
+                paging::ExpertPager::Config pc;
+                pc.prefetch        = true;
+                pc.gpu_cache_bytes = cache;
+                if (gpu) pc.gpu_alignment = ggml_backend_buft_get_alignment(ggml_backend_dev_buffer_type(gpu));
+                std::lock_guard<std::mutex> lk(mem_mu);
+                pager = std::make_unique<paging::ExpertPager>(pc);
+                params.cb_eval           = &paging::ExpertPager::eval_callback;
+                params.cb_eval_user_data = pager.get();
+            }
+        } else if (gpu && want_ngl != 0) {
+            // dense: whole layers on the GPU; on unified memory a quarter of
+            // the budget stays free for the page cache that feeds the rest
+            std::uint64_t budget = plan.weight_budget;
+            if (in.unified_memory || in.gpu_total == 0) budget = budget / 4 * 3;
+            int ngl = paging::dense_gpu_layers(in.model.tensor_bytes, in.model.n_layer, budget);
+            if (want_ngl >= 0 && want_ngl < ngl) ngl = want_ngl;
+            params.n_gpu_layers = ngl;
+        }
+    }
+    info.gpu_layers = params.n_gpu_layers;
+    {
+        std::lock_guard<std::mutex> lk(mem_mu);
+        mem_info = info;
+    }
+
+    char line[512];
+    std::snprintf(line, sizeof(line),
+        "[easyai] memory: mode=%s (%s)  weights=%.1f GiB  experts=%.1f GiB  ram=%.1f GiB  gpu_expert_cache=%.1f GiB  ngl=%d\n",
+        info.mode.c_str(), info.reason.c_str(),
+        info.model_bytes / 1073741824.0, info.expert_bytes / 1073741824.0,
+        info.ram_bytes / 1073741824.0, info.gpu_cache_bytes / 1073741824.0, info.gpu_layers);
+    easyai::log::write("%s", line);
+}
 Engine & Engine::threads_batch(int n)      { p_->params.cpuparams_batch.n_threads = n; return *this; }
 
 Engine & Engine::numa(const std::string & strategy) {
@@ -1893,6 +2081,10 @@ bool Engine::load() {
     }
     ggml_backend_load_all();
 
+    // gpu vs paged: rewrites load_mode / n_gpu_layers / tensor overrides /
+    // moe_cache_size / cb_eval for this model (spec.md "Disk-paged MoE experts")
+    p_->plan_memory();
+
     // common_init_from_params asserts that kv_overrides ends with an
     // empty-key sentinel; honour that contract.
     if (!p_->params.kv_overrides.empty() &&
@@ -1913,11 +2105,57 @@ bool Engine::load() {
     postprocess_cpu_params(p_->params.speculative.draft.cpuparams,       &p_->params.cpuparams);
     postprocess_cpu_params(p_->params.speculative.draft.cpuparams_batch, &p_->params.cpuparams_batch);
 
+    auto init_ok = [&]() { return p_->init && p_->init->model() && p_->init->context(); };
     p_->init = common_init_from_params(p_->params);
+    if (!init_ok() && p_->mem_requested == paging::MemoryMode::Auto && p_->mem_info.mode == "gpu") {
+        // auto judged the weights alone; the KV cache of a long context or
+        // the compute buffers may still not fit. Page the experts instead of
+        // coming up without a model.
+        easyai::log::error("[easyai] Engine::load: full-GPU load failed — retrying with memory_mode=paged");
+        p_->init.reset();
+        p_->plan_memory(/*force_paged=*/true);
+        p_->init = common_init_from_params(p_->params);
+    }
+    if (!init_ok() && p_->params.moe_cache_size > 0) {
+        // the GPU could not hold the hot-expert cache on top of the model:
+        // load again without it (the CPU computes the experts from RAM)
+        easyai::log::error("[easyai] Engine::load: failed with a %.1f GiB GPU expert cache — retrying without it",
+                           p_->params.moe_cache_size / 1073741824.0);
+        p_->init.reset();
+        p_->params.moe_cache_size = 0;
+        {
+            std::lock_guard<std::mutex> lk(p_->mem_mu);
+            p_->mem_info.gpu_cache_bytes = 0;
+            p_->mem_info.reason += "; GPU expert cache did not fit — off";
+            if (p_->pager) {
+                paging::ExpertPager::Config pc;
+                pc.prefetch = true;
+                pc.gpu_cache_bytes = 0;
+                p_->pager = std::make_unique<paging::ExpertPager>(pc);
+                p_->params.cb_eval_user_data = p_->pager.get();
+            }
+        }
+        p_->init = common_init_from_params(p_->params);
+    }
     if (!p_->init || !p_->init->model() || !p_->init->context()) {
         p_->last_error = "failed to load model: " + p_->params.model.path;
         easyai::log::error("[easyai] Engine::load: %s", p_->last_error.c_str());
         return false;
+    }
+
+    // Paged MoE: locate the host expert tensors in a reserved graph and
+    // size the LRU mirror of the GPU cache. Before any decode, so the
+    // scheduler reset inside llama_graph_reserve costs nothing.
+    if (p_->pager) {
+        const int n = p_->pager->attach(p_->init->context(), (int) llama_n_ubatch(p_->init->context()));
+        const auto st = p_->pager->stats();
+        std::lock_guard<std::mutex> lk(p_->mem_mu);
+        p_->mem_info.prefetch = n > 0;
+        char line[256];
+        std::snprintf(line, sizeof(line),
+            "[easyai] memory: expert pager on %d MoE layers, GPU cache mirror %d expert slots%s\n",
+            n, st.gpu_cache_slots, n > 0 ? "" : " — no host experts found, read-ahead idle");
+        easyai::log::write("%s", line);
     }
 
     p_->sampler = common_sampler_init(p_->init->model(), p_->params.sampling);
@@ -1957,6 +2195,11 @@ bool Engine::load() {
             // structurally how llama-server does it (see
             // tools/server/server-context.cpp ~line 800).
             auto cparams_mtp = common_context_params_to_llama(p_->params);
+            // the MTP head runs on the same weights: no second GPU expert
+            // cache and no pager hook on the draft context
+            cparams_mtp.moe_cache_size    = 0;
+            cparams_mtp.cb_eval           = nullptr;
+            cparams_mtp.cb_eval_user_data = nullptr;
             cparams_mtp.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
             cparams_mtp.n_rs_seq = 0;
             p_->ctx_dft = llama_init_from_model(p_->init->model(), cparams_mtp);
@@ -2007,6 +2250,7 @@ bool Engine::load() {
             }
             auto params_dft          = p_->params;
             params_dft.model         = p_->params.speculative.draft.mparams;
+            params_dft.tensor_buft_overrides.clear();   // paged-mode overrides are the target's
             params_dft.n_gpu_layers  =
                 p_->params.speculative.draft.n_gpu_layers >= 0
                     ? p_->params.speculative.draft.n_gpu_layers
@@ -2023,6 +2267,9 @@ bool Engine::load() {
                 return false;
             }
             auto cparams_dft = common_context_params_to_llama(params_dft);
+            cparams_dft.moe_cache_size    = 0;
+            cparams_dft.cb_eval           = nullptr;
+            cparams_dft.cb_eval_user_data = nullptr;
             p_->ctx_dft = llama_init_from_model(p_->model_dft, cparams_dft);
             if (!p_->ctx_dft) {
                 p_->last_error = "failed to create draft model context";
@@ -2098,6 +2345,11 @@ bool Engine::reload(const std::string & new_model_path) {
     p_->templates.reset();
     p_->effort_remap.clear();
     p_->init.reset();                 // frees the model + its context
+    {
+        std::lock_guard<std::mutex> lk(p_->mem_mu);
+        p_->pager.reset();            // its tensors pointed into that model
+        p_->mem_info = Engine::MemoryInfo{};
+    }
 
     p_->spec_active = false;
     p_->spec_mtp    = false;

@@ -145,6 +145,13 @@ is doing serious work, not just running a demo. KV-cache
 quantization, flash-attn, mlock, NUMA-aware threading — all on by
 default on the installed unit.
 
+**Bigger than your memory?** A mixture-of-experts model whose GGUF is
+larger than RAM still runs: easyai keeps its routed experts on disk,
+reads them ahead on demand and keeps the hot ones in RAM (plus a VRAM
+cache on a discrete GPU) — `memory_mode = auto`, on by default. Speed then depends on the disk and
+on how many of each token's experts fit in RAM — see
+[easyai-server.md → Models larger than memory](easyai-server.md#models-larger-than-memory-memory_mode).
+
 ---
 
 ## How to get started

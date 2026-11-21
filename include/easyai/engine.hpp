@@ -18,6 +18,8 @@
 //
 #pragma once
 
+#include "easyai/paging.hpp"
+
 #include "tool.hpp"
 
 #include <cstdint>
@@ -257,6 +259,32 @@ class Engine {
     // YaRN original context length. 0 = use model default.
     Engine & yarn_orig_ctx(int ctx);
 
+    // ---------------- models larger than memory (easyai/paging.hpp) ---------
+    // Where the weights live: "auto" (default), "gpu" or "paged".
+    //   gpu    every weight in GPU memory (the historical path; use_mlock and
+    //          use_mmap(false) are honoured).
+    //   paged  MoE: the routed experts stay in the mmap'd GGUF and are read
+    //          from disk on demand; attention, shared experts, embeddings and
+    //          the KV cache stay on the GPU; a GPU cache keeps the hot experts
+    //          (expert_cache_mb) and the RAM page cache keeps the recent ones.
+    //          Dense: as many layers on the GPU as fit, the rest read from the
+    //          mmap'd file. mmap is forced on and mlock off for the mapping.
+    //   auto   "paged" only when the weights exceed memory (RAM − reserve on
+    //          an iGPU / CPU-only box, VRAM − reserve on a discrete card);
+    //          a model that fits loads exactly as "gpu".
+    // Unknown names record last_error() and keep the previous mode.
+    Engine & memory_mode(const std::string & mode);
+    // GPU hot-expert cache for a paged MoE model, in MiB: -1 = auto (on a
+    // discrete GPU the VRAM left after the dense weights, KV and compute
+    // buffers; off on an iGPU / unified memory, where it measured slower),
+    // 0 = off (the CPU computes the experts straight from the page cache),
+    // > 0 = that many MiB.
+    Engine & expert_cache_mb(long long mb);
+    // Read-ahead of routed experts from disk in paged mode (default on): the
+    // router's choice is observed per layer and the experts that are neither
+    // in the GPU cache nor in RAM are queued as one large read each.
+    Engine & expert_prefetch(bool on = true);
+
     // ---------------- reasoning / thinking ----------------------------------
     // Toggle the chat-template `enable_thinking` flag (used by Qwen3, R1,
     // etc.). Default ON: the model sees thinking as enabled and may emit
@@ -477,6 +505,21 @@ class Engine {
     };
     PerfData perf_data()  const;
     void     perf_reset();
+
+    // Where the loaded model's weights live and how paging is doing.
+    struct MemoryInfo {
+        std::string   mode;              // "gpu" | "paged" ("" before load)
+        std::string   requested;         // "auto" | "gpu" | "paged"
+        std::string   reason;            // why (auto's verdict, overrides)
+        std::uint64_t model_bytes   = 0; // tensor bytes of every split
+        std::uint64_t expert_bytes  = 0; // routed experts (paged from disk)
+        std::uint64_t ram_bytes     = 0; // MemTotal
+        std::uint64_t gpu_cache_bytes = 0; // GPU hot-expert cache (moe_cache_size)
+        int           gpu_layers    = -1;  // n_gpu_layers handed to llama.cpp
+        bool          prefetch      = false; // ExpertPager attached
+        paging::PagerStats pager;        // zero when no pager
+    };
+    MemoryInfo memory_info() const;
 
     // Render the chat-template state for the current history+tools and
     // return the resulting common_chat_params.  Exposed so the HTTP layer

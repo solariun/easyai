@@ -3674,6 +3674,49 @@ static void route_speech(ServerCtx & ctx, const httplib::Request & req, httplib:
 // ---------------------------------------------------------------------------
 // GET /health   →  small status JSON.
 // ---------------------------------------------------------------------------
+// "12.3 GiB" — for the banner's memory line.
+static std::string fmt_gib(std::uint64_t b) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.1f GiB", (double) b / 1073741824.0);
+    return buf;
+}
+
+// Where the weights live and how the paged experts are served — /health
+// "memory" (spec.md "Disk-paged MoE experts"). Counters are cumulative since
+// the model was loaded; the rates are shares of routed (layer, expert)
+// activations: gpu = GPU hot-expert cache, ram = page cache, disk = read
+// from the GGUF.
+static ordered_json memory_json(const easyai::Engine::MemoryInfo & m) {
+    ordered_json j;
+    j["mode"]       = m.mode;
+    j["requested"]  = m.requested;
+    j["reason"]     = m.reason;
+    j["weights_bytes"] = m.model_bytes;
+    j["experts_bytes"] = m.expert_bytes;
+    j["ram_bytes"]     = m.ram_bytes;
+    j["gpu_layers"]    = m.gpu_layers;
+    if (m.mode == "paged") {
+        j["gpu_expert_cache_bytes"] = m.gpu_cache_bytes;
+        j["expert_prefetch"]        = m.prefetch;
+        const auto & p = m.pager;
+        ordered_json e;
+        e["layers"]          = p.layers;
+        e["gpu_cache_slots"] = p.gpu_cache_slots;
+        e["ubatches"]        = p.ubatches;
+        e["routed"]          = p.routed;
+        e["gpu_hits"]        = p.gpu_hits;
+        e["ram_hits"]        = p.ram_hits;
+        e["disk_reads"]      = p.disk_reads;
+        e["prefetch_bytes"]  = p.prefetch_bytes;
+        const double n = p.routed > 0 ? (double) p.routed : 1.0;
+        e["gpu_hit_rate"]  = p.routed ? (double) p.gpu_hits   / n : 0.0;
+        e["ram_hit_rate"]  = p.routed ? (double) p.ram_hits   / n : 0.0;
+        e["disk_rate"]     = p.routed ? (double) p.disk_reads / n : 0.0;
+        j["experts"] = std::move(e);
+    }
+    return j;
+}
+
 static void route_health(ServerCtx & ctx, const httplib::Request &,
                          httplib::Response & res) {
     ordered_json j;
@@ -3709,6 +3752,7 @@ static void route_health(ServerCtx & ctx, const httplib::Request &,
         j["assistant_enabled"] = ctx.assistant_cfg.enabled;
     }
     j["assistant_running"] = ctx.assistant.running();
+    if (ctx.engine.is_loaded()) j["memory"] = memory_json(ctx.engine.memory_info());
 
     // Compatibility shims this server speaks. Lets clients
     // auto-detect which API they can use without trial requests.
@@ -3740,6 +3784,23 @@ static void route_metrics(ServerCtx & ctx, const httplib::Request &,
       << "# HELP easyai_tool_calls_total Total tool_calls returned to clients.\n"
       << "# TYPE easyai_tool_calls_total counter\n"
       << "easyai_tool_calls_total " << ctx.n_tool_calls.load() << "\n";
+    if (ctx.engine.is_loaded()) {
+        const auto m = ctx.engine.memory_info();
+        if (m.mode == "paged") {
+            const auto & p = m.pager;
+            o << "# HELP easyai_experts_routed_total Distinct (layer, expert) activations per ubatch (paged mode).\n"
+              << "# TYPE easyai_experts_routed_total counter\n"
+              << "easyai_experts_routed_total " << p.routed << "\n"
+              << "# HELP easyai_experts_served_total Routed experts by where they were read from.\n"
+              << "# TYPE easyai_experts_served_total counter\n"
+              << "easyai_experts_served_total{tier=\"gpu\"} "  << p.gpu_hits   << "\n"
+              << "easyai_experts_served_total{tier=\"ram\"} "  << p.ram_hits   << "\n"
+              << "easyai_experts_served_total{tier=\"disk\"} " << p.disk_reads << "\n"
+              << "# HELP easyai_experts_prefetch_bytes_total Bytes queued for read-ahead from disk.\n"
+              << "# TYPE easyai_experts_prefetch_bytes_total counter\n"
+              << "easyai_experts_prefetch_bytes_total " << p.prefetch_bytes << "\n";
+        }
+    }
     res.set_content(o.str(), "text/plain; version=0.0.4");
 }
 
@@ -3908,6 +3969,11 @@ static bool set_model_symlink(const std::string & link_path, const std::string &
         "  flash_attn       -fa, --flash-attn         Force flash attention on.\n"
         "  mlock            --mlock                   Lock weights into RAM.\n"
         "  no_mmap          --no-mmap                 Disable mmap of the GGUF.\n"
+        "  memory_mode      --memory-mode <m>         auto|gpu|paged (default auto). paged: MoE experts\n"
+        "                                              stay in the mmap'd GGUF, read from disk on demand;\n"
+        "                                              auto picks paged only when the weights exceed memory.\n"
+        "  expert_cache     --expert-cache <v>        GPU hot-expert cache in paged mode: auto|off|<MiB>.\n"
+        "  no_expert_prefetch --no-expert-prefetch    Paged mode: no read-ahead of routed experts.\n"
         "  numa             --numa <strategy>         distribute|isolate|numactl|mirror.\n"
         "  split_mode       -sm, --split-mode <m>     none|layer|row (multi-GPU split).\n"
         "  rope_scaling     --rope-scaling <type>     none|linear|yarn.\n"
@@ -4115,6 +4181,10 @@ struct ServerArgs {
     bool        flash_attn     = false;
     bool        mlock          = false;
     bool        no_mmap        = false;
+    // Models larger than memory (spec.md "Disk-paged MoE experts")
+    std::string memory_mode    = "auto";   // auto|gpu|paged
+    std::string expert_cache   = "auto";   // auto|off|<MiB> GPU hot-expert cache
+    bool        no_expert_prefetch = false;
     bool        metrics        = false;
     bool        reasoning      = true;   // enable_thinking flag default ON
     bool        no_think       = false;  // strip <think>…</think> from /v1 responses
@@ -4410,6 +4480,9 @@ static const std::vector<FlagDef> & kFlags() {
         { {"-fa","--flash-attn"},  "ENGINE", "flash_attn",     "flash_attn",     false, SET_BOOL_TRUE(&ServerArgs::flash_attn) },
         { {"--mlock"},             "ENGINE", "mlock",          "mlock",          false, SET_BOOL_TRUE(&ServerArgs::mlock) },
         { {"--no-mmap"},           "ENGINE", "no_mmap",        "no_mmap",        false, SET_BOOL_TRUE(&ServerArgs::no_mmap) },
+        { {"--memory-mode"},       "ENGINE", "memory_mode",    "memory_mode",    true,  SET_STR(&ServerArgs::memory_mode) },
+        { {"--expert-cache"},      "ENGINE", "expert_cache",   "expert_cache",   true,  SET_STR(&ServerArgs::expert_cache) },
+        { {"--no-expert-prefetch"},"ENGINE", "no_expert_prefetch","no_expert_prefetch",false, SET_BOOL_TRUE(&ServerArgs::no_expert_prefetch) },
         { {"-nkvo","--no-kv-offload"},"ENGINE","no_kv_offload","no_kv_offload",  false, SET_BOOL_TRUE(&ServerArgs::no_kv_offload) },
         { {"--kv-unified"},        "ENGINE", "kv_unified",     "kv_unified",     false, SET_BOOL_TRUE(&ServerArgs::kv_unified) },
         { {"-ctk","--cache-type-k"},"ENGINE","cache_type_k",   "cache_type_k",   true,  SET_STR(&ServerArgs::cache_type_k) },
@@ -8474,6 +8547,31 @@ int main(int argc, char ** argv) {
     if (args.flash_attn)     ctx->engine.flash_attn(true);
     if (args.mlock)          ctx->engine.use_mlock(true);
     if (args.no_mmap)        ctx->engine.use_mmap(false);
+    {
+        // models larger than memory: auto|gpu|paged + GPU hot-expert cache
+        const std::string before = ctx->engine.last_error();
+        ctx->engine.memory_mode(args.memory_mode);
+        if (ctx->engine.last_error() != before) {
+            std::fprintf(stderr, "[easyai-server] %s\n", ctx->engine.last_error().c_str());
+            return 1;
+        }
+        long long mb = -1;
+        std::string ec = args.expert_cache;
+        for (auto & ch : ec) ch = (char) std::tolower((unsigned char) ch);
+        if (ec.empty() || ec == "auto") mb = -1;
+        else if (ec == "off" || ec == "0" || ec == "none" || ec == "false") mb = 0;
+        else {
+            char * end = nullptr;
+            mb = std::strtoll(ec.c_str(), &end, 10);
+            if (!end || *end != '\0' || mb <= 0) {
+                std::fprintf(stderr, "[easyai-server] expert_cache: '%s' is not auto, off or a size in MiB\n",
+                             args.expert_cache.c_str());
+                return 1;
+            }
+        }
+        ctx->engine.expert_cache_mb(mb);
+        ctx->engine.expert_prefetch(!args.no_expert_prefetch);
+    }
     if (!args.numa.empty())       ctx->engine.numa(args.numa);
     if (!args.split_mode.empty()) ctx->engine.split_mode(args.split_mode);
     if (!args.rope_scaling.empty()) ctx->engine.rope_scaling(args.rope_scaling);
@@ -8541,6 +8639,7 @@ int main(int argc, char ** argv) {
         if (!p.empty()) ctx->model_id = p;
     }
 
+    const easyai::Engine::MemoryInfo banner_mem = ctx->engine.memory_info();
     if (model_loaded) std::fprintf(stderr,
         "[easyai-server] %s loaded\n"
         "                backend=%s  ctx=%d  tools=%zu  preset=%s%s\n"
@@ -8549,6 +8648,8 @@ int main(int argc, char ** argv) {
         "                penalties: repeat=%.2f  presence=%.2f  frequency=%.2f\n"
         "                rope: scaling=%s  freq_scale=%.2f  yarn_orig_ctx=%d\n"
         "                compute: ngl=%d  flash_attn=%s  mlock=%s  no_mmap=%s  split_mode=%s\n"
+        "                memory: mode=%s  gpu_expert_cache=%s  expert_prefetch=%s\n"
+        "                        %s\n"
         "                cache: type_k=%s  type_v=%s  no_kv_offload=%s\n"
         "                generation: max_tokens=%d  seed=%u\n"
         "                listening on %s://%s:%d  (webui at /)\n"
@@ -8569,6 +8670,10 @@ int main(int argc, char ** argv) {
         args.ngl, args.flash_attn ? "ON" : "OFF",
         args.mlock ? "ON" : "OFF", args.no_mmap ? "ON" : "OFF",
         args.split_mode.empty() ? "default" : args.split_mode.c_str(),
+        banner_mem.mode.c_str(),
+        banner_mem.mode == "paged" ? fmt_gib(banner_mem.gpu_cache_bytes).c_str() : "-",
+        banner_mem.prefetch ? "on" : "off",
+        banner_mem.reason.c_str(),
         args.cache_type_k.empty() ? "default" : args.cache_type_k.c_str(),
         args.cache_type_v.empty() ? "default" : args.cache_type_v.c_str(),
         args.no_kv_offload ? "ON" : "OFF",
@@ -8897,6 +9002,17 @@ int main(int argc, char ** argv) {
                         pressure);
                 } else {
                     std::fprintf(stderr, "  tcp: n/a");
+                }
+                if (ctx_ref.engine.is_loaded()) {
+                    const auto m = ctx_ref.engine.memory_info();
+                    if (m.mode == "paged" && m.pager.routed > 0) {
+                        const double n = (double) m.pager.routed;
+                        std::fprintf(stderr, "  experts: gpu=%.1f%% ram=%.1f%% disk=%.1f%% read_ahead=%s",
+                            100.0 * (double) m.pager.gpu_hits / n,
+                            100.0 * (double) m.pager.ram_hits / n,
+                            100.0 * (double) m.pager.disk_reads / n,
+                            fmt_bytes(m.pager.prefetch_bytes).c_str());
+                    }
                 }
                 std::fputc('\n', stderr);
                 std::fflush(stderr);
@@ -9545,12 +9661,15 @@ int main(int argc, char ** argv) {
             {"last_prompt_tps", tps(perf.n_prompt_tokens, perf.prompt_ms)},
             {"last_gen_tps", tps(perf.n_predicted_tokens, perf.predicted_ms)},
         };
+        if (ctx_ref.engine.is_loaded()) model["memory"] = memory_json(ctx_ref.engine.memory_info());
 
         ordered_json params = {
             {"context", args.n_ctx}, {"gpu_layers", args.ngl},
             {"threads", args.n_threads}, {"threads_batch", args.threads_batch},
             {"batch", args.n_batch}, {"parallel", args.parallel},
             {"flash_attn", args.flash_attn}, {"mlock", args.mlock}, {"mmap", !args.no_mmap},
+            {"memory_mode", args.memory_mode}, {"expert_cache", args.expert_cache},
+            {"expert_prefetch", !args.no_expert_prefetch},
             {"max_tokens", args.max_tokens},
             {"rope_scaling", args.rope_scaling.empty() ? "auto" : args.rope_scaling},
             {"temperature", ctx_ref.def_temperature}, {"top_p", ctx_ref.def_top_p},

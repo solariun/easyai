@@ -465,6 +465,35 @@ staged until `load()`, then modifiable via `set_sampling()`.
 The INI key `[ENGINE] frequency_penalty` and per-model
 `[MODEL_<pattern>] frequency_penalty` also wire through.
 
+### Memory placement — models larger than memory (2026-11-20)
+
+`Engine::memory_mode("auto"|"gpu"|"paged")`, `expert_cache_mb`,
+`expert_prefetch`; implementation in `src/paging.cpp`
+(`include/easyai/paging.hpp`), contract in spec.md "Disk-paged MoE
+experts". `load()` calls `Impl::plan_memory()` after the backends are
+loaded and before `common_init_from_params`:
+
+1. `paging::scan_gguf` sums the tensor table of every split (no weights
+   read) and splits out the routed experts (`LLM_FFN_EXPS_REGEX`).
+2. `paging::plan_memory` compares the tensors with RAM (unified memory /
+   CPU-only) or VRAM (discrete GPU) minus a reserve. Fits → the
+   historical params untouched.
+3. Paged MoE → `load_mode = MMAP`, experts overridden to the CPU buffer
+   type (zero-copy mmap views), `no_extra_bufts`, `fit_params = false`,
+   `n_ubatch` ≥ min(batch, 2048), `moe_cache_size` from `expert_cache`
+   (auto: 0 on unified memory; on a discrete GPU the VRAM left by a
+   no-alloc dry run via `common_get_device_memory_data`), and
+   `cb_eval` = `ExpertPager::eval_callback`.
+4. After the context exists, `ExpertPager::attach` walks a
+   `llama_graph_reserve` graph for the host expert tensors and sizes an
+   LRU mirror of llama.cpp's MoE cache; the callback then sees
+   `ffn_moe_topk-<il>` per layer, replays the LRU, probes the GGUF's
+   page-cache residency with `preadv2(RWF_NOWAIT)` and `madvise`s
+   `MADV_WILLNEED` on the experts the GPU cache is about to upload.
+
+Why the tiers are split this way (GPU LRU from upstream, RAM tier left to
+the kernel with read-ahead, no mlock pinning) is in spec.md's Decisions.
+
 ### Compute and context-extension knobs
 
 Three additional Engine setters control how the model distributes

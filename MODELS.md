@@ -344,6 +344,14 @@ curl -s -b cj -X POST $B/models/api/run -H 'Content-Type: application/json' -d '
   speed / fit / context), with llmfit's constants. A few exotic branches (full
   MoE bandwidth decomposition, the complete GPU bandwidth table) are
   approximated — numbers may differ from llmfit at the margins, which is expected.
+- **Fits assume a resident model.** The fit levels judge a model held whole in
+  RAM / VRAM. Since 2026-11-20 the server also runs a MoE GGUF larger than
+  memory by paging its routed experts from disk (`[ENGINE] memory_mode = auto`,
+  see [easyai-server.md → Models larger than memory](easyai-server.md#models-larger-than-memory-memory_mode)),
+  so a MoE marked too big can still be downloaded and **Run** — it loads
+  `paged` and runs at the speed of the disk for the experts that do not fit.
+  `/models/api/status` → `model.memory` shows where the running model's
+  weights live and how its experts are served.
 
 ---
 

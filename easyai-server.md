@@ -54,6 +54,14 @@ global section. If the operator passed `--port 8080` in the systemd
 unit AND the INI says `port = 9090`, the server listens on **8080**.
 Drop the CLI flag and the INI value takes over.
 
+Every flag in the tables below has its INI key, and every key is written
+(commented, with its default) in `resources/easyai.ini.example` — the
+complete reference INI. ctest `ini_keys` (`tests/test_ini_keys.sh`) fails
+the build's tests when a flag's key is missing from that file or from this
+page. An INI kept across `install_easyai_server.sh --upgrade` gets keys
+added after it was written only where the installer says so (the
+`memory_mode` / `expert_cache` / `no_expert_prefetch` trio, 2026-11-20).
+
 ### Sections
 
 | Section | Purpose | Status |
@@ -151,6 +159,9 @@ Model loading and inference tunables.
 | `flash_attn` | bool | `-fa`, `--flash-attn` | `off` | Free perf on every backend that supports it. |
 | `mlock` | bool | `--mlock` | `off` | Pin model weights in RAM. Needs `LimitMEMLOCK=infinity` on the unit. |
 | `no_mmap` | bool | `--no-mmap` | `off` | Required with `mlock` for portability. |
+| `memory_mode` | enum | `--memory-mode` | `auto` | Where the weights live. `gpu` = everything in GPU memory (the historical path; `mlock`/`no_mmap`/`ngl` honoured). `paged` = a MoE model's routed experts stay in the mmap'd GGUF and are read from disk on demand, everything else (attention, shared experts, embeddings, KV) on the GPU; a dense model splits whole layers GPU/disk. `auto` = `paged` only when the tensors exceed RAM − max(4 GiB, RAM/16) (iGPU / CPU-only) or VRAM − max(512 MiB, VRAM/32) (discrete GPU). See [Models larger than memory](#models-larger-than-memory-memory_mode). |
+| `expert_cache` | string | `--expert-cache` | `auto` | GPU hot-expert cache for a paged MoE model (llama.cpp's MoE cache): `auto` (discrete GPU: the VRAM left after the dense weights, KV and compute buffers; iGPU / unified memory: off — the CPU computes the experts from the page cache, measured faster), `off`, or a size in MiB. |
+| `no_expert_prefetch` | bool | `--no-expert-prefetch` | `off` | Paged mode: no read-ahead of routed experts (removes the per-layer routing hook). |
 | `no_kv_offload` | bool | `-nkvo`, `--no-kv-offload` | `off` | Keep KV cache on CPU even with GPU layers. |
 | `kv_unified` | bool | `--kv-unified` | `off` | Single unified KV buffer across sequences. |
 | `rope_scaling` | string | `--rope-scaling` | `yarn` | RoPE positional-encoding scaling for context extension beyond the model's training length. `none` (no scaling), `linear` (linear RoPE scaling), `yarn` (YaRN scaling). |
@@ -491,6 +502,8 @@ cache_type_k    = q8_0
 cache_type_v    = q8_0
 mlock           = on
 no_mmap         = on
+memory_mode     = auto
+expert_cache    = auto
 rope_scaling    = yarn
 yarn_orig_ctx   = 131072
 rope_freq_scale = 2
@@ -585,7 +598,7 @@ URLs for the host you are on ("Endpoints" card, also in
 | GET | `/bundle.{js,css}` | webui | (open) | Bundle assets. |
 | GET | `/loading.html` | webui | (open) | Loading splash. |
 | GET | `/favicon` (+ `.ico`/`.svg`) | webui | (open) | Operator-supplied (`--webui-icon`) or the embedded AI Box logo SVG (compiled into the binary as `kBrandSvg`; canonical copy at `webui/AI-brain.svg`). |
-| GET | `/health` | easyai | (open) | `{model, model_loaded, load_error?, stt_loaded, stt_model, tts_available, tts_engine, tts_fallback?, assistant_enabled, assistant_running, tls, backend, tools, preset, compat:{openai, ollama, mcp, stt}}` — liveness probe. `model_loaded:false` means the server is up without a model (`model` reads `(no model)`, `load_error` says why); `/props` carries the same `model_loaded`. |
+| GET | `/health` | easyai | (open) | `{model, model_loaded, load_error?, stt_loaded, stt_model, tts_available, tts_engine, tts_fallback?, assistant_enabled, assistant_running, tls, backend, tools, preset, memory?, compat:{openai, ollama, mcp, stt}}` — liveness probe. `memory` (when a model is loaded) says where the weights live and, in paged mode, where the routed experts were served from — see [Models larger than memory](#models-larger-than-memory-memory_mode). `model_loaded:false` means the server is up without a model (`model` reads `(no model)`, `load_error` says why); `/props` carries the same `model_loaded`. |
 | GET | `/metrics` | easyai | api_key | Prometheus exposition (only when `--metrics` is on). |
 | GET | `/v1/models` | OpenAI | api_key | OpenAI-shape list-models. |
 | GET | `/v1/tools` | easyai | api_key | Tool catalogue. Each entry: `{name, description, short_description}`. `description` is the full multi-line manual; `short_description` is the one-line trigger shipped in the per-turn `<tools>` block. `easyai-cli` reads `short_description` to render its prompt prefix; the webui popover reads `description`. Pre-Shape-C consumers see only the `description` field — backward compatible. |
@@ -1057,6 +1070,81 @@ Pinning model weights in RAM prevents the kernel paging them under
 memory pressure (catastrophic for token latency). `--no-mmap` is
 needed for `--mlock` to be portable across all GPU backends. The
 drop-in's `LimitMEMLOCK=infinity` is what makes `mlock` actually work.
+Both apply to the `gpu` memory mode only: a paged load ignores them (it
+needs the mmap and must not pin it) and says so in its memory line.
+
+### Models larger than memory (`memory_mode`)
+
+A GGUF bigger than RAM (or VRAM) loads when its routed MoE experts stay
+on disk. Three tiers serve them:
+
+| Tier | Holds | Managed by |
+|------|-------|------------|
+| disk — the GGUF, mmap'd | every routed expert | kernel page faults + easyai read-ahead |
+| RAM page cache | recently read experts | the kernel; easyai reads ahead what is about to be used |
+| GPU hot-expert cache | experts used in generation (LRU) | llama.cpp's MoE cache, sized by `expert_cache` — discrete GPUs; off by default on an iGPU |
+
+```ini
+[ENGINE]
+memory_mode  = auto     # auto | gpu | paged
+expert_cache = auto     # auto | off | <MiB>
+#no_expert_prefetch = on
+
+# One model only: a [MODEL_<pattern>] profile takes the same keys.
+[MODEL_Nex-N2.6]
+memory_mode  = paged
+```
+
+All three are also flags (`--memory-mode`, `--expert-cache`,
+`--no-expert-prefetch`, CLI > `[MODEL_*]` > `[ENGINE]`) and are written in
+`resources/easyai.ini.example` and the installer's INI. An INI written
+before 2026-11-20 gets them from `install_easyai_server.sh --upgrade`:
+added once under `[ENGINE]` at their defaults, an existing value never
+changed.
+
+- `auto` (default) changes nothing for a model that fits: it pages only
+  when the tensors exceed RAM − max(4 GiB, RAM/16) on an iGPU or
+  CPU-only box, VRAM − max(512 MiB, VRAM/32) on a discrete card. If the
+  weights fit but the full-GPU load still fails (a long context's KV
+  cache), it retries once as `paged`.
+- `paged` with a MoE: experts in the mmap'd file (zero copy, never
+  pinned), everything else and the KV cache on the GPU (`ngl = 99`),
+  CPU repacking off, prompt ubatch raised to 2048. With a dense model:
+  as many whole layers on the GPU as fit, the rest read from the file.
+- easyai watches the router's choice per layer and asks the kernel to
+  read the routed experts that are not in RAM as one large read each
+  (`MADV_WILLNEED`) before they are used; with a GPU cache it replays the
+  cache's LRU so it never reads an expert the GPU already holds.
+- On an iGPU (unified memory) `expert_cache = auto` is off: the GPU cache
+  would copy experts into the same RAM the page cache needs, and on
+  ai-pro the CPU path generated 14 tok/s against 8.9 (2 GiB cache) and
+  9.5 (8 GiB). On a discrete GPU `auto` gives the leftover VRAM to it.
+- Speed is set by the disk and by how much of the active experts fit in
+  RAM + GPU cache. Prompts stream the uncached experts once per 2048-token
+  ubatch. The first load reads the whole file once (llama.cpp maps with
+  `MAP_POPULATE`).
+
+What a paged load prints (illustrative numbers for a 140 GiB MoE on ai-pro):
+
+```
+[easyai] memory: mode=paged (auto: weights 140.2 GiB exceed 85.5 GiB of unified RAM — routed experts paged from disk; GPU expert cache off (unified memory: the CPU computes the experts from the page cache))  weights=140.2 GiB  experts=131.0 GiB  ram=91.2 GiB  gpu_expert_cache=0.0 GiB  ngl=99
+[easyai] memory: expert pager on 60 MoE layers, GPU cache mirror 0 expert slots
+```
+
+`GET /health` → `memory.experts` counts where the routed experts came
+from since the load (`gpu_hit_rate`, `ram_hit_rate`, `disk_rate`,
+`prefetch_bytes`); with `--metrics`, `/metrics` exposes
+`easyai_experts_routed_total`, `easyai_experts_served_total{tier="gpu|ram|disk"}`
+and `easyai_experts_prefetch_bytes_total`; the METRICS log line ends with
+`experts: gpu=…% ram=…% disk=…% read_ahead=…`. `/models/api/status` carries
+the same block as `model.memory` plus `parameters.memory_mode`,
+`expert_cache` and `expert_prefetch`.
+A high `disk_rate` in steady generation means the active experts do not
+fit: a smaller quant, a larger `expert_cache`, or more RAM.
+
+On ai-pro the NVMe reads freshly written data at ~1.4 GB/s but data
+written weeks earlier at 0.25–0.45 GB/s; copy a large GGUF to a new
+file (then rename it over the old one) before paging it.
 
 ### CPU threads
 

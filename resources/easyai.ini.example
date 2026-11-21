@@ -77,6 +77,12 @@
 ;   openssl rand -hex 32
 ;api_key          = REPLACE-WITH-OPENSSL-RAND-HEX-32
 
+; Serve https with this PEM certificate + key (both needed). Browsers
+; allow the microphone only on https or localhost. Self-signed is fine
+; on a LAN. Also --tls-cert / --tls-key.
+;tls_cert         = /etc/easyai/tls/cert.pem
+;tls_key          = /etc/easyai/tls/key.pem
+
 ; Hard cap on the HTTP request body, in bytes. Above this the
 ; server returns 413. Default 32 MiB.
 ;max_body         = 33554432
@@ -193,6 +199,14 @@
 ; models already in use.
 ;download_dir      = /var/lib/easyai/models
 
+; Where the HuggingFace catalog cache is kept. Default: download_dir.
+; Also --data-dir.
+;data_dir          = /var/lib/easyai/models
+
+; Most-downloaded + most-recent GGUF repos per catalog listing, 1-1000
+; (default 1000). Search is always live. Also --catalog-size.
+;catalog_size      = 1000
+
 ; ============================================================
 ; [ENGINE] — model loading + inference tunables
 ; ============================================================
@@ -244,6 +258,32 @@
 ; needed on network filesystems.
 ;no_mmap          = false
 
+; ---------- models larger than memory ----------
+; Where the weights live (easyai-server.md "Models larger than memory"):
+;   auto  — default. A model that fits loads whole (the `gpu` path); one
+;           whose weights exceed RAM minus a reserve (max(4 GiB, RAM/16))
+;           is paged; a full-GPU load that fails is retried once paged.
+;   gpu   — everything in GPU memory; mlock / no_mmap / ngl honoured.
+;   paged — a MoE model's routed experts stay in the mmap'd GGUF and are
+;           read from disk on demand (attention, shared experts and the KV
+;           cache stay on the GPU); a dense model is split GPU / disk by
+;           layers. mlock and no_mmap are ignored for the paged weights.
+; Also --memory-mode. Works in a [MODEL_<pattern>] profile too.
+;memory_mode      = auto
+
+; GPU hot-expert cache for a paged MoE model (llama.cpp's MoE cache):
+;   auto — the VRAM left after weights / KV / compute on a discrete GPU;
+;          OFF on an iGPU / unified memory (measured slower there: the
+;          cache takes RAM from the page cache and every miss is a copy).
+;   off  — no cache.   <MiB> — exactly that much.
+; Also --expert-cache.
+;expert_cache     = auto
+
+; Paged mode: turn off the read-ahead of routed experts (one large
+; MADV_WILLNEED read per expert the router picks that is not in the
+; page cache yet; +3-10% measured). Also --no-expert-prefetch.
+;no_expert_prefetch = off
+
 ; Keep KV cache on CPU even with GPU layers — useful when VRAM
 ; is tiny.
 ;no_kv_offload    = false
@@ -261,6 +301,17 @@
 ; NUMA strategy. Empty = none. Options: distribute, isolate,
 ; numactl, mirror.
 ;numa             =
+
+; Multi-GPU split: none | layer | row. Also -sm / --split-mode.
+;split_mode       = layer
+
+; Context extension. rope_scaling = none | linear | yarn;
+; rope_freq_scale = RoPE frequency scale; yarn_orig_ctx = the model's
+; original training context (0 = from the GGUF). Also --rope-scaling,
+; --rope-scale, --yarn-orig-ctx.
+;rope_scaling     = yarn
+;rope_freq_scale  = 1.0
+;yarn_orig_ctx    = 0
 
 ; GGUF metadata overrides (comma-separated `key=type:value`).
 ; Types: int | float | bool | str. Useful for fixing tokenizer
@@ -302,6 +353,11 @@
 ;   deepseek-legacy — split for sync, leave inline for streaming
 ;reasoning_format = deepseek
 
+; How hard a reasoning model thinks: auto | low | medium | high |
+; xhigh | max | minimal. Default max = the deepest level the chat
+; template accepts. Also --reasoning-effort.
+;reasoning_effort = max
+
 ; ---------- sampling (per-request overrides win) ----------
 
 ;temperature      = 0.7
@@ -316,6 +372,9 @@
 ; OpenAI presence penalty ([-2.0, 2.0]). Production AI box pairs
 ; presence=1.5 with repeat_penalty=1.0 for long agentic flows.
 ;presence_penalty = 0.0
+
+; OpenAI frequency penalty ([-2.0, 2.0]). Default 0.
+;frequency_penalty = 0.0
 
 ; Cap on assistant reply length. -1 = unlimited (until EOS or
 ; ctx full).
@@ -373,6 +432,9 @@
 ;flash_attn          = true
 ;mlock               = false
 ;no_mmap             = false
+;memory_mode         = auto
+;expert_cache        = auto
+;no_expert_prefetch  = off
 ;no_kv_offload       = false
 ;kv_unified          = false
 ;cache_type_k        = q8_0
@@ -392,6 +454,7 @@
 ;; --- chat template / reasoning ---
 ;chat_template_file  = /etc/easyai/qwen3-think.jinja
 ;reasoning_format    = deepseek
+;reasoning_effort    = max
 ;
 ;; --- sampling (per-request overrides win) ---
 ;temperature         = 0.7
