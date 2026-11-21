@@ -116,20 +116,6 @@
 #                                                    # V3, MimoVL, etc.); plain
 #                                                    # models won't load.
 #   ./install_easyai_server.sh --mtp --mtp-n-max 8   # override the draft window
-#   ./install_easyai_server.sh --no-lemonade         # skip the Lemonade Server
-#                                                    # install. Default: install
-#                                                    # Lemonade Server (AMD's
-#                                                    # NPU-capable LLM runtime)
-#                                                    # alongside easyai-server,
-#                                                    # but leave its systemd
-#                                                    # unit DISABLED — operator
-#                                                    # starts it manually via
-#                                                    # `lemonade-server serve
-#                                                    # --no-tray`. Default port
-#                                                    # 13305. Ubuntu-only path
-#                                                    # (PPA); on Debian we warn
-#                                                    # and skip with a pointer
-#                                                    # to the manual build.
 #   ./install_easyai_server.sh --no-rocm-install     # skip auto-install of the
 #                                                    # ROCm SDK when --backend
 #                                                    # hip is used. Default:
@@ -194,6 +180,18 @@
 #                                                    # values throttle sooner;
 #                                                    # raise only if cooling is
 #                                                    # confirmed adequate.
+#   ./install_easyai_server.sh --no-vulkan-sdk       # Vulkan: build with the
+#                                                    # distro glslc only. By
+#                                                    # default a glslc that lacks
+#                                                    # a llama.cpp shader feature
+#                                                    # (int8 dot product, bf16,
+#                                                    # fp8, fp4) is replaced by
+#                                                    # the pinned LunarG SDK's
+#                                                    # (x86_64, sha256-checked,
+#                                                    # ~350 MB download, only
+#                                                    # glslc kept in
+#                                                    # ~/opt/vulkan-sdk).
+#   ./install_easyai_server.sh --vulkan-sdk 1.4.363.1 # pick the SDK version.
 #   ./install_easyai_server.sh --no-service          # build/install only
 #   ./install_easyai_server.sh -h                    # show this help
 # ============================================================================
@@ -267,22 +265,6 @@ do_presets=1                                  # symlink easyai-cli → /usr/bin/
 do_model=1
 do_upgrade=0
 copy_model=0
-do_lemonade=1                                 # install Lemonade Server (AMD's
-                                              # NPU-capable LLM runtime) via
-                                              # the lemonade-team PPA on
-                                              # Ubuntu. Skipped on non-Ubuntu
-                                              # (Debian etc.) with a pointer
-                                              # to the upstream manual build.
-                                              # The systemd unit shipped by
-                                              # the PPA is DISABLED + STOPPED
-                                              # after install so the operator
-                                              # runs Lemonade by hand — that
-                                              # was the user's explicit ask
-                                              # (manual NPU experimentation,
-                                              # no auto-start). Default port
-                                              # is upstream 13305 (not
-                                              # configurable here). Set 0 via
-                                              # --no-lemonade.
 do_rocm_install=1                             # auto-install minimal ROCm SDK
                                               # (rocm-hip-runtime + rocm-hip-
                                               # sdk + rocblas + hipblas +
@@ -320,7 +302,20 @@ tdp_watts=54                                  # STAPM / PPT-SLOW / PPT-FAST
 tdp_tctl=95                                   # Tctl junction temp cap in °C.
                                               # 95 = chip max; lower throttles
                                               # earlier. Override --tdp-tctl.
-do_whisper=1                                  # clone ../whisper.cpp so the
+do_vulkan_sdk=1                               # Vulkan builds compile EVERY shader
+                                              # feature llama.cpp tests for (int8
+                                              # dot product, bf16, fp8, fp4,
+                                              # coopmat, coopmat2). When the
+                                              # distro glslc cannot compile one,
+                                              # the pinned LunarG SDK's glslc is
+                                              # fetched (x86_64, sha256-checked,
+                                              # only bin/glslc kept) into
+                                              # $src_root/vulkan-sdk/<version>.
+                                              # 0 via --no-vulkan-sdk.
+vulkan_sdk_version="1.4.363.1"                # LunarG SDK of that glslc (2026-11-03).
+                                              # --vulkan-sdk <ver> picks another;
+                                              # sha256 pins: vulkan_sdk_sha256().
+do_whisper=1                                 # clone ../whisper.cpp so the
                                               # server gets voice transcription
                                               # (POST /v1/audio/transcriptions,
                                               # mic chip). --no-whisper skips
@@ -574,8 +569,8 @@ while [[ $# -gt 0 ]]; do
         --tls)              do_tls=1; shift ;;
         --no-tls)           do_tls=0; shift ;;
         --with-llama-tools) do_llama_tools=1; shift ;;
-        --no-lemonade)      do_lemonade=0; shift ;;
-        --with-lemonade)    do_lemonade=1; shift ;;
+        --no-lemonade|--with-lemonade)  # Lemonade Server is no longer installed (2026-11-21); accepted so old command lines still run
+                            echo "$1: ignored — the installer no longer installs Lemonade Server" >&2; shift ;;
         --no-rocm-install)  do_rocm_install=0; shift ;;
         --with-rocm-install) do_rocm_install=1; shift ;;
         --rocm-version)     rocm_version="$2"; shift 2 ;;
@@ -583,6 +578,8 @@ while [[ $# -gt 0 ]]; do
         --with-tdp-unlock)  do_tdp_unlock=1; shift ;;
         --tdp-watts)        tdp_watts="$2"; shift 2 ;;
         --tdp-tctl)         tdp_tctl="$2"; shift 2 ;;
+        --no-vulkan-sdk)    do_vulkan_sdk=0; shift ;;
+        --vulkan-sdk)       vulkan_sdk_version="$2"; do_vulkan_sdk=1; shift 2 ;;
         --no-swap)          do_swap="off"; shift ;;
         --swap-tune)        do_swap="tune"; shift ;;
         --keep-swap)        do_swap=""; shift ;;
@@ -755,6 +752,28 @@ ort_sha256() {
         onnxruntime-linux-aarch64-1.31.0.tgz) echo c5b8b3cca31f3d643a3b313b8f42e2d0f16a4fcefd02cda343d97bd5306afaab ;;
         *)                                    echo "" ;;
     esac
+}
+# LunarG Vulkan SDK archives, by file name (sha from vulkan.lunarg.com/sdk/files.json).
+vulkan_sdk_sha256() {
+    case "$1" in
+        vulkansdk-linux-x86_64-1.4.363.1.tar.xz) echo b7867d8ca658563813af666f34b93db87f1b1c7d9d69d97e924c210c7ba33eb8 ;;
+        *)                                       echo "" ;;
+    esac
+}
+# glslc_missing_features <glslc> <feature-tests dir>: prints, one per line,
+# the llama.cpp Vulkan shader feature tests (integer_dot, bfloat16,
+# float_e4m3, ...) this glslc cannot compile — nothing when it compiles them
+# all. Same check as llama.cpp's ggml-vulkan/CMakeLists.txt (compute stage,
+# --target-env=vulkan1.3), which silently leaves out every shader of a
+# feature its glslc rejects (ai-pro until 2026-11-21: "int dot: 0").
+glslc_missing_features() {
+    local g="$1" d="$2" t
+    for t in "$d"/*.comp; do
+        [[ -e "$t" ]] || continue
+        if [[ -z "$g" ]] || ! "$g" -o /dev/null -fshader-stage=compute --target-env=vulkan1.3 "$t" >/dev/null 2>&1; then
+            basename "$t" .comp
+        fi
+    done
 }
 # verify_sha256 <file> <want> [<label>] [die|warn]
 #   Prints "sha256 ok" when the file matches. On a mismatch the file is
@@ -950,10 +969,10 @@ printf '    metrics          = %s\n' "$enable_metrics"
 printf '    verbose          = %s\n' "$enable_verbose"
 printf '    llama_tools      = %s   (llama-cli/server/gguf-split/quantize/bench/... in $prefix/bin)\n' \
     "$([[ $do_llama_tools -eq 1 ]] && echo on || echo off)"
-printf '    lemonade         = %s   (AMD Lemonade Server for NPU; systemd unit DISABLED, manual start)\n' \
-    "$([[ $do_lemonade -eq 1 ]] && echo on || echo off)"
 printf '    rocm_install     = %s   (auto-install minimal ROCm SDK for --backend hip on AMD CPU; version=%s)\n' \
     "$([[ $do_rocm_install -eq 1 ]] && echo on || echo off)" "$rocm_version"
+printf '    vulkan_sdk       = %s\n' \
+    "$([[ $do_vulkan_sdk -eq 1 ]] && echo "on — glslc of LunarG SDK $vulkan_sdk_version when the distro glslc lacks a llama.cpp shader feature (Vulkan builds)" || echo "off (--no-vulkan-sdk: distro glslc only)")"
 printf '    tdp_unlock       = %s   (Ryzen TDP unlock via ryzenadj+systemd timer; cap=%sW tctl=%s°C)\n' \
     "$([[ $do_tdp_unlock -eq 1 ]] && echo on || echo off)" "$tdp_watts" "$tdp_tctl"
 printf '    webui_title      = %s\n' "$webui_title"
@@ -1007,7 +1026,9 @@ if [[ $do_install -eq 1 ]]; then
             log "installing Vulkan SDK + Mesa drivers"
             sudo apt-get install -y --no-install-recommends \
                 mesa-vulkan-drivers vulkan-tools libvulkan-dev \
-                glslc glslang-tools spirv-tools libshaderc-dev
+                glslc glslang-tools spirv-tools libshaderc-dev xz-utils
+            # xz-utils: unpacks the LunarG SDK's glslc when the distro glslc
+            # cannot compile every llama.cpp shader feature (build step).
             ;;
         cuda)
             log "CUDA backend selected — assuming nvidia-cuda-toolkit is installed."
@@ -1255,7 +1276,53 @@ if [[ $do_build -eq 1 ]]; then
         cmake_flags+=( -DEASYAI_BUILD_LLAMA_TOOLS=ON )
     fi
     case "$backend_resolved" in
-        vulkan)  cmake_flags+=( -DGGML_VULKAN=ON ) ;;
+        vulkan)
+            cmake_flags+=( -DGGML_VULKAN=ON )
+            # Every llama.cpp shader feature compiled in (spec "Vulkan shader
+            # compiler"): llama.cpp drops, without an error, every shader of a
+            # feature its glslc cannot compile, and the GPU then never uses it.
+            vk_tests="$llama_dir/ggml/src/ggml-vulkan/vulkan-shaders/feature-tests"
+            vk_glslc="$(command -v glslc || true)"
+            if [[ -d "$vk_tests" ]]; then
+                vk_missing="$(glslc_missing_features "$vk_glslc" "$vk_tests" | tr '\n' ' ')"
+                if [[ -z "${vk_missing// /}" ]]; then
+                    log "  glslc ${vk_glslc}: every llama.cpp shader feature compiles"
+                elif [[ $do_vulkan_sdk -eq 0 ]]; then
+                    warn "  glslc ${vk_glslc:-<none>} cannot compile: ${vk_missing}— those shaders are left out (--no-vulkan-sdk)"
+                elif [[ "$(uname -m)" != "x86_64" ]]; then
+                    warn "  glslc ${vk_glslc:-<none>} cannot compile: ${vk_missing}— no LunarG SDK for $(uname -m); those shaders are left out"
+                else
+                    vk_sdk_glslc="$src_root/vulkan-sdk/$vulkan_sdk_version/x86_64/bin/glslc"
+                    if [[ ! -x "$vk_sdk_glslc" ]]; then
+                        vk_tgz="vulkansdk-linux-x86_64-$vulkan_sdk_version.tar.xz"
+                        vk_tmp="$(mktemp -d)"
+                        log "  glslc ${vk_glslc:-<none>} cannot compile: ${vk_missing}— fetching the glslc of LunarG Vulkan SDK $vulkan_sdk_version"
+                        if curl -fL -sS --retry 5 --retry-all-errors --connect-timeout 20 -o "$vk_tmp/$vk_tgz" \
+                                "https://sdk.lunarg.com/sdk/download/$vulkan_sdk_version/linux/$vk_tgz" \
+                            && verify_sha256 "$vk_tmp/$vk_tgz" "$(vulkan_sdk_sha256 "$vk_tgz")" "Vulkan SDK $vulkan_sdk_version" warn \
+                            && mkdir -p "$src_root/vulkan-sdk" \
+                            && tar -xJf "$vk_tmp/$vk_tgz" -C "$src_root/vulkan-sdk" "$vulkan_sdk_version/x86_64/bin/glslc"; then
+                            log "  installed $vk_sdk_glslc"
+                        else
+                            warn "  could not fetch the Vulkan SDK glslc — building with ${vk_glslc:-<none>} (shaders left out: ${vk_missing})"
+                        fi
+                        rm -rf "$vk_tmp"
+                    fi
+                    if [[ -x "$vk_sdk_glslc" ]]; then
+                        vk_sdk_missing="$(glslc_missing_features "$vk_sdk_glslc" "$vk_tests" | tr '\n' ' ')"
+                        if [[ -z "${vk_sdk_missing// /}" ]]; then
+                            log "  using $vk_sdk_glslc: every llama.cpp shader feature compiles"
+                        else
+                            warn "  $vk_sdk_glslc still cannot compile: ${vk_sdk_missing}— using it anyway (it compiles more)"
+                        fi
+                        vk_glslc="$vk_sdk_glslc"
+                    fi
+                fi
+            fi
+            # Always passed: a cached path from an earlier run never outlives
+            # the decision above (switching back to the distro glslc included).
+            [[ -n "$vk_glslc" ]] && cmake_flags+=( -DVulkan_GLSLC_EXECUTABLE="$vk_glslc" )
+            ;;
         cuda)    cmake_flags+=( -DGGML_CUDA=ON ) ;;
         hip)
             cmake_flags+=( -DGGML_HIP=ON )
@@ -3427,83 +3494,6 @@ TDP_TIMER
     fi
 fi
 
-# ---------- Lemonade Server (NPU sidecar, manual start) --------------------
-# Installs AMD's Lemonade Server alongside easyai-server so the box has a
-# second LLM runtime that can target the XDNA2 NPU (Ryzen AI). Per the
-# operator's explicit ask: install everything BUT leave the lemonade-server
-# systemd unit DISABLED + STOPPED — they want to run it by hand
-# (`lemonade-server serve --no-tray --port 13305`) while they iterate on
-# the NPU path. Default port is 13305 (upstream default; we don't override).
-#
-# Path matrix:
-#   Ubuntu (any release the PPA supports): add ppa:lemonade-team/stable,
-#     `apt install lemonade-server`, then disable+stop the unit.
-#   Debian (no PPA): warn, skip, point at the upstream "build from source"
-#     guide. Doing apt-add-repository against a Debian release silently
-#     mismatches the dists/ tree and breaks future updates — not worth it.
-#   Other distros (Arch / Fedora / ...): same warn-and-skip. The script's
-#     overall target is Debian/Ubuntu; Lemonade has its own docs for the
-#     rest.
-#
-# `do_lemonade=0` (set via --no-lemonade) skips the whole block.
-if [[ $do_lemonade -eq 1 ]]; then
-    log "Lemonade Server install (NPU sidecar — systemd unit will be left DISABLED for manual use)"
-
-    distro_id=""
-    if [[ -r /etc/os-release ]]; then
-        # shellcheck disable=SC1091
-        distro_id="$(. /etc/os-release && echo "${ID:-}")"
-    fi
-
-    case "$distro_id" in
-        ubuntu)
-            # software-properties-common gives us add-apt-repository on
-            # minimal Ubuntu images. Idempotent: re-running is a no-op
-            # once the PPA + package are in place. The whole script runs
-            # as NON-root (see EUID check above) and uses `sudo` for
-            # privileged commands — mirror that here.
-            if ! command -v add-apt-repository >/dev/null 2>&1; then
-                log "  installing software-properties-common (needed for add-apt-repository)"
-                sudo apt-get install -y software-properties-common
-            fi
-            if ! grep -rq 'lemonade-team' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
-                log "  adding PPA: ppa:lemonade-team/stable"
-                sudo add-apt-repository -y ppa:lemonade-team/stable
-                sudo apt-get update
-            else
-                log "  PPA ppa:lemonade-team/stable already present, skipping add"
-            fi
-            log "  apt-get install lemonade-server"
-            sudo apt-get install -y lemonade-server
-
-            # Per operator request: keep the PPA-shipped systemd unit
-            # DISABLED + STOPPED. The .service file stays on disk so the
-            # operator can `systemctl start lemonade-server` if they
-            # decide to flip later. `|| true` because the unit name has
-            # changed across PPA versions before and a not-found is fine.
-            if systemctl list-unit-files 2>/dev/null | grep -q '^lemonade-server\.service'; then
-                log "  disabling + stopping lemonade-server.service (manual-start per operator request)"
-                sudo systemctl disable lemonade-server.service 2>/dev/null || true
-                sudo systemctl stop    lemonade-server.service 2>/dev/null || true
-            else
-                log "  no lemonade-server.service registered (nothing to disable)"
-            fi
-
-            log "Lemonade Server installed. Manual start:  lemonade-server serve --no-tray --port 13305"
-            ;;
-        debian)
-            warn "Lemonade Server: Debian path is 'build from source' upstream — skipping the PPA install"
-            warn "  follow https://lemonade-server.ai/docs/guide/install/ for the source build,"
-            warn "  or pass --no-lemonade next run to silence this notice."
-            ;;
-        *)
-            warn "Lemonade Server: distro '${distro_id:-unknown}' is not a supported install path here"
-            warn "  Ubuntu: PPA install runs automatically. Other distros: see"
-            warn "  https://lemonade-server.ai/docs/guide/install/ . Pass --no-lemonade to skip."
-            ;;
-    esac
-fi
-
 # ---------- voice check: is Kokoro the engine in use? -----------------------
 # The installed binary reads the installed INI exactly as the service will
 # and lists the voices, so a missing onnxruntime / espeak-ng / model file
@@ -3584,13 +3574,6 @@ printf '  if it crashes:\n'
 printf '    sudo journalctl -u %s -n 200 --no-pager\n' "$service_name"
 printf '    coredumpctl list %s   # then: coredumpctl gdb <PID>\n' "$service_name"
 echo
-if [[ $do_lemonade -eq 1 ]] && command -v lemonade-server >/dev/null 2>&1; then
-    printf '  lemonade  : installed (NPU sidecar), systemd unit DISABLED for manual use.\n'
-    printf '              start by hand:  lemonade-server serve --no-tray --port 13305\n'
-    printf '              web UI:         http://localhost:13305/\n'
-    printf '              flip to auto-start later: sudo systemctl enable --now lemonade-server\n'
-    echo
-fi
 if [[ $do_tdp_unlock -eq 1 ]] && systemctl is-enabled easyai-tdp.timer >/dev/null 2>&1; then
     printf '  tdp unlock: %sW cap, Tctl=%s°C, reapplied every 60s via easyai-tdp.timer\n' \
         "$tdp_watts" "$tdp_tctl"

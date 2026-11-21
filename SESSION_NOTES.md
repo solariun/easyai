@@ -305,6 +305,26 @@ Webui title default also flips to `"Deep"`.
 ## 5. Recent commits (most recent first)
 
 ```
+2026-11-21 — Vulkan: every llama.cpp shader feature compiled in.
+             Operator ask: "increase the speed of my GPU processing",
+             "make it part of the installation process".
+
+  Found: Ubuntu 25.10 glslc (shaderc 2025.2) fails 5 of llama.cpp's 7
+  Vulkan feature tests (integer_dot, bfloat16, float_e4m3, float_e2m1,
+  coopmat2_decode_vector); CMake then leaves those shaders out silently →
+  "int dot: 0" on the Radeon 890M. Installer: glslc_missing_features runs
+  the pinned checkout's feature tests; on a miss it fetches LunarG SDK
+  1.4.363.1 (sha256 pin, x86_64), keeps only bin/glslc in
+  ~/opt/vulkan-sdk/<ver>, passes -DVulkan_GLSLC_EXECUTABLE. Flags
+  --no-vulkan-sdk / --vulkan-sdk <ver>. A/B at run time:
+  GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1, GGML_VK_DISABLE_BFLOAT16=1.
+
+  NPU: llama.cpp has no AMD XDNA backend (upstream feature request
+  ggml-org/llama.cpp#21725 open). Lemonade Server (the NPU-capable
+  sidecar the installer used to add) was unused and is no longer
+  installed (spec "Installer: no Lemonade Server"); --no-lemonade /
+  --with-lemonade are accepted and ignored.
+
 2026-11-20/21 — models larger than memory: [ENGINE] memory_mode.
              Operator ask: "load models too big to fit on the memory
              and page it from the disk ... a page cache for hot expert

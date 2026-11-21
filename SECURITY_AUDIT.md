@@ -36,7 +36,7 @@ narrative record.
 | Installer hardening | [§20.4](#204-medium--installer-numeric-flags-flow-into-ini-via-heredoc-without-validation), [§20.5](#205-low--easyai-ini-bak-could-inherit-loose-permissions), [§22.3](#223-low--installer-non-numeric-knobs-flow-into-ini-without-shape-validation-fixed) |
 | Concurrency | [§10](#10-concurrency) |
 | Memory ownership | [§11](#11-memory--resource-ownership) |
-| Disk-paged MoE experts (`memory_mode`, `/proc/self/maps`, `preadv2`, installer INI upgrade) | [§26](#26-eleventh-pass--2026-11-20-disk-paged-moe-experts-memory_mode) |
+| Disk-paged MoE experts (`memory_mode`, `/proc/self/maps`, `preadv2`, installer INI upgrade, Vulkan SDK `glslc` fetch) | [§26](#26-eleventh-pass--2026-11-20-disk-paged-moe-experts-memory_mode) |
 
 ---
 
@@ -2793,7 +2793,25 @@ ini`, which keeps the file's inode, owner and `0640 root:easyai` mode (the
 INI may carry `[MCP_USER]` tokens, cf. §20.5). Existing values are never
 rewritten. Tested in `tests/test_installer.sh` on temp files.
 
-### 26.6 Accepted residual risk
+### 26.6 NEW SURFACE — installer fetches the LunarG SDK's `glslc` (2026-11-21)
+
+On a Vulkan build whose distro `glslc` cannot compile one of llama.cpp's
+shader feature tests, the installer downloads
+`https://sdk.lunarg.com/sdk/download/<ver>/linux/vulkansdk-linux-x86_64-<ver>.tar.xz`
+(HTTPS, `curl -f`, no `-k`) into a `mktemp -d` directory as the operator,
+checks it against a sha256 pinned in the script (`vulkan_sdk_sha256`, taken
+from LunarG's `files.json`; the pinned 1.4.363.1 was 18 days old when
+pinned), and extracts ONE member — `<ver>/x86_64/bin/glslc` — into
+`$src_root/vulkan-sdk/` (operator-owned, never root, never on `PATH`). The
+archive and temp dir are deleted. A mismatch removes the file and the build
+falls back to the distro `glslc` (warn mode, same helper as the voice
+models). `glslc` runs only at build time as the operator; nothing from the
+SDK is installed system-wide or loaded by the service — the compiled SPIR-V
+is part of `libggml-vulkan.so`, as before. A `--vulkan-sdk <ver>` without a
+pin downloads with an "unverified" warning, like `--ort-version`.
+`--no-vulkan-sdk` skips the whole step.
+
+### 26.7 Accepted residual risk
 
 - `EASYAI_PAGING_DEBUG` (environment, operator-only) prints tensor names
   of the loaded model to stderr; no request data.

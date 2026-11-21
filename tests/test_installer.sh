@@ -88,4 +88,30 @@ printf '[SERVER]\nport = 80\n' > "$tmpd/c.ini"
 ini_add_engine_keys "$tmpd/c.ini" >/dev/null
 name="[ENGINE] appended";           check test "$(grep -c '^\[ENGINE\]$' "$tmpd/c.ini")" = 1
 name="appended keys in [ENGINE]";   check test "$(engine_block "$tmpd/c.ini" | grep -cE '^memory_mode|^expert_cache|^#no_expert_prefetch')" = 3
+
+# ---- Vulkan: every llama.cpp shader feature compiled in (2026-11-21) -------
+eval "$(awk '/^glslc_missing_features\(\) \{/{p=1} p{print} p&&/^}/{exit}' "$script")"
+eval "$(awk '/^vulkan_sdk_sha256\(\) \{/{p=1} p{print} p&&/^}/{exit}' "$script")"
+mkdir -p "$tmpd/ft"; for t in coopmat integer_dot bfloat16; do echo "// $t" > "$tmpd/ft/$t.comp"; done
+printf '#!/bin/sh\nexit 0\n' > "$tmpd/glslc-new"
+printf '#!/bin/sh\nfor a; do last="$a"; done\ncase "$last" in *integer_dot*|*bfloat16*) echo "extension not supported" >&2; exit 1 ;; esac\nexit 0\n' > "$tmpd/glslc-old"
+chmod +x "$tmpd/glslc-new" "$tmpd/glslc-old"
+name="glslc that compiles all: nothing missing"; check test -z "$(glslc_missing_features "$tmpd/glslc-new" "$tmpd/ft")"
+name="old glslc: int dot + bf16 missing";        check test "$(glslc_missing_features "$tmpd/glslc-old" "$tmpd/ft" | tr '\n' ' ')" = "bfloat16 integer_dot "
+name="no glslc: every feature missing";          check test "$(glslc_missing_features "" "$tmpd/ft" | wc -l)" = 3
+vk_default="$(awk -F'"' '/^vulkan_sdk_version=/{print $2; exit}' "$script")"
+name="default Vulkan SDK has a sha256 pin";      check test "$(vulkan_sdk_sha256 "vulkansdk-linux-x86_64-$vk_default.tar.xz" | grep -cE '^[0-9a-f]{64}$')" = 1
+name="SDK download is sha256-verified";          check grep -q 'verify_sha256 "\$vk_tmp/\$vk_tgz" "\$(vulkan_sdk_sha256 "\$vk_tgz")"' "$script"
+name="only glslc is extracted";                  check grep -q 'tar -xJf "\$vk_tmp/\$vk_tgz" -C "\$src_root/vulkan-sdk" "\$vulkan_sdk_version/x86_64/bin/glslc"; then' "$script"
+name="glslc passed to cmake";                    check grep -q 'cmake_flags+=( -DVulkan_GLSLC_EXECUTABLE="\$vk_glslc" )' "$script"
+name="feature tests of the pinned llama.cpp";    check grep -q 'vk_tests="\$llama_dir/ggml/src/ggml-vulkan/vulkan-shaders/feature-tests"' "$script"
+name="--no-vulkan-sdk flag";                     check grep -q -- '--no-vulkan-sdk)    do_vulkan_sdk=0' "$script"
+
+# ---- Lemonade Server is no longer installed (2026-11-21) -------------------
+name="no Lemonade PPA";             check test "$(grep -c 'lemonade-team' "$script")" = 0
+name="no lemonade-server install";  check test "$(grep -cE 'apt-get install .*lemonade' "$script")" = 0
+name="no do_lemonade switch";       check test "$(grep -c 'do_lemonade' "$script")" = 0
+# Old command lines still run: the two flags are accepted and ignored under set -euo pipefail.
+awk '/^while \[\[ \$# -gt 0 \]\]; do$/{p=1} p{print} p&&/^done$/{exit}' "$script" > "$tmpd/argloop.sh"
+name="--no-lemonade / --with-lemonade accepted"; check bash -c 'set -euo pipefail; f="$1"; set -- --no-lemonade --with-lemonade; source "$f" 2>/dev/null; test $# -eq 0' _ "$tmpd/argloop.sh"
 exit $fail

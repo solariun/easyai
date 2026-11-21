@@ -739,6 +739,34 @@ model.gguf && chown easyai:easyai model.gguf`.
 The installer adds this `Environment=` line on AMD GPUs. Substantial
 shader-compile speedup on RADV.
 
+### Vulkan shader features — `int dot`, bf16, fp8, fp4 (2026-11-21)
+
+llama.cpp compiles its Vulkan shaders at build time with `glslc` and checks
+first which GLSL extensions that `glslc` knows. Every shader of an extension
+it does not know is left out **without an error**, and the GPU never uses
+that path. Ubuntu 25.10's `glslc` (shaderc 2025.2) does not know
+`GL_EXT_integer_dot_product`, `GL_EXT_bfloat16`, `GL_EXT_float_e4m3`,
+`GL_EXT_float_e2m1` or the coopmat2 decode extension, so ai-pro's server
+logged `int dot: 0` although the Radeon 890M has int8 dot-product hardware.
+Check yours:
+
+```bash
+journalctl -u easyai-server -b | grep "ggml_vulkan: 0 ="
+```
+
+The installer now runs llama.cpp's own feature tests
+(`ggml/src/ggml-vulkan/vulkan-shaders/feature-tests/*.comp`) against the
+distro `glslc`. When one fails it downloads the pinned LunarG Vulkan SDK
+(`--vulkan-sdk <ver>`, default 1.4.363.1, sha256-checked, x86_64 only),
+keeps only its `glslc` (10 MB, `~/opt/vulkan-sdk/<ver>/x86_64/bin/glslc`)
+and builds with `-DVulkan_GLSLC_EXECUTABLE=` pointing at it. This applies to
+every Vulkan GPU — AMD, Intel and NVIDIA; what the GPU then uses is
+llama.cpp's choice per device (e.g. on AMD RDNA the int8 matrix-vector
+kernels for k-quants in generation, the int8 matrix kernels in prompts).
+`--no-vulkan-sdk` keeps the distro `glslc`. The same switches exist at run
+time for A/B tests: `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1`,
+`GGML_VK_DISABLE_BFLOAT16=1` (a drop-in, see §2).
+
 ### CPU threads
 
 ```
@@ -1215,6 +1243,21 @@ sudo rm -rf /etc/easyai/
 
 # user
 sudo userdel easyai
+```
+
+### Lemonade Server (installed by the installer until 2026-11-21)
+
+Installers before 2026-11-21 also installed AMD's Lemonade Server from the
+`lemonade-team` PPA as an NPU sidecar. easyai never used it, and the
+installer no longer installs it (`--no-lemonade` / `--with-lemonade` are
+accepted and ignored). An upgrade leaves an existing copy alone; remove it
+by hand when nothing else uses it (`lemonade status` → "No models loaded"):
+
+```bash
+sudo systemctl disable --now lemond.service
+sudo apt-get purge -y lemonade-server && sudo apt-get autoremove -y
+sudo rm -f /etc/apt/sources.list.d/lemonade-team-ubuntu-stable-*.sources
+sudo rm -rf /etc/lemonade /var/lib/lemonade; sudo userdel lemonade 2>/dev/null || true
 ```
 
 ---

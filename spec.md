@@ -2532,6 +2532,102 @@ flowchart LR
 - Languages: pt and en voices ship; whisper detects others and the
   answer is spoken with the `en` voice.
 
+## Vulkan shader compiler — every llama.cpp shader feature (AUTHORITATIVE — 2026-11-21)
+
+**Plain words.** Gustavo, 2026-11-21: "is there a way to increase the speed
+of my GPU processing?" → "Yes, build and test" → "also make it part of the
+installation process, also add what we can add on all GPU of that class".
+llama.cpp's Vulkan backend compiles its shaders at build time with `glslc`.
+Before that, `ggml/src/ggml-vulkan/CMakeLists.txt` compiles one tiny test
+shader per optional GLSL extension (`vulkan-shaders/feature-tests/*.comp`)
+and, for each one `glslc` rejects, leaves every shader of that feature out
+— no error, no warning beyond a CMake status line. Ubuntu 25.10's `glslc`
+(shaderc 2025.2) rejects five of the seven: `GL_EXT_integer_dot_product`,
+`GL_EXT_bfloat16`, `GL_EXT_float_e4m3`, `GL_EXT_float_e2m1` and
+`GL_NV_cooperative_matrix_decode_vector`. So ai-pro's server logged
+`AMD Radeon 890M … int dot: 0` although RDNA 3.5 has int8 dot-product
+hardware, and llama.cpp never used its int8 kernels there. Code:
+`scripts/install_easyai_server.sh` (`glslc_missing_features`,
+`vulkan_sdk_sha256`, the `vulkan)` case of the build step). Test:
+`tests/test_installer.sh`.
+
+### Rules
+
+1. On a Vulkan build the installer runs llama.cpp's own feature tests of the
+   pinned checkout (`$llama_dir/ggml/src/ggml-vulkan/vulkan-shaders/
+   feature-tests/*.comp`) with the distro `glslc`, the same way CMake does
+   (`-fshader-stage=compute --target-env=vulkan1.3`). All compile → the
+   distro `glslc` is used.
+2. Any test fails, `do_vulkan_sdk = 1` (default) and the machine is x86_64 →
+   the installer downloads the pinned LunarG Vulkan SDK
+   (`vulkan_sdk_version`, default 1.4.363.1, `--vulkan-sdk <ver>`),
+   verifies its sha256 (`vulkan_sdk_sha256`; a version without a pin
+   downloads with an "unverified" warning), extracts only
+   `<ver>/x86_64/bin/glslc` into `$src_root/vulkan-sdk/` (10 MB; the
+   366 MB archive is deleted) and re-runs the tests with it. A download or
+   checksum failure falls back to the distro `glslc` with a warning — the
+   build never stops for this. An already-extracted `glslc` is reused.
+3. The chosen `glslc` is always passed as `-DVulkan_GLSLC_EXECUTABLE=`, so
+   a path cached by an earlier configure never outlives the decision.
+4. `--no-vulkan-sdk`, a non-x86_64 machine (LunarG ships no Linux SDK for
+   it) or no feature-tests directory → distro `glslc`, with a warning that
+   names the features left out.
+5. Nothing changes at run time: llama.cpp decides per device which compiled
+   paths to use (int8 dot product only when the device reports it
+   accelerated; bf16 / fp8 / fp4 only when the device has them). The
+   switches `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1` and
+   `GGML_VK_DISABLE_BFLOAT16=1` remain for A/B tests.
+
+### Decisions
+
+- **Applies to every Vulkan GPU, not only AMD APUs.** The gap is in the
+  build tool, so AMD (RDNA int8 dot), Intel (Arc/Xe int8 dot, bf16) and
+  NVIDIA (coopmat2 decode, fp8) gain the same way; the device still decides.
+- **LunarG SDK, glslc only.** It is the toolchain llama.cpp's own CI uses,
+  it publishes a sha256 per archive, and its `glslc` is self-contained
+  (needs only libstdc++). Nothing else from the SDK is kept or installed;
+  the service never loads it (the SPIR-V is compiled into
+  `libggml-vulkan.so`).
+- **Fallback, not failure.** A box without internet still builds, as before.
+- **No GPU clock pinning.** `power_dpm_force_performance_level = high` was
+  not measured (needs root on ai-pro); the TDP is already set by
+  `easyai-tdp` (54 W). Not added until measured.
+
+## Installer: no Lemonade Server (AUTHORITATIVE — 2026-11-21)
+
+**Plain words.** Gustavo, 2026-11-21, after a look at adding Lemonade's API
+to easyai: "lets undo the lemonade compatibility and clean it all up if it
+is not being used". The installer had installed AMD's Lemonade Server
+(PPA `lemonade-team/stable`, package `lemonade-server`) by default as an
+NPU sidecar for manual experiments. On ai-pro it was never used: no
+engine, no model, no request since it started, and Lemonade 11 renamed its
+unit to `lemond.service`, so the installer's "disable the unit" step no
+longer worked and it ran all the time.
+
+### Rules
+
+1. The installer installs nothing from Lemonade: no PPA, no package, no
+   unit handling, no summary line (`do_lemonade` is gone).
+2. `--no-lemonade` and `--with-lemonade` are accepted and ignored with a
+   one-line note on stderr, so existing command lines keep running.
+3. An existing Lemonade install is left alone by `--upgrade`; removal is
+   manual (LINUX_SERVER.md §13 "Lemonade Server").
+4. easyai serves no Lemonade API. The NPU stays unused by easyai: llama.cpp
+   has no AMD XDNA backend (ggml-org/llama.cpp#21725, open).
+
+### Decisions
+
+- **Remove, not fix.** Fixing the unit name would keep a second LLM server,
+  a PPA and a broadcasting service on every box for an experiment nobody
+  runs. The Lemonade API compatibility layer was scoped (≈ 40 endpoints
+  under four prefixes) and dropped before any code was written: too much
+  surface for no current user.
+- **No automatic purge.** The installer never removes a package an operator
+  may have started using; the manual steps are documented instead.
+
+Test: `tests/test_installer.sh` (no PPA, no package install, no
+`do_lemonade`, both flags accepted under `set -euo pipefail`).
+
 ## Disk-paged MoE experts — models larger than memory (AUTHORITATIVE — 2026-11-20)
 
 Gustavo, 2026-11-20: "change the easyai code to be able to load models too

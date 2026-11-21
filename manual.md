@@ -394,7 +394,7 @@ git clone https://github.com/ggml-org/whisper.cpp   # optional
 | CMake ≥ 3.18           | build system                       |
 | A C++17 compiler       | the library is C++17               |
 | (Apple) Xcode CLT      | Metal headers for GPU acceleration |
-| (Linux/Win) Vulkan SDK | optional; pass `-DGGML_VULKAN=ON`  |
+| (Linux/Win) Vulkan SDK | optional; pass `-DGGML_VULKAN=ON`. Its `glslc` must know `GL_EXT_integer_dot_product` / `GL_EXT_bfloat16`, or those shaders are left out without an error (Ubuntu 25.10's does not; the installer then uses the LunarG SDK's — `-DVulkan_GLSLC_EXECUTABLE=…`) |
 
 | Optional        | Used by             |
 |-----------------|---------------------|

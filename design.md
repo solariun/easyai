@@ -19,7 +19,7 @@ Everything easyai pulls in, why, and where it lives:
 | **nlohmann::json**     | request/response JSON, tool args/results  | vendored by llama.cpp (`../llama.cpp/vendor/nlohmann/json.hpp`)         | header-only; included only where needed                  |
 | **libcurl** (optional) | the unified `web` tool (action=`search` / `fetch`; `engine="auto"` default cascades google → brave → ddg-lite → bing → ddg, plus explicit `engine="google"` / `"brave"` / `"ddg-lite"` / `"bing"` / `"ddg"` overrides) | system package (`libcurl-dev`) | `libeasyai.so` `PRIVATE` when `EASYAI_WITH_CURL=ON`      |
 | **OpenSSL** (optional) | future HTTPS for `easyai::Client`         | system package (`libssl-dev`)                                           | not yet linked — see [`include/easyai/client.hpp`](include/easyai/client.hpp) |
-| **glslc / Vulkan SDK** | shader compilation when `GGML_VULKAN=ON`  | system package                                                          | build-time only, baked into `libggml-vulkan.so`         |
+| **glslc / Vulkan SDK** | shader compilation when `GGML_VULKAN=ON`  | system package; the installer swaps in the pinned LunarG SDK's `glslc` (sha256-checked, only that binary kept) when the distro one cannot compile every llama.cpp shader feature (int8 dot, bf16, fp8, fp4) | build-time only, baked into `libggml-vulkan.so`         |
 | **systemd-coredump**   | crash capture for the production server   | system package, declared by `scripts/install_easyai_server.sh`          | runtime, optional                                        |
 
 **No header-leak guarantee** for the public ABI: `easyai/engine.hpp` only

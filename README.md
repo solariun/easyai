@@ -94,6 +94,18 @@ A running log of user-facing changes. Latest first — keep this list
 current as features land so anyone returning to the repo (or
 landing on it for the first time) sees what shipped recently.
 
+### 2026-11-21 — every Vulkan shader feature compiled in
+
+- **Ubuntu's `glslc` silently dropped llama.cpp's int8 dot-product, bf16,
+  fp8 and fp4 shaders** (ai-pro logged `int dot: 0` on a GPU that has int8
+  dot hardware). The installer now runs llama.cpp's own shader feature
+  tests; when the distro `glslc` fails one, it fetches the pinned LunarG
+  Vulkan SDK (sha256-checked, only its 10 MB `glslc` kept in
+  `~/opt/vulkan-sdk/`) and builds with it. Applies to every Vulkan GPU;
+  `--no-vulkan-sdk` opts out, `--vulkan-sdk <ver>` picks another SDK.
+  Details: [`LINUX_SERVER.md`](LINUX_SERVER.md) "Vulkan shader features",
+  `spec.md` "Vulkan shader compiler".
+
 ### 2026-11-20 — models larger than memory (`memory_mode`)
 
 - **A GGUF bigger than RAM now loads.** `[ENGINE] memory_mode = auto |
@@ -2528,7 +2540,7 @@ Pick the matching configure command for your machine; rebuild with
 |-------------------------------------------|------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------|
 | **Apple Silicon / Intel Mac (Metal)**     | `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release`                                   | Metal is auto-detected on macOS — nothing extra to set.                              |
 | **NVIDIA GPU (CUDA)**                     | `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON`                    | Needs the CUDA Toolkit (`nvcc`). Optionally pin GPU arch with `-DCMAKE_CUDA_ARCHITECTURES=89`. |
-| **AMD / Intel / cross-vendor (Vulkan)**   | `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON`                  | Needs the Vulkan SDK on Linux/Windows. Works on AMD RX/Pro, Intel Arc, NVIDIA too.   |
+| **AMD / Intel / cross-vendor (Vulkan)**   | `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON`                  | Needs the Vulkan SDK on Linux/Windows. Works on AMD RX/Pro, Intel Arc, NVIDIA too. A distro `glslc` that is too old silently drops llama.cpp's int8-dot / bf16 / fp8 / fp4 shaders (`int dot: 0` in the log); add `-DVulkan_GLSLC_EXECUTABLE=<LunarG SDK>/x86_64/bin/glslc` — the installer does this for you. |
 | **AMD on Linux (ROCm/HIP)**               | `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGGML_HIP=ON -DAMDGPU_TARGETS=gfx1100` | Replace the gfx ID with your card's. Requires ROCm 6+.                                |
 | **CPU-only (any OS)**                     | `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release`                                   | Then run with `-ngl 0` (CLI/server) or `.gpu_layers(0)` (lib).                       |
 
