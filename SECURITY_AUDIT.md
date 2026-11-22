@@ -2811,6 +2811,14 @@ is part of `libggml-vulkan.so`, as before. A `--vulkan-sdk <ver>` without a
 pin downloads with an "unverified" warning, like `--ort-version`.
 `--no-vulkan-sdk` skips the whole step.
 
+2026-11-22: `vulkan_shader_reset` may remove
+`$easyai_dir/build/_deps/llama.cpp/ggml/src/ggml-vulkan` (generated build
+output, operator-owned) when the recorded `glslc` differs. The path is
+fixed in the script — no part of it comes from the INI, a flag value or
+the network — and the removal runs as the operator, never under sudo. The
+record file `build/.easyai-vulkan-glslc` holds only the `glslc` path and
+its `--version` line, and is compared, never executed.
+
 ### 26.7 Accepted residual risk
 
 - `EASYAI_PAGING_DEBUG` (environment, operator-only) prints tensor names

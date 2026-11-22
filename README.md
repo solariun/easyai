@@ -94,6 +94,15 @@ A running log of user-facing changes. Latest first — keep this list
 current as features land so anyone returning to the repo (or
 landing on it for the first time) sees what shipped recently.
 
+### 2026-11-22 — `--upgrade` follows a `glslc` change on its own
+
+- **The first `--upgrade` with the SDK `glslc` failed in `ggml-vulkan`**
+  (`mul_mat_vec_q4_0_q8_1_f32_data was not declared`): llama.cpp kept the
+  shader header made by the old `glslc`. The installer now records which
+  `glslc` a build dir was made with and, whenever that changes,
+  regenerates every Vulkan shader itself — no manual cleanup. Details:
+  [`LINUX_SERVER.md`](LINUX_SERVER.md) "Vulkan shader features".
+
 ### 2026-11-21 — every Vulkan shader feature compiled in
 
 - **Ubuntu's `glslc` silently dropped llama.cpp's int8 dot-product, bf16,

@@ -767,6 +767,19 @@ kernels for k-quants in generation, the int8 matrix kernels in prompts).
 time for A/B tests: `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1`,
 `GGML_VK_DISABLE_BFLOAT16=1` (a drop-in, see §2).
 
+The installer also keeps the build dir in step with its `glslc`
+(2026-11-22). llama.cpp's own build does not notice a `glslc` change: it
+keeps the old shader header next to newly generated shaders, and
+`ggml-vulkan` fails with `mul_mat_vec_q4_0_q8_1_f32_data was not declared`
+(the first `--upgrade` after the SDK `glslc` arrived hit this on ai-pro).
+So the installer records the `glslc` it used (path + version) in
+`build/.easyai-vulkan-glslc`. When a later run picks a different one — SDK
+added, SDK version changed, distro `glslc` updated, `--no-vulkan-sdk` — or
+the record is missing, it regenerates every Vulkan shader on its own and
+the log says `glslc changed since this build dir was made — regenerating
+every Vulkan shader`. That build takes a few minutes longer; the next ones
+are incremental again. Nothing to do by hand.
+
 ### CPU threads
 
 ```

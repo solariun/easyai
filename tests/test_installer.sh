@@ -107,6 +107,29 @@ name="glslc passed to cmake";                    check grep -q 'cmake_flags+=( -
 name="feature tests of the pinned llama.cpp";    check grep -q 'vk_tests="\$llama_dir/ggml/src/ggml-vulkan/vulkan-shaders/feature-tests"' "$script"
 name="--no-vulkan-sdk flag";                     check grep -q -- '--no-vulkan-sdk)    do_vulkan_sdk=0' "$script"
 
+# ---- A build dir follows its glslc (2026-11-22) -----------------------------
+# llama.cpp keeps a shader header made by an earlier glslc → ggml-vulkan breaks.
+eval "$(awk '/^vulkan_shader_reset\(\) \{/{p=1} p{print} p&&/^}/{exit}' "$script")"
+vkb="$tmpd/vkbuild"; vkd="$vkb/_deps/llama.cpp/ggml/src/ggml-vulkan"
+out="$(vulkan_shader_reset "$vkb" "/usr/bin/glslc shaderc v2025.2")"
+name="fresh build dir: nothing removed";          check test -z "$out"
+name="fresh build dir: glslc recorded";           check test "$(cat "$vkb/.easyai-vulkan-glslc")" = "/usr/bin/glslc shaderc v2025.2"
+mkdir -p "$vkd"; echo old > "$vkd/ggml-vulkan-shaders.hpp"
+out="$(vulkan_shader_reset "$vkb" "/usr/bin/glslc shaderc v2025.2")"
+name="same glslc: nothing removed";               check test -z "$out" -a -f "$vkd/ggml-vulkan-shaders.hpp"
+out="$(vulkan_shader_reset "$vkb" "/sdk/glslc shaderc v2026.4")"
+name="other glslc: Vulkan dir removed";           check test ! -e "$vkd"
+name="other glslc: says so";                      check grep -q 'regenerating every Vulkan shader' <<<"$out"
+name="other glslc: new one recorded";             check test "$(cat "$vkb/.easyai-vulkan-glslc")" = "/sdk/glslc shaderc v2026.4"
+name="other glslc: sibling build output kept";    check test -d "$vkb/_deps/llama.cpp"
+mkdir -p "$vkd"; rm "$vkb/.easyai-vulkan-glslc"
+out="$(vulkan_shader_reset "$vkb" "/sdk/glslc shaderc v2026.4")"
+name="no record (pre-2026-11-22 dir): reset once"; check test ! -e "$vkd"
+mkdir -p "$vkd"
+out="$(vulkan_shader_reset "$vkb" "/usr/bin/glslc shaderc v2025.2")"
+name="back to fewer features: reset";             check test -n "$out" -a ! -e "$vkd"
+name="installer resets before configuring";      check grep -q 'vk_reset="\$(vulkan_shader_reset "\$easyai_dir/build" "\${vk_glslc:-none} \${vk_ver}")"' "$script"
+
 # ---- Lemonade Server is no longer installed (2026-11-21) -------------------
 name="no Lemonade PPA";             check test "$(grep -c 'lemonade-team' "$script")" = 0
 name="no lemonade-server install";  check test "$(grep -cE 'apt-get install .*lemonade' "$script")" = 0

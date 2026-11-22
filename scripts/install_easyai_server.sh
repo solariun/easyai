@@ -775,6 +775,32 @@ glslc_missing_features() {
         fi
     done
 }
+# vulkan_shader_reset <build-dir> <glslc-id>
+#   llama.cpp's ggml-vulkan build does not follow a change of glslc: its
+#   ggml-vulkan-shaders.hpp is regenerated only when the generator's own
+#   sources change, and the vulkan-shaders-gen sub-build keeps every
+#   *_GLSLC_SUPPORT=ON it was ever given. A build dir made with one glslc
+#   then breaks with another (ai-pro 2026-11-22: header from the distro
+#   glslc, shaders from the SDK one → "mul_mat_vec_q4_0_q8_1_f32_data was
+#   not declared"). So when <glslc-id> (path + version) differs from the
+#   one the build dir recorded, or none is recorded, the generated Vulkan
+#   directory is removed — cmake recreates it at configure, and ggml-vulkan
+#   recompiles either way because the header it includes changes — and the
+#   new id is recorded. Prints a line when it removed something.
+vulkan_shader_reset() {
+    local build="$1" id="$2"
+    local rec="$build/.easyai-vulkan-glslc" vk="$build/_deps/llama.cpp/ggml/src/ggml-vulkan"
+    [[ -n "$build" ]] || return 0
+    if [[ -f "$rec" && "$(cat "$rec")" == "$id" ]]; then
+        return 0
+    fi
+    if [[ -d "$vk" ]]; then
+        rm -rf -- "$vk"
+        echo "glslc changed since this build dir was made — regenerating every Vulkan shader"
+    fi
+    mkdir -p "$build"
+    printf '%s\n' "$id" > "$rec"
+}
 # verify_sha256 <file> <want> [<label>] [die|warn]
 #   Prints "sha256 ok" when the file matches. On a mismatch the file is
 #   removed (sudo: most of them are root- or service-owned) and the install
@@ -1322,6 +1348,12 @@ if [[ $do_build -eq 1 ]]; then
             # Always passed: a cached path from an earlier run never outlives
             # the decision above (switching back to the distro glslc included).
             [[ -n "$vk_glslc" ]] && cmake_flags+=( -DVulkan_GLSLC_EXECUTABLE="$vk_glslc" )
+            # A different glslc than the build dir's → regenerate every shader
+            # (llama.cpp's build would mix old and new generated files).
+            vk_ver=""
+            [[ -n "$vk_glslc" ]] && vk_ver="$("$vk_glslc" --version 2>/dev/null | head -1 || true)"
+            vk_reset="$(vulkan_shader_reset "$easyai_dir/build" "${vk_glslc:-none} ${vk_ver}")"
+            [[ -n "$vk_reset" ]] && log "  $vk_reset"
             ;;
         cuda)    cmake_flags+=( -DGGML_CUDA=ON ) ;;
         hip)

@@ -305,6 +305,20 @@ Webui title default also flips to `"Deep"`.
 ## 5. Recent commits (most recent first)
 
 ```
+2026-11-22 — installer: a build dir follows its glslc.
+             Operator: "install sh --upgrade is failing badly",
+             "the installer needs to handle this in the future".
+
+  Found: ai-pro's build/ kept ggml-vulkan-shaders.hpp from 2026-10-15
+  (distro glslc, no int8-dot shaders); the SDK glslc regenerated the
+  .comp.cpp files, which reference mul_mat_vec_*_q8_1_f32_data → compile
+  error. llama.cpp regenerates the header only when vulkan-shaders-gen's
+  sources change; its sub-build also keeps every *_GLSLC_SUPPORT=ON it
+  was given. Fix: vulkan_shader_reset records "<glslc path> <--version>"
+  in build/.easyai-vulkan-glslc and removes
+  build/_deps/llama.cpp/ggml/src/ggml-vulkan when it differs or is
+  missing (spec "Vulkan shader compiler" rule 6).
+
 2026-11-21 — Vulkan: every llama.cpp shader feature compiled in.
              Operator ask: "increase the speed of my GPU processing",
              "make it part of the installation process".
